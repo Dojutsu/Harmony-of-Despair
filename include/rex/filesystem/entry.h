@@ -103,6 +103,9 @@ class Entry {
   bool is_read_only() const;
 
   Entry* GetChild(const std::string_view name);
+  /// Walks @p path component-by-component starting from this entry.
+  /// Returns this entry when @p path is empty (i.e. zero path components),
+  /// nullptr if any intermediate component does not exist.
   Entry* ResolvePath(const std::string_view path);
 
   const std::vector<std::unique_ptr<Entry>>& children() const { return children_; }
