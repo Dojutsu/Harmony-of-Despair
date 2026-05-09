@@ -103,13 +103,7 @@ void ProgressView::binaryInfo(const rex::codegen::BinaryInfo& info) {
     filetime = "(none)";
   } else {
     std::time_t t = static_cast<std::time_t>(info.pe_time_date_stamp);
-    std::tm tm{};
-#ifdef _WIN32
-    gmtime_s(&tm, &t);
-#else
-    gmtime_r(&t, &tm);
-#endif
-    filetime = fmt::format("{:%Y-%m-%d %H:%M:%S} UTC", tm);
+    filetime = fmt::format("{:%Y-%m-%d %H:%M:%S} UTC", fmt::gmtime(t));
   }
 
   std::array<KeyValueRow, 4> rows{{
