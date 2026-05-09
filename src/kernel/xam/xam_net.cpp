@@ -23,6 +23,7 @@
 #include <rex/hook.h>
 #include <rex/types.h>
 #include <rex/string.h>
+#include <rex/string/util.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xevent.h>
 #include <rex/system/xsocket.h>
@@ -469,7 +470,7 @@ u32 NetDll_XNetXnAddrToMachineId_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr, m
 
 void NetDll_XNetInAddrToString_entry(u32 caller, u32 in_addr, mapped_string string_out,
                                      u32 string_size) {
-  rex::string::rex_strcpy(string_out, string_size, "666.666.666.666");
+  rex::string::util_copy_truncating(string_out, "666.666.666.666", string_size);
 }
 
 // This converts a XNet address to an IN_ADDR. The IN_ADDR is used for

@@ -49,7 +49,19 @@ char* duplicate(const char* source);
 std::string to_utf8(const std::u16string_view source);
 std::u16string to_utf16(const std::string_view source);
 
-// Safe string copy - copies up to max_count chars and null-terminates
-void rex_strcpy(char* dest, size_t dest_size, const char* src, size_t max_count = 0);
+// Bounded strcpy. Always NUL-terminates within dst_size. Returns 0 on success
+// or an errno-style code (22 EINVAL on bad args, 34 ERANGE on truncation).
+int safe_strcpy(char* dst, size_t dst_size, const char* src);
+
+// Bounded strncpy with truncation. Copies up to count chars from src and
+// always NUL-terminates within dst_size. Unlike libc strncpy, does not NUL-pad
+// past the source's first NUL.
+int safe_strncpy(char* dst, size_t dst_size, const char* src, size_t count);
+
+// Bounded strcat. Always NUL-terminates within dst_size.
+int safe_strcat(char* dst, size_t dst_size, const char* src);
+
+// Reentrant tokenizer. Caller holds the context pointer across calls.
+char* safe_strtok(char* str, const char* delim, char** context);
 
 }  // namespace rex::string

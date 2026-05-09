@@ -31,12 +31,46 @@ char* duplicate(const char* source) {
   return strdup(source);
 }
 
-void rex_strcpy(char* dest, size_t dest_size, const char* src, size_t max_count) {
-  if (dest_size == 0)
-    return;
-  size_t copy_size = (max_count == 0) ? dest_size - 1 : std::min(max_count, dest_size - 1);
-  strncpy(dest, src, copy_size);
-  dest[copy_size] = '\0';
+int safe_strcpy(char* dst, size_t dst_size, const char* src) {
+  if (!dst || !src || dst_size == 0)
+    return 22;  // EINVAL
+  const size_t src_len = std::strlen(src);
+  if (src_len + 1 > dst_size) {
+    dst[0] = '\0';
+    return 34;  // ERANGE
+  }
+  std::memcpy(dst, src, src_len + 1);
+  return 0;
+}
+
+int safe_strncpy(char* dst, size_t dst_size, const char* src, size_t count) {
+  if (!dst || !src || dst_size == 0)
+    return 22;  // EINVAL
+  const size_t src_len = strnlen(src, count);
+  const size_t to_copy = std::min(src_len, dst_size - 1);
+  std::memcpy(dst, src, to_copy);
+  dst[to_copy] = '\0';
+  return (src_len > to_copy) ? 34 : 0;  // ERANGE on truncation
+}
+
+int safe_strcat(char* dst, size_t dst_size, const char* src) {
+  if (!dst || !src || dst_size == 0)
+    return 22;  // EINVAL
+  const size_t dst_len = std::strlen(dst);
+  if (dst_len >= dst_size) {
+    return 22;  // EINVAL
+  }
+  const size_t src_len = std::strlen(src);
+  if (dst_len + src_len + 1 > dst_size) {
+    dst[dst_len] = '\0';
+    return 34;  // ERANGE
+  }
+  std::memcpy(dst + dst_len, src, src_len + 1);
+  return 0;
+}
+
+char* safe_strtok(char* str, const char* delim, char** context) {
+  return strtok_r(str, delim, context);
 }
 
 }  // namespace rex::string

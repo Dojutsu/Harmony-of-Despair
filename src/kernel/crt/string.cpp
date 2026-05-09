@@ -16,6 +16,7 @@
 #endif
 
 #include <rex/hook.h>
+#include <rex/string.h>
 
 namespace rex::kernel::crt {
 
@@ -28,7 +29,9 @@ static int native_strncmp(const char* s1, const char* s2, size_t n) {
 }
 
 static char* native_strncpy(char* dst, const char* src, size_t n) {
-  return std::strncpy(dst, src, n);
+  // Truncating; does not NUL-pad past source's first NUL, unlike libc strncpy.
+  rex::string::safe_strncpy(dst, n, src, n);
+  return dst;
 }
 
 static char* native_strchr(const char* s, int c) {
@@ -44,7 +47,9 @@ static char* native_strrchr(const char* s, int c) {
 }
 
 static char* native_strtok(char* s, const char* delim) {
-  return std::strtok(s, delim);
+  // Non-reentrant per guest libc contract; concurrent guest threads will trample.
+  static char* context = nullptr;
+  return rex::string::safe_strtok(s, delim, &context);
 }
 
 static int native_stricmp(const char* s1, const char* s2) {
@@ -56,19 +61,7 @@ static int native_stricmp(const char* s1, const char* s2) {
 }
 
 static int native_strcpy_s(char* dst, size_t dstsz, const char* src) {
-  if (!dst || !src || dstsz == 0)
-    return 22;  // EINVAL
-#if REX_PLATFORM_WIN32
-  return strcpy_s(dst, dstsz, src);
-#else
-  const size_t src_len = std::strlen(src);
-  if (src_len + 1 > dstsz) {
-    dst[0] = '\0';
-    return 34;  // ERANGE
-  }
-  std::memcpy(dst, src, src_len + 1);
-  return 0;
-#endif
+  return rex::string::safe_strcpy(dst, dstsz, src);
 }
 
 // ---------------------------------------------------------------------------
@@ -80,19 +73,22 @@ static int native_lstrlenA(const char* s) {
 }
 
 static char* native_lstrcpyA(char* dst, const char* src) {
-  return std::strcpy(dst, src);
+  // Unbounded by guest contract.
+  rex::string::safe_strcpy(dst, SIZE_MAX, src);
+  return dst;
 }
 
 static char* native_lstrcpynA(char* dst, const char* src, int maxlen) {
   if (maxlen <= 0)
     return dst;
-  std::strncpy(dst, src, maxlen - 1);
-  dst[maxlen - 1] = '\0';
+  rex::string::safe_strncpy(dst, static_cast<size_t>(maxlen), src, static_cast<size_t>(maxlen) - 1);
   return dst;
 }
 
 static char* native_lstrcatA(char* dst, const char* src) {
-  return std::strcat(dst, src);
+  // Unbounded by guest contract.
+  rex::string::safe_strcat(dst, SIZE_MAX, src);
+  return dst;
 }
 
 static int native_lstrcmpiA(const char* s1, const char* s2) {

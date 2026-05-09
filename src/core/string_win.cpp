@@ -27,11 +27,20 @@ char* duplicate(const char* source) {
   return _strdup(source);
 }
 
-void rex_strcpy(char* dest, size_t dest_size, const char* src, size_t max_count) {
-  if (dest_size == 0)
-    return;
-  size_t count = (max_count == 0) ? _TRUNCATE : max_count;
-  strncpy_s(dest, dest_size, src, count);
+int safe_strcpy(char* dst, size_t dst_size, const char* src) {
+  return strcpy_s(dst, dst_size, src);
+}
+
+int safe_strncpy(char* dst, size_t dst_size, const char* src, size_t count) {
+  return strncpy_s(dst, dst_size, src, count);
+}
+
+int safe_strcat(char* dst, size_t dst_size, const char* src) {
+  return strcat_s(dst, dst_size, src);
+}
+
+char* safe_strtok(char* str, const char* delim, char** context) {
+  return strtok_s(str, delim, context);
 }
 
 }  // namespace rex::string
