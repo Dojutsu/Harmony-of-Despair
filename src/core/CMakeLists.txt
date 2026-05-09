@@ -38,6 +38,8 @@ if(WIN32)
         mapped_memory_win.cpp
         math_msvc.cpp
         memory_win.cpp
+        platform/console_win.cpp
+        platform/env_win.cpp
         seh_win.cpp
         socket_win.cpp
         string_win.cpp
@@ -56,6 +58,8 @@ elseif(UNIX)
         mapped_memory_posix.cpp
         math_gcc.cpp
         memory_posix.cpp
+        platform/console_posix.cpp
+        platform/env_posix.cpp
         seh_posix.cpp
         socket_posix.cpp
         string_posix.cpp
