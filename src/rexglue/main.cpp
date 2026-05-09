@@ -13,7 +13,6 @@
 #include "ui/ui.h"
 
 #include <chrono>
-#include <cstdlib>
 #include <map>
 #include <string>
 
@@ -22,6 +21,7 @@
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
+#include <rex/platform/env.h>
 #include <rex/result.h>
 #include <rex/version.h>
 
@@ -46,8 +46,10 @@ bool IsStderrTty() {
 }
 
 bool ColorEnabled(bool tty) {
-  if (const char* nc = std::getenv("NO_COLOR"); nc && *nc)
+  auto nc = rex::platform::env::get("NO_COLOR");
+  if (nc.has_value() && !nc->empty()) {
     return false;
+  }
   return tty;
 }
 

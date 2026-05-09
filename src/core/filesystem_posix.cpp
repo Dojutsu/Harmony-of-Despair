@@ -23,6 +23,7 @@
 #include <rex/assert.h>
 #include <rex/filesystem.h>
 #include <rex/logging.h>
+#include <rex/platform/env.h>
 #include <rex/string.h>
 
 #include <dirent.h>
@@ -63,25 +64,22 @@ std::filesystem::path GetExecutableFolder() {
 
 std::filesystem::path GetUserFolder() {
   // get preferred data home
-  char* home = std::getenv("XDG_DATA_HOME");
-  if (home) {
-    return std::string(home);
+  if (auto xdg = rex::platform::env::get("XDG_DATA_HOME")) {
+    return std::filesystem::path(*xdg);
   }
 
   // if XDG_DATA_HOME not set, fallback to HOME directory
-  home = std::getenv("HOME");
-
-  // if HOME not set, fall back to this
-  if (home == NULL) {
-    struct passwd pw1;
-    struct passwd* pw;
-    char buf[4096];  // could potentionally lower this
-    getpwuid_r(getuid(), &pw1, buf, sizeof(buf), &pw);
-    assert(&pw1 == pw);  // sanity check
-    home = pw->pw_dir;
+  if (auto home = rex::platform::env::get("HOME")) {
+    return std::filesystem::path(*home) / ".local" / "share";
   }
 
-  return std::filesystem::path(home) / ".local" / "share";
+  // if HOME not set, fall back to passwd entry
+  struct passwd pw1;
+  struct passwd* pw;
+  char buf[4096];  // could potentionally lower this
+  getpwuid_r(getuid(), &pw1, buf, sizeof(buf), &pw);
+  assert(&pw1 == pw);  // sanity check
+  return std::filesystem::path(pw->pw_dir) / ".local" / "share";
 }
 
 FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode) {

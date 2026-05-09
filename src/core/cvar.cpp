@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -19,6 +18,7 @@
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
+#include <rex/platform/env.h>
 
 #include <toml++/toml.hpp>
 
@@ -510,13 +510,13 @@ void ApplyEnvironment() {
   int count = 0;
   for (const auto& entry : GetRegistryStorage()) {
     std::string env_name = FlagNameToEnvVar(entry.name);
-    const char* env_value = std::getenv(env_name.c_str());
-    if (env_value != nullptr) {
-      if (entry.setter(env_value)) {
-        REXLOG_DEBUG("Env: {} = {} (from {})", entry.name, env_value, env_name);
+    auto env_value = rex::platform::env::get(env_name);
+    if (env_value.has_value()) {
+      if (entry.setter(*env_value)) {
+        REXLOG_DEBUG("Env: {} = {} (from {})", entry.name, *env_value, env_name);
         ++count;
       } else {
-        REXLOG_WARN("Env: failed to parse {} = {}", env_name, env_value);
+        REXLOG_WARN("Env: failed to parse {} = {}", env_name, *env_value);
       }
     }
   }
