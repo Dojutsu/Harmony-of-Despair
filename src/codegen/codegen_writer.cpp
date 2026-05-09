@@ -22,6 +22,7 @@
 
 #include <rex/codegen/function_graph.h>
 #include <rex/codegen/template_registry.h>
+#include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
 #include <rex/system/export_resolver.h>
@@ -294,7 +295,7 @@ void CodegenWriter::FlushPendingWrites() {
 
     bool shouldWrite = true;
 
-    FILE* f = fopen(filePath.c_str(), "rb");
+    FILE* f = rex::filesystem::OpenFile(rex::to_path(filePath), "rb");
     if (f) {
       std::vector<uint8_t> temp;
 
@@ -312,7 +313,7 @@ void CodegenWriter::FlushPendingWrites() {
     }
 
     if (shouldWrite) {
-      f = fopen(filePath.c_str(), "wb");
+      f = rex::filesystem::OpenFile(rex::to_path(filePath), "wb");
       if (!f) {
         REXCODEGEN_ERROR("Failed to open file for writing: {}", filePath);
         continue;

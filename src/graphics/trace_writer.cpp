@@ -42,11 +42,7 @@ bool TraceWriter::Open(const std::filesystem::path& path, uint32_t title_id) {
     std::filesystem::create_directories(base_path);
   }
 
-#ifdef _WIN32
-  file_ = _wfopen(canonical_path.c_str(), L"wb");
-#else
-  file_ = std::fopen(canonical_path.c_str(), "wb");
-#endif
+  file_ = rex::filesystem::OpenFile(canonical_path, "wb");
   if (!file_) {
     REXGPU_ERROR("TraceWriter: Failed to open trace file: {}", canonical_path.string());
     return false;
