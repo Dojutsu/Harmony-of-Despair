@@ -26,6 +26,7 @@
 #include <rex/graphics/registers.h>
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
+#include <rex/string/util.h>
 
 namespace rex::graphics {
 
@@ -55,7 +56,8 @@ bool TraceWriter::Open(const std::filesystem::path& path, uint32_t title_id) {
   header.version = kTraceFormatVersion;
   // Use a static commit string for rexglue
   std::memset(header.build_commit_sha, 0, sizeof(header.build_commit_sha));
-  std::strncpy(header.build_commit_sha, "rexglue-dev", sizeof(header.build_commit_sha) - 1);
+  rex::string::util_copy_truncating(header.build_commit_sha, "rexglue-dev",
+                                    sizeof(header.build_commit_sha));
   header.title_id = title_id;
   fwrite(&header, sizeof(header), 1, file_);
 
