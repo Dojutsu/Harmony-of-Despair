@@ -13,7 +13,6 @@
 #include "template_utils.h"
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <fstream>
 #include <optional>
@@ -124,7 +123,7 @@ std::string ExtractIncludeBasename(std::string_view target) {
   return std::string(pos == std::string_view::npos ? target : target.substr(pos + 1));
 }
 
-constexpr std::array<BreakingChangeRule, 47> kRules = {{
+constexpr BreakingChangeRule kRules[] = {
     {"PPC_HOOK", "REX_HOOK", ""},
     {"PPC_STUB", "REX_STUB", ""},
     {"PPC_STUB_LOG", "REX_STUB_LOG", ""},
@@ -173,7 +172,8 @@ constexpr std::array<BreakingChangeRule, 47> kRules = {{
     {"PPC_STORE_U32", "REX_STORE_U32", ""},
     {"PPC_STORE_U64", "REX_STORE_U64", ""},
     {"PPC_MEMORY_SIZE", "REX_MEMORY_SIZE", ""},
-}};
+    {"cache_path", "cache_root", "renamed: cache_path cvar -> cache_root"},
+};
 
 bool ConfirmSingleArgAllocateThunk(std::string_view line) {
   auto name_pos = line.find("AllocateThunk");
@@ -201,12 +201,12 @@ bool ConfirmSingleArgAllocateThunk(std::string_view line) {
   return false;
 }
 
-constexpr std::array<CallSiteRule, 2> kCallSiteRules = {{
+constexpr CallSiteRule kCallSiteRules[] = {
     {"GetArgument(\"game_directory\")", "removed positional argument 'game_directory'", "",
      nullptr},
     {"AllocateThunk(", "single-arg AllocateThunk call", "second arg is now caller_address",
      ConfirmSingleArgAllocateThunk},
-}};
+};
 
 using RuleIndex = std::unordered_map<std::string_view, const BreakingChangeRule*>;
 
@@ -302,11 +302,11 @@ std::string SummarizeRenames(const std::set<std::string>& reasons) {
 }  // namespace
 
 std::span<const BreakingChangeRule> DefaultBreakingChangeRules() {
-  return {kRules.data(), kRules.size()};
+  return {std::begin(kRules), std::end(kRules)};
 }
 
 std::span<const CallSiteRule> DefaultCallSiteRules() {
-  return {kCallSiteRules.data(), kCallSiteRules.size()};
+  return {std::begin(kCallSiteRules), std::end(kCallSiteRules)};
 }
 
 std::string RenderRexglueCmake(std::string_view project_name, std::string_view sdk_version,

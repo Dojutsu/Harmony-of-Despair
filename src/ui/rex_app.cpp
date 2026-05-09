@@ -101,9 +101,9 @@ bool ReXApp::SetupEnvironment() {
 
   // Cache: cvar override, or user_dir/cache
   std::filesystem::path cache_dir;
-  std::string cache_path_cvar = REXCVAR_GET(cache_path);
-  if (!cache_path_cvar.empty()) {
-    cache_dir = cache_path_cvar;
+  std::string cache_root_cvar = REXCVAR_GET(cache_root);
+  if (!cache_root_cvar.empty()) {
+    cache_dir = cache_root_cvar;
   } else {
     cache_dir = user_dir / "cache";
   }

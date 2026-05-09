@@ -31,7 +31,7 @@
 REXCVAR_DEFINE_STRING(game_data_root, "", "Runtime", "Override game data path");
 REXCVAR_DEFINE_STRING(user_data_root, "", "Runtime", "Override user data path");
 REXCVAR_DEFINE_STRING(update_data_root, "", "Runtime", "Override update data path");
-REXCVAR_DEFINE_STRING(cache_path, "", "Runtime", "Override shader cache path");
+REXCVAR_DEFINE_STRING(cache_root, "", "Runtime", "Override shader cache path");
 
 namespace rex {
 
