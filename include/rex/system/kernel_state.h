@@ -33,8 +33,8 @@
 #include <rex/system/xam/app_manager.h>
 #include <rex/system/xam/content_manager.h>
 #include <rex/system/xam/user_profile.h>
+#include <rex/platform/dynlib.h>
 #include <rex/system/function_dispatcher.h>
-#include <rex/system/shared_library.h>
 #include <rex/system/xcontent.h>
 #include <rex/system/xmemory.h>
 #include <rex/system/xobject.h>
@@ -361,10 +361,10 @@ class KernelState {
   std::unordered_set<std::string> loading_paths_;
   std::vector<TerminateNotification> terminate_notifications_;
   std::vector<RecompiledModuleInfo> recompiled_modules_;
-  std::unordered_map<std::string, SharedLibrary> module_libraries_;
+  std::unordered_map<std::string, rex::platform::DynamicLibrary> module_libraries_;
   // FreeLibrary deferred to teardown so guest threads still in unloaded code
   // don't return into freed pages. Drained at the end of ~KernelState.
-  std::vector<SharedLibrary> deferred_unload_libraries_;
+  std::vector<rex::platform::DynamicLibrary> deferred_unload_libraries_;
 
   uint32_t kernel_guest_globals_ = 0;
 

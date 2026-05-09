@@ -17,7 +17,6 @@ set(REXSYSTEM_SOURCES
     xsymboliclink.cpp
     xobject.cpp
     xmodule.cpp
-    shared_library.cpp
     guest_path.cpp
 
     # Utilities

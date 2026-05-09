@@ -680,7 +680,7 @@ object_ref<UserModule> KernelState::LoadUserModule(const std::string_view raw_na
 
     {
       auto global_lock = global_critical_region_.Acquire();
-      auto [lib_it, inserted] = module_libraries_.emplace(lib_key, SharedLibrary{});
+      auto [lib_it, inserted] = module_libraries_.emplace(lib_key, rex::platform::DynamicLibrary{});
       if (!inserted) {
         REXSYS_ERROR("Recompiled module '{}' already loaded; refusing duplicate load", lib_key);
         object_table()->ReleaseHandle(module->handle());
@@ -688,12 +688,13 @@ object_ref<UserModule> KernelState::LoadUserModule(const std::string_view raw_na
       }
     }
 
-    SharedLibrary library_local;
-    if (!library_local.Load(recomp->shared_lib_name)) {
+    rex::platform::DynamicLibrary library_local;
+    if (!library_local.Load(std::filesystem::path(recomp->shared_lib_name),
+                            rex::platform::SymbolResolution::kImmediate)) {
       REXSYS_ERROR("Failed to load shared library for module '{}'", recomp->pe_name);
     } else {
       auto register_func = reinterpret_cast<runtime::FunctionDispatcher::RegisterFn>(
-          library_local.GetSymbol("ReXModule_Register"));
+          library_local.GetRawSymbol("ReXModule_Register"));
       if (!register_func) {
         REXSYS_ERROR("ReXModule_Register not found in '{}'", recomp->shared_lib_name);
       } else {
