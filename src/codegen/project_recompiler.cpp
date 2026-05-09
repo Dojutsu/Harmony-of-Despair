@@ -138,11 +138,6 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
   const auto& entryConfig = targeted[0].config;
   auto configDir = manifest_.manifestDir;
   fs::path entryXexPath = configDir / entryConfig.filePath;
-  if (!entryConfig.patchedFilePath.empty()) {
-    auto patched = configDir / entryConfig.patchedFilePath;
-    if (fs::exists(patched))
-      entryXexPath = patched;
-  }
   if (!fs::exists(entryXexPath)) {
     return Err<void>(ErrorCategory::IO,
                      fmt::format("Entrypoint XEX not found: {}", entryXexPath.string()));
@@ -194,11 +189,6 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
   for (size_t i = 1; i < targeted.size(); ++i) {
     const auto& dllConfig = targeted[i].config;
     fs::path dllXexPath = configDir / dllConfig.filePath;
-    if (!dllConfig.patchedFilePath.empty()) {
-      auto patched = configDir / dllConfig.patchedFilePath;
-      if (fs::exists(patched))
-        dllXexPath = patched;
-    }
     if (!fs::exists(dllXexPath)) {
       return Err<void>(ErrorCategory::IO,
                        fmt::format("DLL XEX not found: {}", dllXexPath.string()));
