@@ -118,7 +118,7 @@ bool HostPathEntry::DeleteEntryInternal(Entry* entry) {
   }
 }
 
-void HostPathEntry::RenameEntryInternal(const std::vector<std::string_view>& path_parts) {
+X_STATUS HostPathEntry::RenameEntryInternal(const std::vector<std::string_view>& path_parts) {
   auto new_host_path = static_cast<HostPathDevice*>(device_)->host_path();
   for (const auto& path_part : path_parts) {
     new_host_path /= rex::to_path(path_part);
@@ -129,10 +129,11 @@ void HostPathEntry::RenameEntryInternal(const std::vector<std::string_view>& pat
   if (ec) {
     REXFS_ERROR("RenameEntryInternal: failed to rename '{}' to '{}': {}",
                 rex::path_to_utf8(host_path_), rex::path_to_utf8(new_host_path), ec.message());
-    return;
+    return X_STATUS_ACCESS_DENIED;
   }
 
   host_path_ = new_host_path;
+  return X_STATUS_SUCCESS;
 }
 
 void HostPathEntry::update() {

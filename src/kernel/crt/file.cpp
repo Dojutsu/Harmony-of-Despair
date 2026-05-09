@@ -342,7 +342,11 @@ u32 MoveFileA_entry(mapped_string lpExistingFileName, mapped_string lpNewFileNam
     return 0;
   }
 
-  src_entry->Rename(rex::to_path(dst));
+  X_STATUS rename_status = src_entry->Rename(rex::to_path(dst));
+  if (rename_status != X_STATUS_SUCCESS) {
+    REXKRNL_DEBUG("rexcrt_MoveFileA: rename failed '{}' -> '{}': {:#x}", src, dst, rename_status);
+    return 0;
+  }
   REXKRNL_TRACE("rexcrt_MoveFileA: '{}' -> '{}'", src, dst);
   return 1;
 }

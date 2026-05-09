@@ -206,6 +206,9 @@ constexpr CallSiteRule kCallSiteRules[] = {
      nullptr},
     {"AllocateThunk(", "single-arg AllocateThunk call", "second arg is now caller_address",
      ConfirmSingleArgAllocateThunk},
+    {"void RenameEntryInternal(", "Entry::RenameEntryInternal return type changed to X_STATUS",
+     "override now returns X_STATUS_SUCCESS on success (and a failure code on rename failure)",
+     nullptr},
 };
 
 using RuleIndex = std::unordered_map<std::string_view, const BreakingChangeRule*>;
