@@ -145,14 +145,12 @@
 #define REX_LACKS_FLOAT_FROM_CHARS 0
 #endif
 
-namespace rex {
+namespace rex::platform {
 
 #if REX_PLATFORM_WIN32
-const char kPathSeparator = '\\';
+inline constexpr char kPathSeparator = '\\';
 #else
-const char kPathSeparator = '/';
+inline constexpr char kPathSeparator = '/';
 #endif  // REX_PLATFORM_WIN32
 
-const char kGuestPathSeparator = '\\';
-
-}  // namespace rex
+}  // namespace rex::platform

@@ -23,7 +23,7 @@
 namespace rex::string {
 
 // UTF-8 path separator constants
-constexpr char32_t kUtf8PathSeparator = static_cast<char32_t>(rex::kPathSeparator);
+constexpr char32_t kUtf8PathSeparator = static_cast<char32_t>(rex::platform::kPathSeparator);
 constexpr char32_t kUtf8GuestPathSeparator = U'\\';
 
 size_t utf8_count(const std::string_view view);
