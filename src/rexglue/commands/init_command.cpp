@@ -173,7 +173,7 @@ Result<void> InitProject(const InitOptions& opts, const CliContext& ctx) {
 
   nlohmann::json data = {
       {"names", names_to_json(names)},
-      {"sdk_version", REXGLUE_VERSION_NUMERIC},
+      {"sdk_version", REXGLUE_VERSION_FLOOR},
       {"sdk_version_full", REXGLUE_VERSION_STRING},
       {"generated_on", IsoUtcStamp()},
       {"include_stamp", true},

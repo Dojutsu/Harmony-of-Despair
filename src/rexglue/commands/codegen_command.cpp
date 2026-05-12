@@ -291,7 +291,7 @@ Result<void> CodegenFromConfig(const std::string& config_path, const CliContext&
 
   fs::path manifest_path;
   ManifestSummary summary;
-  const std::string current_version = REXGLUE_VERSION_NUMERIC;
+  const std::string current_version = REXGLUE_VERSION_FLOOR;
 
   auto append_findings = [&](MigrationFindings findings) {
     post_plan.insert(post_plan.end(), std::make_move_iterator(findings.rewrites.begin()),
