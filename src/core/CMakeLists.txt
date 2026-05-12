@@ -16,7 +16,6 @@ add_library(rexcore OBJECT
     mutex.cpp
     ring_buffer.cpp
     sha256.cpp
-    string.cpp
     string_buffer.cpp
     threading.cpp
     timer_queue.cpp
@@ -42,10 +41,10 @@ if(WIN32)
         platform/env_win.cpp
         seh_win.cpp
         socket_win.cpp
-        string_win.cpp
         system_win.cpp
         threading_win.cpp
     )
+    target_compile_definitions(rexcore PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
 elseif(UNIX)
     target_sources(rexcore PRIVATE
         atomic_posix.cpp
@@ -62,7 +61,6 @@ elseif(UNIX)
         platform/env_posix.cpp
         seh_posix.cpp
         socket_posix.cpp
-        string_posix.cpp
         system_posix.cpp
         threading_posix.cpp
     )

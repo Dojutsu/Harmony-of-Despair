@@ -21,7 +21,6 @@
 #include <rex/hook.h>
 #include <rex/types.h>
 #include <rex/string.h>
-#include <rex/string/util.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/thread_state.h>
 #include <rex/system/xfile.h>
@@ -267,7 +266,7 @@ static void FillFindData(mapped_void lpFindFileData, rex::filesystem::Entry* ent
 
   // 0x2C cFileName[260]
   const auto& name = entry->name();
-  rex::string::util_copy_truncating(reinterpret_cast<char*>(buf + 0x2C), name, 260);
+  rex::string::copy_truncating(reinterpret_cast<char*>(buf + 0x2C), name, 260);
   // 0x130 cAlternateFileName[14] already zero
 }
 

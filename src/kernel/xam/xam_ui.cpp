@@ -12,7 +12,6 @@
 #include <rex/logging.h>
 #include <rex/runtime.h>
 #include <rex/string.h>
-#include <rex/string/util.h>
 #include <rex/system/flags.h>
 #include <rex/system/kernel_state.h>
 
@@ -356,7 +355,7 @@ class KeyboardInputDialog : public XamDialog {
     }
     text_ = default_text;
     text_buffer_.resize(max_length);
-    rex::string::util_copy_truncating(text_buffer_.data(), default_text_, text_buffer_.size());
+    rex::string::copy_truncating(text_buffer_.data(), default_text_, text_buffer_.size());
   }
 
   const std::string& text() const { return text_; }
@@ -437,7 +436,7 @@ u32 XamShowKeyboardUI_entry(u32 user_index, u32 flags, mapped_wstring default_te
       if (!default_text) {
         std::memset(buffer, 0, buffer_size);
       } else {
-        rex::string::util_copy_and_swap_truncating(buffer, default_text.value(), buffer_length);
+        rex::string::copy_and_swap_truncating(buffer, default_text.value(), buffer_length);
       }
       return X_ERROR_SUCCESS;
     };
@@ -452,7 +451,7 @@ u32 XamShowKeyboardUI_entry(u32 user_index, u32 flags, mapped_wstring default_te
       } else {
         // Zero the output buffer.
         auto text = rex::string::to_utf16(dialog->text());
-        rex::string::util_copy_and_swap_truncating(buffer, text, buffer_length);
+        rex::string::copy_and_swap_truncating(buffer, text, buffer_length);
         extended_error = X_ERROR_SUCCESS;
         length = 0;
         return X_ERROR_SUCCESS;
@@ -487,7 +486,7 @@ u32 XamShowKeyboardUI_entry(u32 user_index, u32 flags, mapped_wstring default_te
         if (!default_text) {
           std::memset(buffer, 0, buffer_size);
         } else {
-          rex::string::util_copy_and_swap_truncating(buffer, default_text.value(), buffer_length);
+          rex::string::copy_and_swap_truncating(buffer, default_text.value(), buffer_length);
         }
         return X_ERROR_SUCCESS;
       };

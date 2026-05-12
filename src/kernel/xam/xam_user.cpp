@@ -20,7 +20,7 @@
 #include <rex/math.h>
 #include <rex/hook.h>
 #include <rex/types.h>
-#include <rex/string/util.h>
+#include <rex/string.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xam/user_profile.h>
 #include <rex/system/xenumerator.h>
@@ -99,7 +99,7 @@ i32 XamUserGetSigninInfo_entry(u32 user_index, u32 flags, ppc_ptr_t<X_USER_SIGNI
   const auto& user_profile = REX_KERNEL_STATE()->user_profile();
   info->xuid = user_profile->xuid();
   info->signin_state = user_profile->signin_state();
-  rex::string::util_copy_truncating(info->name, user_profile->name(), rex::countof(info->name));
+  rex::string::copy_truncating(info->name, user_profile->name(), rex::countof(info->name));
   return X_E_SUCCESS;
 }
 
@@ -114,7 +114,7 @@ u32 XamUserGetName_entry(u32 user_index, mapped_string buffer, u32 buffer_len) {
 
   const auto& user_profile = REX_KERNEL_STATE()->user_profile();
   const auto& user_name = user_profile->name();
-  rex::string::util_copy_truncating(buffer, user_name, std::min(buffer_len, uint32_t(16)));
+  rex::string::copy_truncating(buffer, user_name, std::min(buffer_len, uint32_t(16)));
   return X_E_SUCCESS;
 }
 
@@ -133,7 +133,7 @@ u32 XamUserGetGamerTag_entry(u32 user_index, mapped_wstring buffer, u32 buffer_l
 
   const auto& user_profile = REX_KERNEL_STATE()->user_profile();
   auto user_name = rex::string::to_utf16(user_profile->name());
-  rex::string::util_copy_and_swap_truncating(buffer, user_name, std::min(buffer_len, uint32_t(16)));
+  rex::string::copy_and_swap_truncating(buffer, user_name, std::min(buffer_len, uint32_t(16)));
   return X_E_SUCCESS;
 }
 
@@ -582,7 +582,7 @@ class XStaticAchievementEnumerator : public XEnumerator {
       return 0;
     }
     auto ptr = sb.ptr;
-    rex::string::util_copy_and_swap_truncating(reinterpret_cast<char16_t*>(sb.data), string, count);
+    rex::string::copy_and_swap_truncating(reinterpret_cast<char16_t*>(sb.data), string, count);
     sb.ptr += static_cast<uint32_t>(size);
     sb.data += size;
     sb.remaining_bytes -= size;

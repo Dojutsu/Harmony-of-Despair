@@ -21,7 +21,6 @@
 #include <rex/runtime.h>
 #include <rex/stream.h>
 #include <rex/string.h>
-#include <rex/string/util.h>
 #include <rex/kernel/xboxkrnl/threading.h>
 #include <rex/system/kernel_module.h>
 #include <rex/system/kernel_state.h>
@@ -570,8 +569,7 @@ void KernelState::SetExecutableModule(object_ref<UserModule> module) {
       "xboxkrnl.exe", 0x01AF /* ExLoadedImageName */);
   if (export_entry) {
     char* variable_ptr = memory_->TranslateVirtual<char*>(export_entry->variable_ptr);
-    rex::string::util_copy_truncating(variable_ptr, executable_module_->path(),
-                                      kExLoadedImageNameSize);
+    rex::string::copy_truncating(variable_ptr, executable_module_->path(), kExLoadedImageNameSize);
   }
 
   // Spin up deferred dispatch worker.

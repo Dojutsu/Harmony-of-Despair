@@ -16,7 +16,6 @@
 #include <rex/math.h>
 #include <rex/ppc/context.h>
 #include <rex/string.h>
-#include <rex/string/util.h>
 
 namespace rex::runtime {
 
@@ -75,7 +74,7 @@ class Export {
 
   Export(uint16_t ordinal, Type type, const char* name, ExportTag::type tags = 0)
       : ordinal(ordinal), type(type), tags(tags), function_data({0}) {
-    rex::string::util_copy_truncating(this->name, name, rex::countof(this->name));
+    rex::string::copy_truncating(this->name, name, rex::countof(this->name));
   }
 
   uint16_t ordinal;
