@@ -11,6 +11,8 @@
 
 #include <rex/rex_app.h>
 
+#include <cstdlib>
+
 #include <rex/cvar.h>
 #include <rex/ui/flags.h>
 #include <rex/kernel/crt/heap.h>
@@ -401,7 +403,13 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
   if (runtime_ && runtime_->kernel_state()) {
     runtime_->kernel_state()->TerminateTitle();
   }
-  app_context().QuitFromUIThread();
+  // Hard-exit rather than run subsystem teardown, which can deadlock on a host
+  // lock still held by a straggler TerminateTitle left running. Flush (not
+  // ShutdownLogging, which frees loggers a straggler may still use); the OS
+  // reclaims the rest.
+  REXLOG_INFO("Title terminated; hard-exiting process.");
+  rex::FlushLogging();
+  std::_Exit(0);
 }
 
 void ReXApp::OnDestroy() {
