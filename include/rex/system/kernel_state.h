@@ -272,6 +272,7 @@ class KernelState {
   // Terminates a title: Unloads all modules, and kills all guest threads.
   // This DOES NOT RETURN if called from a guest thread!
   void TerminateTitle();
+  bool is_terminating_title() const { return terminating_title_.load(std::memory_order_acquire); }
 
   void RegisterThread(XThread* thread);
   void UnregisterThread(XThread* thread);
@@ -322,6 +323,8 @@ class KernelState {
   bool Restore(stream::ByteStream* stream);
 
  private:
+  void SignalAllWaitableObjects();
+  void WaitForThreadsToExit(const std::vector<object_ref<XThread>>& threads, uint32_t timeout_ms);
   void LoadKernelModule(object_ref<KernelModule> kernel_module);
   void InitializeProcess(X_KPROCESS* process, uint32_t process_type, uint8_t unk_18, uint8_t unk_19,
                          uint8_t unk_1A);
@@ -369,6 +372,7 @@ class KernelState {
   uint32_t kernel_guest_globals_ = 0;
 
   std::atomic<bool> dispatch_thread_running_;
+  std::atomic<bool> terminating_title_{false};
   object_ref<XHostThread> dispatch_thread_;
   // Must be guarded by the global critical region.
   util::NativeList dpc_list_;

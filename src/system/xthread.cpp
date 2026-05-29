@@ -135,6 +135,15 @@ XThread* XThread::GetCurrentThread() {
   return thread;
 }
 
+void XThread::CheckTitleTermination() {
+  XThread* self = GetBoundCurrentXThread();
+  if (self && self->is_guest_thread() && self->is_running() &&
+      self->kernel_state()->is_terminating_title()) {
+    // Unwind cleanly at this safe point. Does not return.
+    self->Exit(0);
+  }
+}
+
 uint32_t XThread::GetCurrentThreadHandle() {
   XThread* thread = XThread::GetCurrentThread();
   return thread->handle();
@@ -1003,8 +1012,10 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable, uint64_t in
     timeout_ms = 0;
   }
   timeout_ms = chrono::Clock::ScaleGuestDurationMillis(timeout_ms);
+  CheckTitleTermination();
   if (alertable) {
     auto result = rex::thread::AlertableSleep(std::chrono::milliseconds(timeout_ms));
+    CheckTitleTermination();
     switch (result) {
       default:
       case rex::thread::SleepResult::kSuccess:
@@ -1022,6 +1033,7 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable, uint64_t in
     } else {
       rex::thread::Sleep(std::chrono::milliseconds(timeout_ms));
     }
+    CheckTitleTermination();
   }
 
   return X_STATUS_SUCCESS;

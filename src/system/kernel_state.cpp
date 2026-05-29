@@ -20,18 +20,25 @@
 #include <rex/ppc/function.h>
 #include <rex/runtime.h>
 #include <rex/stream.h>
+#include <rex/thread/atomic.h>
 #include <rex/string.h>
 #include <rex/kernel/xboxkrnl/threading.h>
 #include <rex/system/kernel_module.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/function_dispatcher.h>
+#include <chrono>
+#include <thread>
+
 #include <rex/system/guest_path.h>
 #include <rex/system/user_module.h>
 #include <rex/system/xevent.h>
 #include <rex/system/xmodule.h>
+#include <rex/system/xmutant.h>
 #include <rex/system/xnotifylistener.h>
 #include <rex/system/xobject.h>
+#include <rex/system/xsemaphore.h>
 #include <rex/system/xthread.h>
+#include <rex/system/xtimer.h>
 
 namespace rex::system {
 
@@ -836,43 +843,116 @@ std::optional<KernelState::RecompiledModuleInfo> KernelState::FindRecompiledModu
   return std::nullopt;
 }
 
+void KernelState::SignalAllWaitableObjects() {
+  auto global_lock = global_critical_region_.Acquire();
+  auto objects = object_table_.GetAllObjects();
+  for (auto& obj : objects) {
+    switch (obj->type()) {
+      case XObject::Type::Event: {
+        auto* event = static_cast<XEvent*>(obj.get());
+        event->Set(0, false);
+        break;
+      }
+      case XObject::Type::Mutant: {
+        // ReleaseMutant reads the current thread; skip on non-kernel threads
+        // (host UI shutdown), where GetCurrentThread asserts.
+        if (XThread::IsInThread()) {
+          static_cast<XMutant*>(obj.get())->ReleaseMutant(0, false, false);
+        }
+        break;
+      }
+      case XObject::Type::Semaphore: {
+        auto* sem = static_cast<XSemaphore*>(obj.get());
+        (void)sem->ReleaseSemaphore(sem->maximum_count(), nullptr);
+        break;
+      }
+      case XObject::Type::Timer: {
+        auto* timer = static_cast<XTimer*>(obj.get());
+        timer->Cancel();
+        break;
+      }
+      default:
+        break;
+    }
+  }
+}
+
+void KernelState::WaitForThreadsToExit(const std::vector<object_ref<XThread>>& threads,
+                                       uint32_t timeout_ms) {
+  using clock = std::chrono::steady_clock;
+  auto deadline = clock::now() + std::chrono::milliseconds(timeout_ms);
+
+  for (;;) {
+    bool all_exited = true;
+    for (auto& thread : threads) {
+      if (thread->is_running()) {
+        all_exited = false;
+        break;
+      }
+    }
+    if (all_exited || clock::now() >= deadline) {
+      return;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+
 void KernelState::TerminateTitle() {
   REXSYS_DEBUG("KernelState::TerminateTitle");
-  auto global_lock = global_critical_region_.Acquire();
 
-  // Suspend all running guest threads so they stop touching shared state.
-  std::vector<XThread*> suspended_threads;
-  for (auto it = threads_by_id_.begin(); it != threads_by_id_.end(); ++it) {
-    if (!XThread::IsInThread(it->second) && it->second->is_guest_thread() &&
-        it->second->is_running()) {
-      it->second->thread()->Suspend();
-      suspended_threads.push_back(it->second);
+  constexpr uint32_t kCooperativeExitTimeoutMs = 200;
+
+  // Guest threads poll this flag in the kernel wait primitives
+  // (XThread::CheckTitleTermination) and self-exit.
+  terminating_title_.store(true, std::memory_order_release);
+
+  // Retained so a thread that wakes and exits below can't be freed mid-drain.
+  std::vector<object_ref<XThread>> target_threads;
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    for (auto& [id, thread] : threads_by_id_) {
+      if (!XThread::IsInThread(thread) && thread->is_guest_thread() && thread->is_running()) {
+        target_threads.push_back(retain_object(thread));
+      }
     }
   }
 
-  // Terminate each suspended thread. Must drop the lock since Terminate waits.
-  global_lock.unlock();
-  for (auto* thread : suspended_threads) {
-    thread->Terminate(0);
+  // Wake blocked waiters: signal objects (non-alertable waiters) and a bare user
+  // callback per target (alertable waits/delays).
+  SignalAllWaitableObjects();
+  for (auto& thread : target_threads) {
+    thread->thread()->QueueUserCallback([] {});
   }
-  global_lock.lock();
 
-  // Remove all guest threads from the map.
-  for (auto it = threads_by_id_.begin(); it != threads_by_id_.end();) {
-    if (!XThread::IsInThread(it->second) && it->second->is_guest_thread()) {
-      it = threads_by_id_.erase(it);
-    } else {
-      ++it;
+  WaitForThreadsToExit(target_threads, kCooperativeExitTimeoutMs);
+
+  // Stragglers are deliberately left running, never force-killed: TerminateThread
+  // orphans whatever host lock the thread holds (CRT heap, mutexes) and deadlocks
+  // teardown. Window close hard-exits and lets the OS reap them.
+
+  // Drop guest threads from the map.
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    for (auto it = threads_by_id_.begin(); it != threads_by_id_.end();) {
+      if (!XThread::IsInThread(it->second) && it->second->is_guest_thread()) {
+        it = threads_by_id_.erase(it);
+      } else {
+        ++it;
+      }
     }
   }
 
-  // If called from a guest thread, self-terminate last.
+  // Drop refs before the self-terminate below (which does not return) so they
+  // aren't leaked; reset the flag for relaunch.
+  target_threads.clear();
+  terminating_title_.store(false, std::memory_order_release);
+
+  // Self-terminate if called from a guest thread (e.g. XamLoaderTerminateTitle).
   if (XThread::IsInThread()) {
-    threads_by_id_.erase(XThread::GetCurrentThread()->thread_id());
-
-    // Now commit suicide (using Terminate, because we can't call into guest
-    // code anymore).
-    global_lock.unlock();
+    {
+      auto global_lock = global_critical_region_.Acquire();
+      threads_by_id_.erase(XThread::GetCurrentThread()->thread_id());
+    }
     XThread::GetCurrentThread()->Terminate(0);
   }
 }
