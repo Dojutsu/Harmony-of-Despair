@@ -156,6 +156,29 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   /// Use for cleanup that depends on runtime resources.
   virtual void OnGuestThreadExit(system::XThread* thread) { (void)thread; }
 
+  /// Detached overlay mode ("bring your own renderer"). Called once from
+  /// SetupPresentation when the SDK has no graphics backend
+  /// (config.graphics == nullptr, typically cleared in OnPreSetup) and the app
+  /// renders the guest itself. Return a unique_ptr to a ui::ImmediateDrawer
+  /// subclass that creates textures and submits via your renderer. ReXApp owns
+  /// the returned drawer (stored in immediate_drawer_, torn down after
+  /// imgui_drawer_).
+  ///
+  /// Construct the drawer presenter-less. REQUIRED CONTRACT: your CreateTexture
+  /// override MUST return nullptr (never crash or assert) when its GPU device
+  /// is not yet available, because the SDK uploads the ImGui font atlas lazily
+  /// on the first Draw and the device may only come up later (e.g. in the guest
+  /// D3D device-creation hook). NOTE: ImmediateDrawer::OnEnterPresenter() /
+  /// OnLeavePresenter() are NOT invoked in detached mode (the SDK never calls
+  /// SetPresenter with a non-null presenter on your drawer), so perform any
+  /// per-renderer GPU init lazily (on first CreateTexture/Begin), not in
+  /// OnEnterPresenter. You also own present timing / vsync / letterbox in this
+  /// mode.
+  ///
+  /// See ui::AppUIDrawContext for the per-frame draw-context handoff. Default:
+  /// no overlay (SDK presenter mode; this hook is never reached).
+  virtual std::unique_ptr<ui::ImmediateDrawer> OnCreateImmediateDrawer() { return nullptr; }
+
   // --- Init phase methods (called in order from OnInitialize) ---
 
   /// Resolve path defaults, load config TOML, initialize logging.
@@ -191,6 +214,11 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
 
  private:
   std::function<void(PathConfig)> MakeResumeCallback();
+
+  // Stand up the ImGui overlay stack (drawer, F3/Backtick/F4 binds, dialogs)
+  // independently of how the presenter/drawer were obtained. `presenter` may be
+  // null (detached mode).
+  void SetupOverlays(ui::Presenter* presenter, ui::ImmediateDrawer* drawer);
 
   // WindowedApp overrides
   bool OnInitialize() override;

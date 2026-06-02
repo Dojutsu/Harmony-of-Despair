@@ -1,6 +1,6 @@
 /**
  * @file        ui/rex_app.cpp
- * @brief       ReXApp implementation — compiled as part of the consumer executable
+ * @brief       ReXApp implementation - compiled as part of the consumer executable
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  *              All rights reserved.
@@ -303,46 +303,62 @@ bool ReXApp::SetupPresentation() {
 
   auto* graphics_system = static_cast<rex::graphics::GraphicsSystem*>(config_.graphics.get());
   if (graphics_system && graphics_system->presenter()) {
+    // SDK mode: the emulated-Xenos presenter drives the overlays.
     auto* presenter = graphics_system->presenter();
     auto* provider = graphics_system->provider();
     if (provider) {
       immediate_drawer_ = provider->CreateImmediateDrawer();
       if (immediate_drawer_) {
         immediate_drawer_->SetPresenter(presenter);
-        imgui_drawer_ = std::make_unique<rex::ui::ImGuiDrawer>(
-            window_.get(), 64, [this](ImFontAtlas* atlas) { OnConfigureFonts(atlas); });
-        imgui_drawer_->SetPresenterAndImmediateDrawer(presenter, immediate_drawer_.get());
-        rex::ui::RegisterBind("bind_debug_overlay", "F3", "Toggle debug overlay", [this] {
-          if (debug_overlay_) {
-            debug_overlay_.reset();
-          } else {
-            debug_overlay_ = std::make_unique<ui::DebugOverlayDialog>(imgui_drawer_.get(),
-                                                                      frame_stats_provider_);
-          }
-        });
-        rex::ui::RegisterBind("bind_console", "Backtick", "Toggle console overlay", [this] {
-          if (console_overlay_) {
-            console_overlay_.reset();
-          } else {
-            console_overlay_ = std::make_unique<ui::ConsoleDialog>(imgui_drawer_.get(), log_sink_);
-          }
-        });
-        rex::ui::RegisterBind("bind_settings", "F4", "Toggle settings overlay", [this] {
-          if (settings_overlay_) {
-            settings_overlay_.reset();
-          } else {
-            settings_overlay_ =
-                std::make_unique<ui::SettingsDialog>(imgui_drawer_.get(), config_path_);
-          }
-        });
-
-        OnCreateDialogs(imgui_drawer_.get());
+        SetupOverlays(presenter, immediate_drawer_.get());
       }
     }
     window_->SetPresenter(presenter);
+  } else if (!graphics_system) {
+    // Detached mode: the app brings its own renderer and drives its own paint
+    // loop. ReXApp owns the returned drawer via immediate_drawer_.
+    immediate_drawer_ = OnCreateImmediateDrawer();
+    if (immediate_drawer_) {
+      SetupOverlays(/*presenter=*/nullptr, immediate_drawer_.get());
+      // No window_->SetPresenter, no drawer SetPresenter: the app owns the
+      // surface and the present cadence.
+    }
   }
 
   return true;
+}
+
+void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDrawer* drawer) {
+  imgui_drawer_ = std::make_unique<rex::ui::ImGuiDrawer>(
+      window_.get(), 64, [this](ImFontAtlas* atlas) { OnConfigureFonts(atlas); });
+  // presenter is nullptr in detached mode; ImGuiDrawer tolerates that and the
+  // gated eager font upload in SetImmediateDrawer is skipped (font uploads
+  // lazily on the first Draw instead).
+  imgui_drawer_->SetPresenterAndImmediateDrawer(presenter, drawer);
+  rex::ui::RegisterBind("bind_debug_overlay", "F3", "Toggle debug overlay", [this] {
+    if (debug_overlay_) {
+      debug_overlay_.reset();
+    } else {
+      debug_overlay_ =
+          std::make_unique<ui::DebugOverlayDialog>(imgui_drawer_.get(), frame_stats_provider_);
+    }
+  });
+  rex::ui::RegisterBind("bind_console", "Backtick", "Toggle console overlay", [this] {
+    if (console_overlay_) {
+      console_overlay_.reset();
+    } else {
+      console_overlay_ = std::make_unique<ui::ConsoleDialog>(imgui_drawer_.get(), log_sink_);
+    }
+  });
+  rex::ui::RegisterBind("bind_settings", "F4", "Toggle settings overlay", [this] {
+    if (settings_overlay_) {
+      settings_overlay_.reset();
+    } else {
+      settings_overlay_ = std::make_unique<ui::SettingsDialog>(imgui_drawer_.get(), config_path_);
+    }
+  });
+
+  OnCreateDialogs(imgui_drawer_.get());
 }
 
 void ReXApp::LaunchModule() {
@@ -429,6 +445,10 @@ void ReXApp::OnDestroy() {
     imgui_drawer_->SetPresenterAndImmediateDrawer(nullptr, nullptr);
     imgui_drawer_.reset();
   }
+  // immediate_drawer_ was already unlinked from imgui_drawer_ above. Detach it
+  // from its presenter so SDK mode runs OnLeavePresenter() before disposal; in
+  // detached mode the drawer never had a presenter, so SetPresenter(nullptr) is
+  // a no-op.
   if (immediate_drawer_) {
     immediate_drawer_->SetPresenter(nullptr);
     immediate_drawer_.reset();
