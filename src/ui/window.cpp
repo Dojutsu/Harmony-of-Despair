@@ -551,6 +551,42 @@ void Window::OnFocusUpdate(bool new_has_focus, WindowDestructionReceiver& destru
   }
 }
 
+bool Window::SendCloseRequestToListeners(WindowDestructionReceiver& destruction_receiver) {
+  if (!CanSendEventsToListeners()) {
+    return true;
+  }
+  UIEvent e(this);
+  // Snapshot: listeners may add/remove listeners or destroy the window from
+  // within the callback, and a veto must stop iteration immediately.
+  std::vector<WindowListener*> listeners(listeners_);
+  for (WindowListener* listener : listeners) {
+    bool proceed = listener->OnCloseRequested(e);
+    if (destruction_receiver.IsWindowDestroyed()) {
+      return false;
+    }
+    if (!proceed) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void Window::OnMinimized(WindowDestructionReceiver& destruction_receiver) {
+  if (!CanSendEventsToListeners()) {
+    return;
+  }
+  UIEvent e(this);
+  SendEventToListeners([&e](auto listener) { listener->OnMinimized(e); }, destruction_receiver);
+}
+
+void Window::OnRestored(WindowDestructionReceiver& destruction_receiver) {
+  if (!CanSendEventsToListeners()) {
+    return;
+  }
+  UIEvent e(this);
+  SendEventToListeners([&e](auto listener) { listener->OnRestored(e); }, destruction_receiver);
+}
+
 void Window::OnPaint(bool force_paint) {
   if (is_painting_) {
     return;

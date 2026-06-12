@@ -235,8 +235,10 @@ set(SDL_STATIC ON CACHE BOOL "" FORCE)
 set(SDL_TEST OFF CACHE BOOL "" FORCE)
 set(SDL_UNIX_CONSOLE_BUILD ON CACHE BOOL "" FORCE)
 
-# Disable unused subsystems
-set(SDL_VIDEO OFF CACHE BOOL "" FORCE)
+# Video provides the windowing/event layer; presenters create their own
+# D3D12/Vulkan surfaces from native handles, so SDL_RENDER and the SDL
+# graphics API integrations stay off.
+set(SDL_VIDEO ON CACHE BOOL "" FORCE)
 set(SDL_RENDER OFF CACHE BOOL "" FORCE)
 set(SDL_HAPTIC OFF CACHE BOOL "" FORCE)
 set(SDL_SENSOR OFF CACHE BOOL "" FORCE)
