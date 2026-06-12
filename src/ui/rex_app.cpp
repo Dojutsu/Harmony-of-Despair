@@ -301,7 +301,7 @@ bool ReXApp::SetupPresentation() {
   }
   window_->Open();
 
-  auto* graphics_system = static_cast<rex::graphics::GraphicsSystem*>(config_.graphics.get());
+  auto* graphics_system = config_.graphics.get();
   if (graphics_system && graphics_system->presenter()) {
     // SDK mode: the emulated-Xenos presenter drives the overlays.
     auto* presenter = graphics_system->presenter();
@@ -372,8 +372,7 @@ void ReXApp::LaunchModule() {
       return;
     }
 
-    auto* graphics_system =
-        static_cast<rex::graphics::GraphicsSystem*>(runtime_->graphics_system());
+    auto* graphics_system = runtime_->graphics_system();
     if (graphics_system && !runtime_->cache_root().empty()) {
       uint32_t title_id = runtime_->kernel_state()->title_id();
       if (title_id != 0) {
