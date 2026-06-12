@@ -15,10 +15,6 @@
 #==========================================================
 function(rexglue_apply_target_settings target_name)
     if(UNIX AND NOT APPLE)
-        find_package(PkgConfig REQUIRED)
-        pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
-        target_include_directories(${target_name} PRIVATE ${GTK3_INCLUDE_DIRS})
-        target_link_libraries(${target_name} PRIVATE ${GTK3_LIBRARIES})
         # Large executable support
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
             target_link_options(${target_name} PRIVATE -Wl,--no-relax)
@@ -48,6 +44,8 @@ endfunction()
 #     so this single copy handles them transitively.
 #==========================================================
 function(rexglue_configure_target target_name)
+    cmake_parse_arguments(ARG "" "" "GPU_PLUGINS" ${ARGN})
+
     target_sources(${target_name} PRIVATE
         ${REXGLUE_SHARE_DIR}/windowed_app_main_sdl.cpp
         ${REXGLUE_SHARE_DIR}/rex_app.cpp)
@@ -85,6 +83,30 @@ function(rexglue_configure_target target_name)
             endif()
         endforeach()
     endif()
+
+    # Stage requested GPU emulation plugins next to the executable. Plugins
+    # are runtime-loaded (never linked), so TARGET_RUNTIME_DLLS misses them.
+    foreach(_plugin IN LISTS ARG_GPU_PLUGINS)
+        if(TARGET rexgpu-${_plugin})
+            # In-tree build: depend on it so it gets built.
+            set(_plugin_target rexgpu-${_plugin})
+            add_dependencies(${target_name} ${_plugin_target})
+        elseif(TARGET rex::gpu-${_plugin})
+            # Installed SDK import.
+            set(_plugin_target rex::gpu-${_plugin})
+        else()
+            message(FATAL_ERROR
+                "rexglue_configure_target: unknown GPU plugin '${_plugin}' "
+                "(no target rexgpu-${_plugin} or rex::gpu-${_plugin})")
+        endif()
+        add_custom_command(TARGET ${target_name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:${_plugin_target}>
+                $<TARGET_FILE_DIR:${target_name}>
+            VERBATIM
+        )
+        unset(_plugin_target)
+    endforeach()
 endfunction()
 
 #==========================================================

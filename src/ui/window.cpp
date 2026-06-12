@@ -40,20 +40,21 @@ REXCVAR_DEFINE_INT32(monitor, 0, "UI/Window",
     .range(0, 16)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_INT32(video_mode_width, 1280, "GPU", "Guest video mode width in pixels")
+REXCVAR_DEFINE_INT32(video_mode_width, 1280, "Display", "Guest video mode width in pixels")
     .range(640, 0x0FFF)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_INT32(video_mode_height, 720, "GPU", "Guest video mode height in pixels")
+REXCVAR_DEFINE_INT32(video_mode_height, 720, "Display", "Guest video mode height in pixels")
     .range(480, 0x0FFF)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_STRING(resolution, "", "GPU",
+REXCVAR_DEFINE_STRING(resolution, "", "Display",
                       "Common resolution preset for both guest video mode and startup window (for "
                       "example: 720p, 1080p, 1440p, 4k, 1280x720)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_DOUBLE(video_mode_refresh_rate, 60.0, "GPU", "Guest video mode refresh rate in Hz")
+REXCVAR_DEFINE_DOUBLE(video_mode_refresh_rate, 60.0, "Display",
+                      "Guest video mode refresh rate in Hz")
     .range(24.0, 240.0)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 

@@ -17,7 +17,6 @@
 #include <string>
 
 #include <rex/cvar.h>
-#include <rex/graphics/flags.h>
 #include <rex/graphics/pipeline/texture/info.h>
 #include <rex/graphics/register_file.h>
 #include <rex/graphics/video_mode_util.h>

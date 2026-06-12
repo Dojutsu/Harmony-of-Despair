@@ -22,18 +22,12 @@
 #include <rex/ui/overlay/console_overlay.h>
 #include <rex/ui/overlay/debug_overlay.h>
 #include <rex/ui/overlay/settings_overlay.h>
-#include <rex/graphics/graphics_system.h>
-#if REX_HAS_VULKAN
-#include <rex/graphics/vulkan/graphics_system.h>
-#endif
-#if REX_HAS_D3D12
-#include <rex/graphics/d3d12/graphics_system.h>
-#endif
 #include <rex/audio/audio_system.h>
 #include <rex/audio/sdl/sdl_audio_system.h>
 #include <rex/input/input_system.h>
 #include <rex/kernel/init.h>
 #include <rex/system.h>
+#include <rex/system/gpu_plugin.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xthread.h>
 #include <rex/ui/graphics_provider.h>
@@ -46,6 +40,11 @@
 #include <algorithm>
 #include <filesystem>
 #include <string_view>
+
+REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
+                      "GPU emulation plugin to load at startup (e.g. 'xenos'); empty disables "
+                      "GPU emulation")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace rex {
 
@@ -263,16 +262,24 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
 }
 
 bool ReXApp::SetupPresentation() {
-#if REX_HAS_D3D12
-  config_.graphics = REX_GRAPHICS_BACKEND(rex::graphics::d3d12::D3D12GraphicsSystem);
-#elif REX_HAS_VULKAN
-  config_.graphics = REX_GRAPHICS_BACKEND(rex::graphics::vulkan::VulkanGraphicsSystem);
-#endif
+  config_.gpu_plugin = REXCVAR_GET(gpu_plugin);
   config_.audio_factory = REX_AUDIO_BACKEND(rex::audio::sdl::SDLAudioSystem);
   config_.input_factory = REX_INPUT_BACKEND(rex::input::CreateDefaultInputSystem);
   config_.kernel_init = rex::kernel::InitializeKernel;
 
   OnPreSetup(config_);
+
+  if (!config_.graphics && !config_.gpu_plugin.empty()) {
+    config_.graphics = rex::system::LoadGpuPlugin(config_.gpu_plugin);
+    if (!config_.graphics) {
+      // Fatal by design: no silent headless fallback.
+      auto msg =
+          fmt::format("Failed to load GPU plugin '{}'. See log for details.", config_.gpu_plugin);
+      REXLOG_ERROR("{}", msg);
+      rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
+      return false;
+    }
+  }
 
   if (config_.graphics) {
     X_STATUS status = config_.graphics->SetupPresentation(&app_context());

@@ -51,15 +51,13 @@ class IGraphicsSystem {
   virtual bool has_presentation() const = 0;
 
   // --- Optional capabilities, default no-op -------------------------------
-  // Implementations that drive the SDK's own presentation (the emulated GPU
-  // plugin) surface their host provider/presenter here so ReXApp can wire the
-  // ImGui overlay stack. Custom systems may leave these null.
+
+  // Host presentation objects for ReXApp's overlay wiring; custom systems may
+  // leave these null.
   virtual ui::GraphicsProvider* provider() const { return nullptr; }
   virtual ui::Presenter* presenter() const { return nullptr; }
 
-  // Guest GPU services reached from the xboxkrnl Vd* exports. Systems without
-  // command-processor emulation ignore them; the kernel logs once per export
-  // when no graphics system is present at all.
+  // Guest GPU services reached from the xboxkrnl Vd* exports.
   virtual void SetInterruptCallback(uint32_t callback, uint32_t user_data) {
     (void)callback;
     (void)user_data;

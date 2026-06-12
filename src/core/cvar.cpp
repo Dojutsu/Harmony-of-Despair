@@ -33,8 +33,8 @@ bool g_finalized = false;
 bool g_lifecycle_override = false;
 std::mutex g_mutex;
 
-// Set once cvar::Init has parsed the command line. Registrations after this
-// point are from runtime-loaded modules and drain pending values.
+// Set once cvar::Init has parsed the command line; later registrations are
+// from runtime-loaded modules and drain pending values.
 std::atomic<bool> g_init_done = false;
 
 // Recursive: FlagRegistrar chain methods re-enter; change callbacks invoked
@@ -55,9 +55,8 @@ std::unordered_map<std::string, size_t>& GetRegistryIndex() {
   return index;
 }
 
-// Values that arrived from the command line or config file before their cvar
-// was registered. Runtime-loaded modules (GPU plugins, guest DLLs) register
-// cvars long after Init/LoadConfig; RegisterFlag drains this on registration.
+// Values that arrived before their cvar was registered; runtime-loaded
+// modules register cvars long after Init/LoadConfig.
 struct PendingValues {
   std::optional<std::string> cmdline;
   std::optional<std::string> config;
@@ -211,9 +210,8 @@ std::optional<size_t> RegisterFlag(FlagEntry entry) {
   index[entry.name] = pos;
   storage.push_back(std::move(entry));
 
-  // Late registration (runtime-loaded module): apply values that arrived
-  // before this flag existed, in the same order the startup sequence applies
-  // them to static cvars: command line, then environment, then config file.
+  // Late registration: apply pending values in the startup order used for
+  // static cvars (command line, then environment, then config file).
   if (g_init_done) {
     FlagEntry& stored = storage[pos];
     auto& pending = GetPendingValuesStorage();
@@ -534,10 +532,9 @@ std::vector<std::string> Init(int argc, char** argv) {
     fprintf(stderr, "cvar: CLI11  parse error: %s\n", e.what());
   }
 
-  // Stash unrecognized --options for cvars that register later (plugins,
-  // guest DLL modules). Supported forms: --name=value, --name (bool true),
-  // --no-name (bool false). A separated "--name value" pair is ambiguous
-  // with a positional argument, so the value token is never consumed.
+  // Stash unrecognized --options for cvars that register later. Supported
+  // forms: --name=value, --name (true), --no-name (false); a separated
+  // "--name value" pair is ambiguous with a positional, so never consumed.
   std::vector<std::string> positional;
   for (const auto& arg : app.remaining()) {
     std::string_view view(arg);
