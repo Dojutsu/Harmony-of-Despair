@@ -52,7 +52,6 @@ namespace ui {
 
 class Presenter;
 class Window;
-class Win32Window;
 
 class UIDrawContext {
  public:

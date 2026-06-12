@@ -13,14 +13,19 @@
 
 #include <rex/ui/window_sdl.h>
 
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 
 #define UTF_CPP_CPLUSPLUS 201703L  // -fno-char8_t
 #include <utf8.h>
 
+#include <rex/cvar.h>
+#include <rex/graphics/flags.h>
+#include <rex/graphics/video_mode_util.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
+#include <rex/ui/flags.h>
 #include <rex/ui/sdl_virtual_key.h>
 
 #if REX_PLATFORM_WIN32
@@ -33,6 +38,42 @@
 namespace rex::ui {
 
 namespace {
+
+uint32_t ResolveWindowWidth(uint32_t requested_width) {
+  if (REXCVAR_GET(window_width) > 0) {
+    return uint32_t(REXCVAR_GET(window_width));
+  }
+  if (!rex::cvar::HasNonDefaultValue("window_width")) {
+    if (rex::cvar::HasNonDefaultValue("video_mode_width") && REXCVAR_GET(video_mode_width) > 0) {
+      return uint32_t(std::clamp(REXCVAR_GET(video_mode_width), 1, 8192));
+    }
+    int32_t preset_width = 0;
+    int32_t preset_height = 0;
+    if (rex::graphics::video_mode_util::TryGetResolutionPresetFromCVar(preset_width,
+                                                                       preset_height)) {
+      return uint32_t(std::clamp(preset_width, 1, 8192));
+    }
+  }
+  return requested_width;
+}
+
+uint32_t ResolveWindowHeight(uint32_t requested_height) {
+  if (REXCVAR_GET(window_height) > 0) {
+    return uint32_t(REXCVAR_GET(window_height));
+  }
+  if (!rex::cvar::HasNonDefaultValue("window_height")) {
+    if (rex::cvar::HasNonDefaultValue("video_mode_height") && REXCVAR_GET(video_mode_height) > 0) {
+      return uint32_t(std::clamp(REXCVAR_GET(video_mode_height), 1, 8192));
+    }
+    int32_t preset_width = 0;
+    int32_t preset_height = 0;
+    if (rex::graphics::video_mode_util::TryGetResolutionPresetFromCVar(preset_width,
+                                                                       preset_height)) {
+      return uint32_t(std::clamp(preset_height, 1, 8192));
+    }
+  }
+  return requested_height;
+}
 
 // SDL timer callback (runs on SDL's timer thread): defer the actual hide to
 // the UI thread. The deferred function only touches the global SDL cursor and
@@ -68,6 +109,15 @@ MouseEvent::Button TranslateSDLMouseButton(Uint8 button) {
 }
 
 }  // namespace
+
+std::unique_ptr<Window> Window::Create(WindowedAppContext& app_context,
+                                       const std::string_view title, uint32_t desired_logical_width,
+                                       uint32_t desired_logical_height) {
+  desired_logical_width = ResolveWindowWidth(desired_logical_width);
+  desired_logical_height = ResolveWindowHeight(desired_logical_height);
+  return std::make_unique<WindowSDL>(app_context, title, desired_logical_width,
+                                     desired_logical_height);
+}
 
 WindowSDL::WindowSDL(WindowedAppContext& app_context, const std::string_view title,
                      uint32_t desired_logical_width, uint32_t desired_logical_height)

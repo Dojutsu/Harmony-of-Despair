@@ -1,6 +1,6 @@
 /**
  * @file        ui/windowed_app_main_sdl.cpp
- * @brief       SDL3 entry point for windowed applications
+ * @brief       Entry point for windowed applications (SDL3 windowing)
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  *              All rights reserved.
@@ -16,10 +16,6 @@
 #include <string>
 #include <vector>
 
-// Header-only main wrapper: provides the WinMain shim (with UTF-8 argv) for
-// Windows GUI-subsystem executables in the translation unit defining main.
-#include <SDL3/SDL_main.h>
-
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
@@ -27,10 +23,20 @@
 #include <rex/ui/windowed_app_context_sdl.h>
 
 #if REX_PLATFORM_WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #include <objbase.h>
+#include <shellapi.h>
 #endif
 
-int main(int argc, char* argv[]) {
+namespace {
+
+int RunWindowedApp(int argc, char** argv) {
   auto remaining = rex::cvar::Init(argc, argv);
   rex::cvar::ApplyEnvironment();
   rex::InitLoggingEarly();
@@ -43,8 +49,7 @@ int main(int argc, char* argv[]) {
     }
 
 #if REX_PLATFORM_WIN32
-    // Apartment-threaded COM for shell dialogs, matching the old Win32 entry
-    // point.
+    // Apartment-threaded COM for shell dialogs.
     if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
       return EXIT_FAILURE;
     }
@@ -72,3 +77,57 @@ int main(int argc, char* argv[]) {
 
   return result;
 }
+
+#if REX_PLATFORM_WIN32
+// Convert wide argv from CommandLineToArgvW to UTF-8 for cvar::Init.
+std::vector<std::string> WideArgsToUtf8(int argc, wchar_t** wargv) {
+  std::vector<std::string> args;
+  args.reserve(static_cast<size_t>(argc));
+  for (int i = 0; i < argc; ++i) {
+    std::wstring wide(wargv[i]);
+    if (wide.empty()) {
+      args.emplace_back();
+      continue;
+    }
+    int size = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr,
+                                   0, nullptr, nullptr);
+    std::string utf8(static_cast<size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), utf8.data(), size,
+                        nullptr, nullptr);
+    args.push_back(std::move(utf8));
+  }
+  return args;
+}
+#endif
+
+}  // namespace
+
+#if REX_PLATFORM_WIN32
+
+int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hinstance_prev, LPWSTR command_line,
+                    int show_cmd) {
+  (void)hinstance;
+  (void)hinstance_prev;
+  (void)command_line;
+  (void)show_cmd;
+
+  int wargc = 0;
+  wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+  auto utf8_args = WideArgsToUtf8(wargc, wargv);
+  LocalFree(wargv);
+
+  std::vector<char*> argv_ptrs;
+  argv_ptrs.reserve(utf8_args.size());
+  for (auto& s : utf8_args) {
+    argv_ptrs.push_back(s.data());
+  }
+  return RunWindowedApp(static_cast<int>(argv_ptrs.size()), argv_ptrs.data());
+}
+
+#else
+
+int main(int argc, char* argv[]) {
+  return RunWindowedApp(argc, argv);
+}
+
+#endif

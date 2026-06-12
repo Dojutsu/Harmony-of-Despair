@@ -57,18 +57,14 @@ if(REXGLUE_USE_D3D12)
     )
 endif()
 
-# Platform-specific sources
+# Platform-specific sources (windowing itself is SDL3, platform-independent)
 if(WIN32)
     set(REXUI_PLATFORM_SOURCES
         surface_win.cpp
-        window_win.cpp
-        windowed_app_context_win.cpp
     )
 else()
     set(REXUI_PLATFORM_SOURCES
         surface_gnulinux.cpp
-        window_gtk.cpp
-        windowed_app_context_gtk.cpp
     )
 endif()
 
@@ -136,22 +132,14 @@ if(REXGLUE_USE_VULKAN)
 endif()
 
 # Platform-specific dependencies
-if(WIN32)
-    target_link_libraries(rexui PUBLIC
-        dwmapi
-        Shcore
-    )
-else()
+if(NOT WIN32)
     find_package(PkgConfig REQUIRED)
-    pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
     pkg_check_modules(X11_XCB REQUIRED x11-xcb)
 
     target_include_directories(rexui PRIVATE
-        ${GTK3_INCLUDE_DIRS}
         ${X11_XCB_INCLUDE_DIRS}
     )
     target_link_libraries(rexui PUBLIC
-        ${GTK3_LIBRARIES}
         ${X11_XCB_LIBRARIES}
     )
 endif()
