@@ -139,6 +139,24 @@ bool WindowSDL::OpenImpl() {
   sdl_window_id_ = SDL_GetWindowID(sdl_window_);
   sdl_app_context().RegisterWindow(sdl_window_id_, this);
 
+  // Center on the requested display before fullscreen so SDL resolves
+  // fullscreen against it. 1-based enumeration order; 0 = system default.
+  if (int32_t monitor_index = REXCVAR_GET(monitor); monitor_index > 0) {
+    int display_count = 0;
+    SDL_DisplayID* displays = SDL_GetDisplays(&display_count);
+    if (displays) {
+      if (monitor_index <= display_count) {
+        SDL_DisplayID display = displays[monitor_index - 1];
+        SDL_SetWindowPosition(sdl_window_, SDL_WINDOWPOS_CENTERED_DISPLAY(display),
+                              SDL_WINDOWPOS_CENTERED_DISPLAY(display));
+      } else {
+        REXLOG_WARN("monitor cvar is {} but only {} display(s) present; using default",
+                    monitor_index, display_count);
+      }
+      SDL_free(displays);
+    }
+  }
+
   if (IsFullscreen()) {
     // Borderless desktop fullscreen (a NULL display mode is SDL3's default).
     SDL_SetWindowFullscreen(sdl_window_, true);
