@@ -179,6 +179,35 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   /// no overlay (SDK presenter mode; this hook is never reached).
   virtual std::unique_ptr<ui::ImmediateDrawer> OnCreateImmediateDrawer() { return nullptr; }
 
+  // --- Window event hooks (delivered on the UI thread) ---
+
+  /// Logical (DPI-independent) client size changed.
+  virtual void OnWindowResized(uint32_t logical_width, uint32_t logical_height) {
+    (void)logical_width;
+    (void)logical_height;
+  }
+
+  /// Physical pixel size changed. Use this to resize swap chains.
+  virtual void OnWindowPixelSizeChanged(uint32_t pixel_width, uint32_t pixel_height) {
+    (void)pixel_width;
+    (void)pixel_height;
+  }
+
+  /// The user asked to close the window (close button, Alt+F4). Return false
+  /// to veto and close later explicitly (window()->RequestClose()) after
+  /// stopping guest threads and draining renderers. Default accepts; the
+  /// window then closes and the app quits via the OnClosing path.
+  virtual bool OnWindowCloseRequested() { return true; }
+
+  virtual void OnWindowFocusChanged(bool focused) { (void)focused; }
+
+  /// Display scale changed (window moved to a monitor with different DPI).
+  /// scale is 1.0 at 96 DPI.
+  virtual void OnDpiScaleChanged(float scale) { (void)scale; }
+
+  virtual void OnWindowMinimized() {}
+  virtual void OnWindowRestored() {}
+
   // --- Init phase methods (called in order from OnInitialize) ---
 
   /// Resolve path defaults, load config TOML, initialize logging.
@@ -226,6 +255,13 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
 
   // WindowListener overrides
   void OnClosing(ui::UIEvent& e) override;
+  bool OnCloseRequested(ui::UIEvent& e) override;
+  void OnResize(ui::UISetupEvent& e) override;
+  void OnDpiChanged(ui::UISetupEvent& e) override;
+  void OnGotFocus(ui::UISetupEvent& e) override;
+  void OnLostFocus(ui::UISetupEvent& e) override;
+  void OnMinimized(ui::UIEvent& e) override;
+  void OnRestored(ui::UIEvent& e) override;
 
   // WindowInputListener overrides
   void OnKeyDown(ui::KeyEvent& e) override;

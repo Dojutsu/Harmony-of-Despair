@@ -428,6 +428,48 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
   std::_Exit(0);
 }
 
+bool ReXApp::OnCloseRequested(ui::UIEvent& e) {
+  (void)e;
+  return OnWindowCloseRequested();
+}
+
+void ReXApp::OnResize(ui::UISetupEvent& e) {
+  (void)e;
+  if (!window_) {
+    return;
+  }
+  OnWindowPixelSizeChanged(window_->GetActualPhysicalWidth(), window_->GetActualPhysicalHeight());
+  OnWindowResized(window_->GetActualLogicalWidth(), window_->GetActualLogicalHeight());
+}
+
+void ReXApp::OnDpiChanged(ui::UISetupEvent& e) {
+  (void)e;
+  if (!window_) {
+    return;
+  }
+  OnDpiScaleChanged(float(window_->GetDpi()) / float(window_->GetMediumDpi()));
+}
+
+void ReXApp::OnGotFocus(ui::UISetupEvent& e) {
+  (void)e;
+  OnWindowFocusChanged(true);
+}
+
+void ReXApp::OnLostFocus(ui::UISetupEvent& e) {
+  (void)e;
+  OnWindowFocusChanged(false);
+}
+
+void ReXApp::OnMinimized(ui::UIEvent& e) {
+  (void)e;
+  OnWindowMinimized();
+}
+
+void ReXApp::OnRestored(ui::UIEvent& e) {
+  (void)e;
+  OnWindowRestored();
+}
+
 void ReXApp::OnDestroy() {
   // Notify subclass before cleanup
   OnShutdown();
