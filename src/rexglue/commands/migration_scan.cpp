@@ -54,7 +54,7 @@ bool IsUnderGeneratedTree(const fs::path& project_root, const fs::path& target) 
   if (ec)
     return false;
   auto first = rel.begin();
-  return first != rel.end() && first->generic_string() == "generated";
+  return first != rel.end() && first->generic_string().starts_with("generated");
 }
 
 template <typename Accept, typename Visit>
