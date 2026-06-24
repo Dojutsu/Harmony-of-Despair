@@ -191,6 +191,39 @@ TEST_CASE("cvar TOML config loading", "[cvar]") {
   }
 }
 
+TEST_CASE("cvar config replays values for flags registered after loading", "[cvar]") {
+  rex::cvar::testing::ResetAllForTesting();
+
+  auto config_path = std::filesystem::temp_directory_path() / "test_deferred_cvar.toml";
+  {
+    std::ofstream file(config_path);
+    file << "test_deferred_flag = \"F10\"\n";
+  }
+
+  rex::cvar::LoadConfig(config_path);
+  std::string value = "F7";
+  {
+    rex::cvar::FlagRegistrar registrar({
+        .name = "test_deferred_flag",
+        .type = rex::cvar::FlagType::String,
+        .category = "Test",
+        .description = "Late registered test flag",
+        .setter =
+            [&value](std::string_view new_value) {
+              value = new_value;
+              return true;
+            },
+        .getter = [&value]() { return value; },
+        .default_value = "F7",
+    });
+
+    CHECK(value == "F10");
+  }
+
+  std::filesystem::remove(config_path);
+  rex::cvar::testing::ResetAllForTesting();
+}
+
 TEST_CASE("cvar range validation", "[cvar]") {
   SECTION("Value within range succeeds") {
     REQUIRE(rex::cvar::SetFlagByName("test_ranged_flag", "5"));
