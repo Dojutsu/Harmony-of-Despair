@@ -309,6 +309,29 @@ bool SetFlagByName(std::string_view name, std::string_view value) {
   return success;
 }
 
+bool InvokeCommand(std::string_view name, std::string_view args) {
+  std::function<void(std::string_view)> cb;
+  {
+    std::lock_guard lock(GetRegistryMutex());
+    auto it = GetRegistryIndex().find(std::string(name));
+    if (it == GetRegistryIndex().end()) {
+      return false;
+    }
+    const auto& entry = GetRegistryStorage()[it->second];
+    if (entry.type != FlagType::Command) {
+      return false;
+    }
+    // Copy the callback out from under the lock; GetFlagInfo pointers are
+    // invalidated by registry mutation and a command may touch the registry.
+    cb = entry.command_callback;
+  }
+  if (!cb) {
+    return false;
+  }
+  cb(args);
+  return true;
+}
+
 std::string GetFlagByName(std::string_view name) {
   std::lock_guard lock(GetRegistryMutex());
   auto it = GetRegistryIndex().find(std::string(name));

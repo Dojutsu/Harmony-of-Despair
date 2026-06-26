@@ -480,7 +480,7 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
         }
       } else if (entry.type == rex::cvar::FlagType::Command) {
         if (ImGui::Button(std::string(entry.name + "##v").c_str())) {
-          entry.command_callback();
+          entry.command_callback("");
         }
       } else {
         char buf[256];
