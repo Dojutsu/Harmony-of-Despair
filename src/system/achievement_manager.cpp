@@ -267,6 +267,8 @@ void AchievementManager::LoadUnlockState() {
 }
 
 void AchievementManager::SaveUnlockState() const {
+  std::lock_guard save_lock(save_mutex_);
+
   std::filesystem::path save_path;
   std::unordered_map<uint32_t, uint64_t> unlocked;
   {

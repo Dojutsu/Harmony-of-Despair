@@ -201,6 +201,9 @@ TEST_CASE("cvar config replays values for flags registered after loading", "[cva
   }
 
   rex::cvar::LoadConfig(config_path);
+  char argv0[] = "cvar_test";
+  char* argv[] = {argv0};
+  rex::cvar::Init(1, argv);
   std::string value = "F7";
   {
     rex::cvar::FlagRegistrar registrar({

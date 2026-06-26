@@ -329,7 +329,7 @@ class KernelState {
   bool IsAchievementUnlocked(uint32_t id) const;
   // Returns the unlock FILETIME (100-ns intervals since 1601-01-01), or 0 if locked.
   uint64_t GetAchievementUnlockTime(uint32_t id) const;
-  const std::vector<AchievementInfo>& loaded_achievements() const;
+  std::vector<AchievementInfo> loaded_achievements() const;
   AchievementManager& achievements() { return achievement_manager_; }
   const AchievementManager& achievements() const { return achievement_manager_; }
 

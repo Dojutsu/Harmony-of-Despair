@@ -275,8 +275,8 @@ uint64_t KernelState::GetAchievementUnlockTime(uint32_t id) const {
   return achievement_manager_.GetUnlockTime(id);
 }
 
-const std::vector<AchievementInfo>& KernelState::loaded_achievements() const {
-  return achievement_manager_.achievements();
+std::vector<AchievementInfo> KernelState::loaded_achievements() const {
+  return achievement_manager_.ListAchievements();
 }
 
 void KernelState::LoadAchievementsData() {

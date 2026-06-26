@@ -412,10 +412,23 @@ Result<void> InitAchievements(const InitAchievementsOptions& opts, const CliCont
     std::string out;
     out.reserve(s.size() + 4);
     for (char c : s) {
+      unsigned char ch = static_cast<unsigned char>(c);
       if (c == '"')
         out += "\\\"";
       else if (c == '\\')
         out += "\\\\";
+      else if (c == '\b')
+        out += "\\b";
+      else if (c == '\t')
+        out += "\\t";
+      else if (c == '\n')
+        out += "\\n";
+      else if (c == '\f')
+        out += "\\f";
+      else if (c == '\r')
+        out += "\\r";
+      else if (ch < 0x20 || ch == 0x7F)
+        out += fmt::format("\\u{:04X}", ch);
       else
         out += c;
     }

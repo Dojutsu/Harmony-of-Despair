@@ -14,6 +14,8 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -155,6 +157,35 @@ TEST_CASE("achievement unlock state persists across manager instances", "[achiev
   second.LoadUnlockState();
   CHECK(second.IsUnlocked(1));
   CHECK(second.GetUnlockTime(1) == unlock_time);
+}
+
+TEST_CASE("achievement unlock saves serialize concurrent writers", "[achievements]") {
+  TempDirectory temp("rex_achievement_concurrent_save");
+  auto save_path = temp.path() / "saves" / "12345678.toml";
+
+  rex::system::AchievementManager manager;
+  manager.SetUnlockSavePath(save_path);
+  for (uint32_t id = 1; id <= 8; ++id) {
+    manager.RegisterAchievement(MakeAchievement(id, "Achievement " + std::to_string(id)));
+  }
+
+  std::vector<std::thread> threads;
+  for (uint32_t id = 1; id <= 8; ++id) {
+    threads.emplace_back([&manager, id]() { (void)manager.UnlockAchievement(id); });
+  }
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  rex::system::AchievementManager reloaded;
+  reloaded.SetUnlockSavePath(save_path);
+  for (uint32_t id = 1; id <= 8; ++id) {
+    reloaded.RegisterAchievement(MakeAchievement(id, "Achievement " + std::to_string(id)));
+  }
+  reloaded.LoadUnlockState();
+  for (uint32_t id = 1; id <= 8; ++id) {
+    CHECK(reloaded.IsUnlocked(id));
+  }
 }
 
 TEST_CASE("runtime metadata root overrides legacy metadata discovery", "[achievements]") {

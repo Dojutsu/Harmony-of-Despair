@@ -56,7 +56,6 @@ class AchievementManager {
 
   std::vector<AchievementInfo> ListAchievements() const;
   std::optional<AchievementInfo> FindAchievement(uint32_t id) const;
-  const std::vector<AchievementInfo>& achievements() const { return achievements_; }
 
   // Unlock persistence and presentation are separate by default. Pass kShow
   // for a convenience notification, or call ShowAchievementNotification()
@@ -83,6 +82,7 @@ class AchievementManager {
       const AchievementEvent& event) const;
 
   mutable std::mutex mutex_;
+  mutable std::mutex save_mutex_;
   std::vector<AchievementInfo> achievements_;
   std::unordered_map<uint32_t, uint64_t> unlocked_achievements_;
   std::filesystem::path unlock_save_path_;

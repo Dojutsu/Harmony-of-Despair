@@ -639,7 +639,7 @@ u32 XamUserCreateAchievementEnumerator_entry(u32 title_id, u32 user_index, u32 x
 
   // Prefer the runtime store (populated from TOML or XDBF at boot) so that
   // dev-edited labels/descriptions are visible to the game's own queries.
-  const auto& store = ks->loaded_achievements();
+  const auto store = ks->loaded_achievements();
   if (!store.empty()) {
     for (const auto& info : store) {
       auto item = XStaticAchievementEnumerator::AchievementDetails{
