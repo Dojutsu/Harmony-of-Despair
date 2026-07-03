@@ -160,6 +160,13 @@ void ConsoleDialog::HandleHistoryOrCompletionNav(ImGuiInputTextCallbackData* dat
   }
 }
 
+void ConsoleDialog::AddLocal(spdlog::level::level_enum level, std::string text) {
+  // Tag with the current sink generation so the draw pass can interleave this
+  // console-local line chronologically with the captured log entries.
+  const uint64_t seq = sink_ ? sink_->generation() : 0;
+  local_entries_.push_back({rex::LogEntry{level, "console", std::move(text)}, seq});
+}
+
 void ConsoleDialog::ExecuteCommand(std::string_view cmd) {
   // Trim whitespace.
   while (!cmd.empty() && cmd.front() == ' ')
@@ -185,7 +192,7 @@ void ConsoleDialog::ExecuteCommand(std::string_view cmd) {
       std::string line = "  " + n;
       if (info)
         line += " = " + info->getter() + "  (" + info->description + ")";
-      local_entries_.push_back({spdlog::level::info, "console", line});
+      AddLocal(spdlog::level::info, line);
     }
     return;
   }
@@ -203,11 +210,12 @@ void ConsoleDialog::ExecuteCommand(std::string_view cmd) {
 
   const auto* info = rex::cvar::GetFlagInfo(name);
 
-  // Command dispatch takes priority over get/set.
+  // Command dispatch takes priority over get/set. Echo before invoking so the
+  // "> cmd" line is tagged with an earlier generation than any log lines the
+  // command emits, keeping it just above its own output.
   if (info && info->type == rex::cvar::FlagType::Command) {
+    AddLocal(spdlog::level::info, "[console] > " + name + (args.empty() ? "" : " " + args));
     rex::cvar::InvokeCommand(name, args);
-    local_entries_.push_back(
-        {spdlog::level::info, "console", "[console] > " + name + (args.empty() ? "" : " " + args)});
     scroll_to_bottom_ = true;
     return;
   }
@@ -216,30 +224,33 @@ void ConsoleDialog::ExecuteCommand(std::string_view cmd) {
     // No args: treat as "get" - show current value.
     std::string val = rex::cvar::GetFlagByName(name);
     if (val.empty() && !info) {
-      local_entries_.push_back({spdlog::level::warn, "console", "[console] unknown cvar: " + name});
+      AddLocal(spdlog::level::warn, "[console] unknown cvar: " + name);
     } else {
-      local_entries_.push_back({spdlog::level::info, "console", "[console] " + name + " = " + val});
+      AddLocal(spdlog::level::info, "[console] " + name + " = " + val);
     }
     return;
   }
 
   // Has args, non-command: set.
   if (rex::cvar::SetFlagByName(name, args)) {
-    local_entries_.push_back({spdlog::level::info, "console", "[console] " + name + " = " + args});
+    AddLocal(spdlog::level::info, "[console] " + name + " = " + args);
   } else {
-    local_entries_.push_back({spdlog::level::warn, "console", "[console] unknown cvar: " + name});
+    AddLocal(spdlog::level::warn, "[console] unknown cvar: " + name);
   }
   scroll_to_bottom_ = true;
 }
 
 void ConsoleDialog::OnDraw(ImGuiIO& io) {
-  // Refresh entries if sink has new data.
+  // Snapshot the sink only when it has new data (copying up to kCapacity
+  // entries every frame would be wasteful). Console-local command feedback
+  // lives in local_entries_ and is merged in at draw time below, so it appears
+  // the frame after it is produced regardless of whether the sink advanced -
+  // otherwise a command that emits no log line (help, cvar get/set, the command
+  // echo) would not stream until some unrelated log bumped the generation.
   if (sink_) {
     uint64_t gen = sink_->generation();
     if (gen != last_generation_) {
       sink_->CopyEntries(entries_);
-      // Re-append console-local entries (command feedback) that aren't in the sink.
-      entries_.insert(entries_.end(), local_entries_.begin(), local_entries_.end());
       last_generation_ = gen;
       RefreshCategories();
     }
@@ -291,26 +302,42 @@ void ConsoleDialog::OnDraw(ImGuiIO& io) {
 
   bool at_bottom = (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f);
 
-  for (auto& entry : entries_) {
+  auto draw_entry = [&](const rex::LogEntry& entry) {
     // Level filter.
     if (static_cast<int>(entry.level) < min_level_)
-      continue;
-    // Category filter.
-    bool show_cat = false;
-    auto it = category_filter_.find(entry.category);
-    if (it != category_filter_.end()) {
-      show_cat = it->second;
+      return;
+    // Category filter. The "console" pseudo-category is always shown.
+    bool show_cat = (entry.category == "console");
+    if (!show_cat) {
+      auto it = category_filter_.find(entry.category);
+      if (it != category_filter_.end())
+        show_cat = it->second;
     }
-    // "console" pseudo-category always shown.
-    if (entry.category == "console")
-      show_cat = true;
     if (!show_cat)
-      continue;
+      return;
 
     ImGui::PushStyleColor(ImGuiCol_Text, LevelColor(entry.level));
     ImGui::TextUnformatted(entry.text.c_str());
     ImGui::PopStyleColor();
+  };
+
+  // Merge the sink snapshot with the console-local feedback by generation so
+  // command output blends in chronologically instead of piling up at the bottom.
+  // entries_[i] has absolute generation base_gen + i (the sink increments its
+  // counter once per captured line); a local line tagged seq belongs after every
+  // sink line with generation <= seq. Locals are drawn every frame regardless of
+  // whether the sink advanced, so feedback appears the frame after it is issued.
+  const uint64_t base_gen =
+      last_generation_ >= entries_.size() ? last_generation_ - entries_.size() + 1 : 1;
+  size_t li = 0;
+  for (size_t i = 0; i < entries_.size(); ++i) {
+    const uint64_t gen_i = base_gen + i;
+    for (; li < local_entries_.size() && local_entries_[li].seq < gen_i; ++li)
+      draw_entry(local_entries_[li].entry);
+    draw_entry(entries_[i]);
   }
+  for (; li < local_entries_.size(); ++li)
+    draw_entry(local_entries_[li].entry);
 
   if (scroll_to_bottom_ || at_bottom) {
     ImGui::SetScrollHereY(1.0f);
@@ -336,9 +363,8 @@ void ConsoleDialog::OnDraw(ImGuiIO& io) {
   const ImVec2 input_min = ImGui::GetItemRectMin();
   const ImVec2 input_max = ImGui::GetItemRectMax();
 
-  // Close the completion popup whenever the input loses keyboard focus. The
-  // popup is a separate window; without this it could stay open and (if it ever
-  // grabbed focus) block the input until an app restart.
+  // Close the completion popup whenever the input loses keyboard focus, so it
+  // does not linger after the user clicks or tabs away from the input.
   if (!ImGui::IsItemFocused()) {
     completion_open_ = false;
     completion_candidates_.clear();
@@ -354,31 +380,34 @@ void ConsoleDialog::OnDraw(ImGuiIO& io) {
     ImGui::SetKeyboardFocusHere(-1);
   }
 
-  ImGui::End();
-
-  // Completion popup: anchored to the input's top-left, growing upward.
   if (completion_open_ && !completion_candidates_.empty()) {
+    const int count = static_cast<int>(completion_candidates_.size());
+    const float line_h = ImGui::GetTextLineHeightWithSpacing();
+    const float pad_y = ImGui::GetStyle().WindowPadding.y * 2.0f;
+    const float height = std::min(count * line_h + pad_y, 200.0f);
     const float width = input_max.x - input_min.x;
-    ImGui::SetNextWindowPos(ImVec2(input_min.x, input_min.y), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(width, 0.0f), ImVec2(width, 200.0f));
-    ImGui::SetNextWindowBgAlpha(0.95f);
-    // NoInputs makes the popup purely visual: it can never be hovered, clicked,
-    // or focused, so it cannot steal focus from the input. Navigation is driven
-    // entirely by the input's Tab/Up/Down callbacks.
-    ImGuiWindowFlags popup_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
-                                   ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoInputs |
-                                   ImGuiWindowFlags_NoNavInputs;
-    if (ImGui::Begin("##rex_completions", nullptr, popup_flags)) {
-      for (int i = 0; i < static_cast<int>(completion_candidates_.size()); ++i) {
-        const bool selected = (i == completion_index_);
-        ImGui::Selectable(completion_candidates_[i].c_str(), selected);
-        if (selected)
+    // Anchor the bottom edge to the input's top edge and grow upward.
+    ImGui::SetCursorScreenPos(ImVec2(input_min.x, input_min.y - height));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.10f, 0.95f));
+    if (ImGui::BeginChild("##rex_completions", ImVec2(width, height), true,
+                          ImGuiWindowFlags_NoNavInputs)) {
+      ImDrawList* dl = ImGui::GetWindowDrawList();
+      for (int i = 0; i < count; ++i) {
+        if (i == completion_index_) {
+          const ImVec2 p = ImGui::GetCursorScreenPos();
+          dl->AddRectFilled(p, ImVec2(p.x + ImGui::GetContentRegionAvail().x, p.y + line_h),
+                            IM_COL32(60, 90, 140, 200));
+        }
+        ImGui::TextUnformatted(completion_candidates_[i].c_str());
+        if (i == completion_index_)
           ImGui::SetScrollHereY();
       }
     }
-    ImGui::End();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
   }
+
+  ImGui::End();
 }
 
 }  // namespace rex::ui
