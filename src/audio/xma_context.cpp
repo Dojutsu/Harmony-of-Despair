@@ -526,14 +526,13 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
 
   input_buffer_.fill(0);
 
-  // Detect loop end frame before UpdateLoopStatus resets the offset.
+  // Loop-end frame: decode it here (output limited to loop_subframe_end),
+  // jump to loop_start afterwards in the next-offset step.
   bool is_loop_end_frame = false;
   if (data->loop_count > 0) {
     const uint32_t loop_end = std::max(kBitsPerPacketHeader, data->loop_end);
     is_loop_end_frame = (data->input_buffer_read_offset == loop_end);
   }
-
-  UpdateLoopStatus(data);
 
   if (!data->output_buffer_block_count) {
     REXAPU_ERROR("XmaContext {}: Error - Received 0 for output_buffer_block_count!", id());
@@ -654,17 +653,22 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
       loop_frame_output_limit_ = 0;
     }
 
-    // Loop start: skip leading subframes per loop_subframe_skip.
+    // Loop start: skip leading subframes per loop_subframe_skip. skip == 4
+    // means the whole frame is a warm-up frame (frame-aligned loop start):
+    // decode seeds the codec state, output is fully discarded.
     if (loop_start_skip_pending_) {
       const uint8_t skip = data->loop_subframe_skip << data->is_stereo;
-      if (skip < current_frame_remaining_subframes_) {
-        current_frame_remaining_subframes_ -= skip;
-      }
+      current_frame_remaining_subframes_ -= std::min(skip, current_frame_remaining_subframes_);
       loop_start_skip_pending_ = false;
     }
   }
 
   // Compute where to go next.
+  if (is_loop_end_frame) {
+    UpdateLoopStatus(data);
+    return;
+  }
+
   if (!packet_info.isLastFrameInPacket()) {
     const uint32_t next_frame_offset =
         (data->input_buffer_read_offset + bits_to_copy) % kBitsPerPacket;

@@ -62,10 +62,14 @@ struct XMA_CONTEXT_DATA {
   uint32_t input_buffer_1_packet_count : 12;  // XMASetInputBuffer1, number of
                                               // 2KB packets. Max 4095 packets.
                                               // These packets form a block.
-  uint32_t loop_subframe_start : 2;           // +12bit, XMASetLoopData
-  uint32_t loop_subframe_end : 3;             // +14bit, XMASetLoopData
-  uint32_t loop_subframe_skip : 3;            // +17bit, XMASetLoopData might be
-                                              // subframe_decode_count
+  uint32_t loop_subframe_end : 2;             // +12bit, XMAPlaybackSetLoop
+                                              // dwLoopSubframeEnd: last loop frame
+                                              // plays subframes 0..end
+  uint32_t unk_dword_1_a : 3;                 // +14bit
+  uint32_t loop_subframe_skip : 3;            // +17bit, XMAPlaybackSetLoop
+                                              // dwLoopSubframeSkip: subframes to
+                                              // discard at loop start; 4 = whole
+                                              // warm-up frame (frame-aligned loops)
   uint32_t subframe_decode_count : 4;         // +20bit
   uint32_t output_buffer_padding : 3;         // +24bit, extra output buffer blocks
                                               // reserved per decoded frame
