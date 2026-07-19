@@ -86,7 +86,7 @@ void MnkInputDriver::OnClosing(rex::ui::UIEvent&) {
   if (attached_window_) {
     if (mouse_captured_) {
       mouse_captured_ = false;
-      attached_window_->SetCursorVisibility(rex::ui::Window::CursorVisibility::kVisible);
+      attached_window_->SetCursorVisibility(precapture_cursor_visibility_);
       attached_window_->ReleaseMouse();
     }
     attached_window_->RemoveInputListener(this);
@@ -281,6 +281,7 @@ void MnkInputDriver::UpdateMouseCapture() {
 
   if (should_capture && !mouse_captured_) {
     mouse_captured_ = true;
+    precapture_cursor_visibility_ = attached_window_->GetCursorVisibility();
     attached_window_->SetCursorVisibility(rex::ui::Window::CursorVisibility::kHidden);
     attached_window_->CaptureMouse();
     // Reset deltas to avoid a spike on capture start
@@ -288,7 +289,7 @@ void MnkInputDriver::UpdateMouseCapture() {
     mouse_dy_ = 0;
   } else if (!should_capture && mouse_captured_) {
     mouse_captured_ = false;
-    attached_window_->SetCursorVisibility(rex::ui::Window::CursorVisibility::kVisible);
+    attached_window_->SetCursorVisibility(precapture_cursor_visibility_);
     attached_window_->ReleaseMouse();
   }
 
@@ -378,7 +379,7 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
   mouse_dy_ = 0;
   if (mouse_captured_ && attached_window_) {
     mouse_captured_ = false;
-    attached_window_->SetCursorVisibility(rex::ui::Window::CursorVisibility::kVisible);
+    attached_window_->SetCursorVisibility(precapture_cursor_visibility_);
     attached_window_->ReleaseMouse();
   }
 }

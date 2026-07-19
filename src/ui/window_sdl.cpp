@@ -286,8 +286,7 @@ void WindowSDL::RearmCursorAutoHideTimer() {
   if (cursor_hide_timer_) {
     SDL_RemoveTimer(cursor_hide_timer_);
   }
-  cursor_hide_timer_ =
-      SDL_AddTimer(kDefaultCursorAutoHideMilliseconds, CursorAutoHideTimerCallback, this);
+  cursor_hide_timer_ = SDL_AddTimer(GetCursorAutoHideDelayMs(), CursorAutoHideTimerCallback, this);
 }
 
 void WindowSDL::FocusImpl() {
