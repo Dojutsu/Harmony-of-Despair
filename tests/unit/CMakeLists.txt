@@ -33,7 +33,6 @@ target_include_directories(unit_tests PRIVATE
 )
 
 target_link_libraries(unit_tests PRIVATE
-    rexcore
     rexcodegen
     rexruntime
     Catch2::Catch2WithMain
