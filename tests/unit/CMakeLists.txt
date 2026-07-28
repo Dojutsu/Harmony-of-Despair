@@ -19,6 +19,7 @@ add_executable(unit_tests
     codegen/manifest_test.cpp
     rexglue/migration_scan_test.cpp
     rexglue/ui_test.cpp
+    input/input_assignment_test.cpp
 )
 
 target_sources(unit_tests PRIVATE

@@ -26,7 +26,6 @@
 #endif
 
 REXCVAR_DEFINE_BOOL(mnk_mode, false, "Input", "Enable keyboard/mouse controller emulation");
-REXCVAR_DEFINE_INT32(mnk_user_index, 0, "Input", "Controller slot (0-3) for MnK").range(0, 3);
 REXCVAR_DEFINE_DOUBLE(mnk_sensitivity, 1.0, "Input", "Mouse sensitivity for right stick")
     .range(0.01, 10.0);
 
@@ -54,6 +53,13 @@ REXCVAR_DEFINE_STRING(keybind_start, "Escape", "Input/Keybinds/Controller", "Sta
 REXCVAR_DEFINE_STRING(keybind_guide, "", "Input/Keybinds/Controller", "Guide button");
 
 namespace rex::input::mnk {
+
+namespace {
+
+// A single device, so its handle is a constant.
+constexpr rex::input::DeviceId kMnkDevice = static_cast<rex::input::DeviceId>(0x4D4E4B00);
+
+}  // namespace
 
 using rex::ui::VirtualKey;
 
@@ -95,10 +101,6 @@ void MnkInputDriver::OnClosing(rex::ui::UIEvent&) {
   }
 }
 
-uint32_t MnkInputDriver::UserIndex() const {
-  return static_cast<uint32_t>(REXCVAR_GET(mnk_user_index));
-}
-
 bool MnkInputDriver::IsEnabled() const {
   return REXCVAR_GET(mnk_mode);
 }
@@ -111,9 +113,21 @@ static bool IsBindPressed(const bool (&key_down)[256], const std::string& cvar_v
   return idx < 256 && key_down[idx];
 }
 
-X_RESULT MnkInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
-                                         X_INPUT_CAPABILITIES* out_caps) {
-  if (!IsEnabled() || user_index != UserIndex()) {
+void MnkInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
+  // Disabled means no device at all, so it never occupies a guest user slot.
+  if (!IsEnabled()) {
+    return;
+  }
+  DeviceInfo info;
+  info.id = kMnkDevice;
+  info.name = "Keyboard and Mouse";
+  info.synthetic = true;
+  out.push_back(info);
+}
+
+X_RESULT MnkInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
+                                               X_INPUT_CAPABILITIES* out_caps) {
+  if (!IsEnabled() || id != kMnkDevice) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   if (out_caps) {
@@ -134,8 +148,8 @@ X_RESULT MnkInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
   return X_ERROR_SUCCESS;
 }
 
-X_RESULT MnkInputDriver::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
-  if (!IsEnabled() || user_index != UserIndex()) {
+X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+  if (!IsEnabled() || id != kMnkDevice) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
@@ -223,16 +237,16 @@ X_RESULT MnkInputDriver::GetState(uint32_t user_index, X_INPUT_STATE* out_state)
   return X_ERROR_SUCCESS;
 }
 
-X_RESULT MnkInputDriver::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
-  if (!IsEnabled() || user_index != UserIndex()) {
+X_RESULT MnkInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibration) {
+  if (!IsEnabled() || id != kMnkDevice) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   return X_ERROR_SUCCESS;
 }
 
-X_RESULT MnkInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
-                                      X_INPUT_KEYSTROKE* out_keystroke) {
-  if (!IsEnabled() || user_index != UserIndex()) {
+X_RESULT MnkInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
+                                            X_INPUT_KEYSTROKE* out_keystroke) {
+  if (!IsEnabled() || id != kMnkDevice) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   std::lock_guard lock(state_mutex_);
@@ -251,7 +265,8 @@ void MnkInputDriver::EnqueueKeystroke(uint16_t vk_pad, bool down) {
   ks.virtual_key = vk_pad;
   ks.unicode = 0;
   ks.flags = down ? X_INPUT_KEYSTROKE_KEYDOWN : X_INPUT_KEYSTROKE_KEYUP;
-  ks.user_index = static_cast<uint8_t>(UserIndex());
+  // InputSystem stamps the guest user this device is assigned to.
+  ks.user_index = 0;
   ks.hid_code = 0;
   keystroke_queue_.push(ks);
 }
