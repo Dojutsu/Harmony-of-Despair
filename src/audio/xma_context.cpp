@@ -190,11 +190,15 @@ void XmaContext::ClearLocked(XMA_CONTEXT_DATA* data) {
 }
 
 void XmaContext::ResetDecoderState() {
-  // A freed or re-initialized context is a new logical stream. Drop the previous
-  // wave's MDCT overlap-add tail (persistent av_context_) and any buffered
-  // subframes so frame 0 of the next same-format wave is not contaminated.
-  if (av_context_ && avcodec_is_open(av_context_)) {
-    avcodec_flush_buffers(av_context_);
+  // A freed or re-initialized context is a new logical stream, so the previous
+  // wave's MDCT overlap-add tail must not survive into frame 0 of the next one.
+  // avcodec_flush_buffers() cannot drop it: ff_xmaframes_decoder declares no
+  // flush callback, so the call never reaches the code clearing channel[].out.
+  // Invalidating the cached format makes PrepareDecoder reopen the codec on the
+  // next decode, which does discard the history.
+  if (av_context_) {
+    av_context_->sample_rate = 0;
+    av_context_->channels = 0;
   }
   raw_frame_.fill(0);
   decoded_frame_.fill(0);
