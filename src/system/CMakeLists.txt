@@ -1,5 +1,8 @@
 set(REXSYSTEM_SOURCES
     runtime.cpp
+    embedded_metadata.cpp
+    achievement_manager.cpp
+    achievements.cpp
     kernel_state.cpp
     xmemory.cpp
     kernel_module.cpp
@@ -17,7 +20,6 @@ set(REXSYSTEM_SOURCES
     xsymboliclink.cpp
     xobject.cpp
     xmodule.cpp
-    shared_library.cpp
     guest_path.cpp
 
     # Utilities
@@ -40,6 +42,7 @@ set(REXSYSTEM_SOURCES
     map_parser.cpp
     module.cpp
     function_dispatcher.cpp
+    gpu_plugin_loader.cpp
     thread.cpp
     thread_state.cpp
     xex_module.cpp
@@ -54,6 +57,7 @@ set_target_properties(rexruntime PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
 
 target_include_directories(rexruntime PUBLIC
     $<BUILD_INTERFACE:${REXGLUE_ROOT}/include>
+    $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_include_directories(rexruntime PRIVATE
@@ -70,6 +74,7 @@ target_link_libraries(rexruntime
     PRIVATE
         aes128
         mspack
+        xxHash::xxhash
 )
 
 if(REXGLUE_ENABLE_TRACY)
@@ -85,6 +90,7 @@ endif()
 
 if(WIN32)
     target_link_libraries(rexruntime PRIVATE ws2_32)
+    target_compile_definitions(rexruntime PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
 if(REXGLUE_USE_D3D12)
