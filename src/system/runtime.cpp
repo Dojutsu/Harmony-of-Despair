@@ -101,9 +101,6 @@ X_STATUS Runtime::Setup(RuntimeConfig config) {
     return status;
   };
 
-  // Start profiler (Tracy network threads, counter init)
-  rex::perf::Profiler::Startup();
-
   // Initialize SEH exception support for hardware exception handling
   rex::initialize_seh();
 

@@ -78,7 +78,7 @@ target_link_libraries(rexruntime
 )
 
 if(REXGLUE_ENABLE_TRACY)
-    target_link_libraries(rexruntime PUBLIC TracyClient)
+    target_link_libraries(rexruntime PUBLIC $<$<NOT:$<CONFIG:Release>>:TracyClient>)
     target_compile_definitions(rexruntime PUBLIC
         $<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PROFILING>)
 endif()
