@@ -15,6 +15,7 @@
 
 #include <rex/assert.h>
 #include <rex/audio/conversion.h>
+#include <rex/audio/downmix.h>
 #include <rex/audio/flags.h>
 #include <rex/audio/sdl/sdl_audio_driver.h>
 #include <rex/cvar.h>
@@ -75,7 +76,9 @@ bool SDLAudioDriver::Initialize() {
     obtained_spec = desired_spec;
   }
 
-  if (obtained_spec.channels == 2) {
+  // A 1-channel device gets the stereo fold too, then SDL collapses to mono.
+  // Handing it a 6ch stream instead would use SDL's own downmix.
+  if (obtained_spec.channels <= 2) {
     SDL_DestroyAudioStream(sdl_stream_);
     sdl_stream_ = nullptr;
     desired_spec.channels = 2;
@@ -166,6 +169,9 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
     REXAPU_ERROR("SDLAudioDriver::SDLCallback failed to allocate {} samples", sample_count);
     return;
   }
+  // Snapshot once. A change mid-callback would split the frame across two mixes.
+  const StereoFold fold = GetStereoFold();
+  const float gain = GetOutputGain();
   while (additional_amount > 0) {
     static uint32_t sdl_callback_count = 0;
     std::unique_lock<std::mutex> guard(driver->frames_mutex_);
@@ -188,10 +194,11 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
       } else {
         switch (driver->sdl_device_channels_) {
           case 2:
-            conversion::sequential_6_BE_to_interleaved_2_LE(data, buffer, channel_samples_);
+            conversion::sequential_6_BE_to_interleaved_2_LE(data, buffer, channel_samples_, fold,
+                                                            gain);
             break;
           case 6:
-            conversion::sequential_6_BE_to_interleaved_6_LE(data, buffer, channel_samples_);
+            conversion::sequential_6_BE_to_interleaved_6_LE(data, buffer, channel_samples_, gain);
             break;
           default:
             assert_unhandled_case(driver->sdl_device_channels_);
