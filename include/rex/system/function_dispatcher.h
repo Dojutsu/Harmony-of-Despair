@@ -24,7 +24,7 @@
 
 #include <rex/memory.h>
 #include <rex/memory/mapped_memory.h>
-#include <rex/ppc/context.h>
+#include <rex/ppc/func.h>
 #include <rex/system/export_resolver.h>
 #include <rex/system/thread_state.h>
 #include <rex/thread/mutex.h>

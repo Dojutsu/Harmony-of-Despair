@@ -18,7 +18,7 @@
 #include <vector>
 
 #include <rex/memory/utils.h>
-#include <rex/ppc/context.h>  // PPCFunc type (minimal header)
+#include <rex/ppc/func.h>  // PPCFunc type
 #include <rex/system/mmio_handler.h>
 #include <rex/thread/mutex.h>
 

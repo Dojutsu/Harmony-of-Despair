@@ -18,49 +18,12 @@
 #include <cstring>
 
 #include <rex/platform/fpscr.h>
+#include <rex/ppc/func.h>
 #include <rex/types.h>
 
 #include <simde/x86/avx.h>
 #include <simde/x86/sse.h>
 #include <simde/x86/sse4.1.h>
-
-//=============================================================================
-// PPCFunc Type Definition
-//=============================================================================
-// Function signature for recompiled PPC functions.
-// All recompiled functions take a context reference and memory base pointer.
-
-// Forward declaration of the PPC execution context
-struct PPCContext;
-
-// Function signature for recompiled PPC functions
-using PPCFunc = void(PPCContext& ctx, uint8_t* base);
-
-namespace rex::runtime {
-PPCFunc* ResolveIndirectFunction(uint32_t guest_address);
-}  // namespace rex::runtime
-
-//=============================================================================
-// PPC Function Macros
-//=============================================================================
-
-#define REX_JOIN(x, y) x##y
-#define REX_XSTRINGIFY(x) #x
-#define REX_STRINGIFY(x) REX_XSTRINGIFY(x)
-#define REX_FUNC(x) void x([[maybe_unused]] PPCContext& __restrict ctx, uint8_t* base)
-#define REX_EXTERN(x) extern "C" REX_FUNC(x)
-#define REX_WEAK_FUNC(x) __attribute__((weak, noinline)) REX_FUNC(x)
-
-//=============================================================================
-// Function Mapping
-//=============================================================================
-
-struct PPCFuncMapping {
-  size_t guest;
-  PPCFunc* host;
-};
-
-extern PPCFuncMapping PPCFuncMappings[];
 
 //=============================================================================
 // Pack/Unpack Constants (NORMPACKED32 - 2:10:10:10 format)
