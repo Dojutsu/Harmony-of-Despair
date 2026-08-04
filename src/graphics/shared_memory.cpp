@@ -53,8 +53,6 @@ void SharedMemory::InitializeSparseHostGpuMemory(uint32_t granularity_log2) {
 }
 
 void SharedMemory::ShutdownCommon() {
-  ReleaseTraceDownloadRanges();
-
   FireWatches(0, (kBufferSize - 1) >> page_size_log2_, false);
   assert_true(global_watches_.empty());
   // No watches now, so no references to the pools accessible by guest threads -
@@ -644,101 +642,6 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
 
   return std::make_pair(page_first << page_size_log2_, (page_last - page_first + 1)
                                                            << page_size_log2_);
-}
-
-void SharedMemory::PrepareForTraceDownload() {
-  ReleaseTraceDownloadRanges();
-  assert_true(trace_download_ranges_.empty());
-  assert_zero(trace_download_page_count_);
-
-  // Invalidate the entire memory CPU->GPU memory copy so all the history
-  // doesn't have to be written into every frame trace, and collect the list of
-  // ranges with data modified on the GPU.
-
-  uint32_t fire_watches_range_start = UINT32_MAX;
-  uint32_t gpu_written_range_start = UINT32_MAX;
-  auto global_lock = global_critical_region_.Acquire();
-  uint64_t* valid_flags = active_valid_flags_.load(std::memory_order_relaxed);
-  for (uint32_t i = 0; i < num_system_page_flags_; ++i) {
-    uint64_t previously_valid_block = valid_flags ? valid_flags[i] : 0;
-    uint64_t gpu_written_block = system_page_flags_valid_and_gpu_written_[i];
-    if (valid_flags) {
-      valid_flags[i] = gpu_written_block;
-    }
-
-    // Fire watches on the invalidated pages.
-    uint64_t fire_watches_block = previously_valid_block & ~gpu_written_block;
-    uint64_t fire_watches_break_block = ~fire_watches_block;
-    while (true) {
-      uint32_t fire_watches_block_page;
-      if (!rex::bit_scan_forward(fire_watches_range_start == UINT32_MAX ? fire_watches_block
-                                                                        : fire_watches_break_block,
-                                 &fire_watches_block_page)) {
-        break;
-      }
-      uint32_t fire_watches_page = (i << 6) + fire_watches_block_page;
-      if (fire_watches_range_start == UINT32_MAX) {
-        fire_watches_range_start = fire_watches_page;
-      } else {
-        FireWatches(fire_watches_range_start, fire_watches_page - 1, false);
-        fire_watches_range_start = UINT32_MAX;
-      }
-      uint64_t fire_watches_block_mask = ~((uint64_t(1) << fire_watches_block_page) - 1);
-      fire_watches_block &= fire_watches_block_mask;
-      fire_watches_break_block &= fire_watches_block_mask;
-    }
-
-    // Add to the GPU-written ranges.
-    uint64_t gpu_written_break_block = ~gpu_written_block;
-    while (true) {
-      uint32_t gpu_written_block_page;
-      if (!rex::bit_scan_forward(
-              gpu_written_range_start == UINT32_MAX ? gpu_written_block : gpu_written_break_block,
-              &gpu_written_block_page)) {
-        break;
-      }
-      uint32_t gpu_written_page = (i << 6) + gpu_written_block_page;
-      if (gpu_written_range_start == UINT32_MAX) {
-        gpu_written_range_start = gpu_written_page;
-      } else {
-        uint32_t gpu_written_range_length = gpu_written_page - gpu_written_range_start;
-        // Call EnsureHostGpuMemoryAllocated in case the page was marked as
-        // GPU-written not as a result to an actual write to the shared memory
-        // buffer, but, for instance, by resolving with resolution scaling (to a
-        // separate buffer).
-        if (EnsureHostGpuMemoryAllocated(gpu_written_range_start << page_size_log2_,
-                                         gpu_written_range_length << page_size_log2_)) {
-          trace_download_ranges_.push_back(
-              std::make_pair(gpu_written_range_start << page_size_log2_,
-                             gpu_written_range_length << page_size_log2_));
-          trace_download_page_count_ += gpu_written_range_length;
-        }
-        gpu_written_range_start = UINT32_MAX;
-      }
-      uint64_t gpu_written_block_mask = ~((uint64_t(1) << gpu_written_block_page) - 1);
-      gpu_written_block &= gpu_written_block_mask;
-      gpu_written_break_block &= gpu_written_block_mask;
-    }
-  }
-  uint32_t page_count = kBufferSize >> page_size_log2_;
-  if (fire_watches_range_start != UINT32_MAX) {
-    FireWatches(fire_watches_range_start, page_count - 1, false);
-  }
-  if (gpu_written_range_start != UINT32_MAX) {
-    uint32_t gpu_written_range_length = page_count - gpu_written_range_start;
-    if (EnsureHostGpuMemoryAllocated(gpu_written_range_start << page_size_log2_,
-                                     gpu_written_range_length << page_size_log2_)) {
-      trace_download_ranges_.push_back(std::make_pair(gpu_written_range_start << page_size_log2_,
-                                                      gpu_written_range_length << page_size_log2_));
-      trace_download_page_count_ += gpu_written_range_length;
-    }
-  }
-}
-
-void SharedMemory::ReleaseTraceDownloadRanges() {
-  trace_download_ranges_.clear();
-  trace_download_ranges_.shrink_to_fit();
-  trace_download_page_count_ = 0;
 }
 
 bool SharedMemory::EnsureHostGpuMemoryAllocated(uint32_t start, uint32_t length) {

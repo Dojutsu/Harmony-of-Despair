@@ -18,7 +18,6 @@ set(REXGPU_XENOS_SOURCES
     # GPU system
     graphics_system.cpp
     command_processor.cpp
-    trace_writer.cpp
     util/draw_extent_estimator.cpp
     util/draw.cpp
     packet_disassembler.cpp
@@ -119,7 +118,6 @@ target_compile_options(rexgpu-xenos PRIVATE -Wno-unused-variable)
 target_link_libraries(rexgpu-xenos PRIVATE
     rexruntime
     xxHash::xxhash
-    snappy
 )
 
 if(REXGLUE_USE_VULKAN)

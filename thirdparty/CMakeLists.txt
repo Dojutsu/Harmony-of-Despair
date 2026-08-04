@@ -28,7 +28,6 @@ set(REQUIRED_SUBMODULES
     xxHash
     spdlog
     fmt
-    snappy
     utfcpp
     imgui
     sdl3
@@ -166,15 +165,6 @@ set(SPDLOG_BUILD_BENCH OFF CACHE BOOL "" FORCE)
 set(SPDLOG_INSTALL ON CACHE BOOL "" FORCE)
 add_subdirectory(spdlog)
 target_compile_options(spdlog PRIVATE -w)
-
-#=============================================================================
-# snappy - Fast compression/decompression (GPU traces)
-#=============================================================================
-set(SNAPPY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(SNAPPY_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
-set(SNAPPY_INSTALL ON CACHE BOOL "" FORCE)
-add_subdirectory(snappy)
-target_compile_options(snappy PRIVATE -w)
 
 #=============================================================================
 # utfcpp - UTF-8 string library (header-only)
