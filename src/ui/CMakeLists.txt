@@ -91,6 +91,8 @@ endif()
 add_library(rexui OBJECT ${REXUI_SOURCES})
 add_library(rex::ui ALIAS rexui)
 
+rex_target_pch(rexui <rex/math.h>)
+
 target_include_directories(rexui PUBLIC
     $<BUILD_INTERFACE:${REXGLUE_ROOT}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>

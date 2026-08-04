@@ -101,6 +101,7 @@ add_library(rexcodegen STATIC
 add_library(rex::codegen ALIAS rexcodegen)
 add_dependencies(rexcodegen embed_templates)
 
+rex_target_pch(rexcodegen <rex/codegen/function_types.h>)
 
 target_include_directories(rexcodegen
     PUBLIC

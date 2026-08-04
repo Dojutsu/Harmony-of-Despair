@@ -55,6 +55,19 @@ add_library(rex::kernel ALIAS rexruntime)
 
 set_target_properties(rexruntime PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
 
+rex_target_pch(rexruntime
+    <mutex>
+    <unordered_map>
+    <rex/math.h>
+    <rex/string.h>
+    <rex/memory.h>
+    <rex/filesystem.h>
+    <rex/thread.h>
+    <rex/thread/mutex.h>
+    <rex/ppc/context.h>
+    <rex/system/kernel_state.h>
+)
+
 target_include_directories(rexruntime PUBLIC
     $<BUILD_INTERFACE:${REXGLUE_ROOT}/include>
     $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>

@@ -16,6 +16,19 @@ add_library(rexaudio OBJECT
 )
 add_library(rex::audio ALIAS rexaudio)
 
+rex_target_pch(rexaudio
+    <mutex>
+    <rex/math.h>
+    <rex/string.h>
+    <rex/memory.h>
+    <rex/filesystem.h>
+    <rex/thread.h>
+    <rex/thread/mutex.h>
+    <rex/ppc/context.h>
+    <rex/system/kernel_state.h>
+    <rex/system/xthread.h>
+)
+
 target_include_directories(rexaudio PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>

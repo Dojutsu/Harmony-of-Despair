@@ -23,6 +23,8 @@ target_link_libraries(rexglue
         rexcodegen
 )
 
+rex_target_pch(rexglue <CLI/CLI.hpp>)
+
 # Delay-load FidelityFX DLLs so rexglue can run in tool mode without them.
 if(WIN32)
     if(TARGET amd_fidelityfx_vk)

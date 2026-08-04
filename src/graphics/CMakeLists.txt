@@ -112,6 +112,24 @@ target_include_directories(rexgpu-xenos PRIVATE
 
 target_compile_options(rexgpu-xenos PRIVATE -Wno-unused-variable)
 
+rex_target_pch(rexgpu-xenos
+    <mutex>
+    <unordered_map>
+    <rex/math.h>
+    <rex/memory.h>
+    <rex/thread/mutex.h>
+    <rex/system/xmemory.h>
+    <rex/graphics/xenos.h>
+    <rex/graphics/registers.h>
+    <rex/graphics/format/ucode.h>
+    <rex/graphics/pipeline/shader/shader.h>
+)
+
+if(REXGPU_XENOS_DXBC_THIRDPARTY_SOURCES)
+    set_source_files_properties(${REXGPU_XENOS_DXBC_THIRDPARTY_SOURCES}
+        PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+endif()
+
 # Everything PRIVATE: the plugin has no consumers. Never link the OBJECT
 # libraries (rexcore/rexui) here; rexruntime already contains those objects
 # and relinking them would duplicate global state.
