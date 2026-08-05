@@ -112,7 +112,8 @@ if(REXGLUE_USE_VULKAN)
 endif()
 
 if(REXGLUE_ENABLE_TRACY)
-    target_link_libraries(rexcore PUBLIC $<$<NOT:$<CONFIG:Release>>:TracyClient>)
+    target_link_libraries(rexcore PUBLIC
+        $<$<NOT:$<CONFIG:Release>>:$<TARGET_NAME:TracyClient>>)
     target_compile_definitions(rexcore PUBLIC
         $<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PROFILING>)
 endif()

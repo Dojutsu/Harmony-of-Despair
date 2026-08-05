@@ -91,7 +91,11 @@ target_link_libraries(rexruntime
 )
 
 if(REXGLUE_ENABLE_TRACY)
-    target_link_libraries(rexruntime PUBLIC $<$<NOT:$<CONFIG:Release>>:TracyClient>)
+    # TARGET_NAME is what tells install(EXPORT) this text is a target to
+    # namespace. Without it the plain name survives into the installed config
+    # and consumers link a bare TracyClient they have no search path for.
+    target_link_libraries(rexruntime PUBLIC
+        $<$<NOT:$<CONFIG:Release>>:$<TARGET_NAME:TracyClient>>)
     target_compile_definitions(rexruntime PUBLIC
         $<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PROFILING>)
 endif()
