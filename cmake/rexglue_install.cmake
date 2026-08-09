@@ -15,7 +15,6 @@ set(REXGLUE_INSTALL_TARGETS
     disruptorplus renderdoc simde tomlplusplus
     aes128 mspack o1heap disasm xxhash
     libavcodec libavutil
-    rexglue
 )
 
 if(REXGLUE_USE_VULKAN)
@@ -47,6 +46,13 @@ install(TARGETS ${REXGLUE_INSTALL_TARGETS}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# A Debug codegen tool runs an order of magnitude slower, so only Release ships.
+install(TARGETS rexglue
+    EXPORT rexglueTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    CONFIGURATIONS Release
 )
 
 if(REXGLUE_INSTALL_FIDELITYFX_TARGETS)

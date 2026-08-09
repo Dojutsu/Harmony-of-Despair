@@ -11,6 +11,8 @@ add_executable(rexglue
     commands/legacy_config.cpp
 )
 
+rex_config_postfix(rexglue)
+
 target_include_directories(rexglue
     PRIVATE
         ${REXGLUE_ROOT}/src

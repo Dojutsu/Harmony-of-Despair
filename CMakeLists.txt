@@ -86,6 +86,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_DEBUG_POSTFIX d)
 set(CMAKE_RELWITHDEBINFO_POSTFIX rd)
 
+# CMAKE_<CONFIG>_POSTFIX seeds libraries only, so without this every config of an
+# executable installs over the last one.
+function(rex_config_postfix target)
+    set_target_properties(${target} PROPERTIES
+        DEBUG_POSTFIX "${CMAKE_DEBUG_POSTFIX}"
+        RELWITHDEBINFO_POSTFIX "${CMAKE_RELWITHDEBINFO_POSTFIX}")
+endfunction()
+
 if(NOT WIN32)
     # Use appropriate code model based on architecture
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
