@@ -179,21 +179,21 @@ bool ReXApp::SetupEnvironment() {
   OnPostInitLogging();
 
   if (std::filesystem::exists(config_path_))
-    REXLOG_INFO("Loaded config: {}", config_path_.filename().string());
+    REXLOG_DEBUG("Loaded config: {}", config_path_.filename().string());
 
-  REXLOG_INFO("{} starting", GetName());
+  REXLOG_DEBUG("{} starting", GetName());
   if (!game_data_root_.empty()) {
-    REXLOG_INFO("  Game directory: {}", game_data_root_.string());
+    REXLOG_DEBUG("  Game directory: {}", game_data_root_.string());
   }
   if (!user_data_root_.empty()) {
-    REXLOG_INFO("  User data:      {}", user_data_root_.string());
+    REXLOG_DEBUG("  User data:      {}", user_data_root_.string());
   }
   if (!update_data_root_.empty()) {
-    REXLOG_INFO("  Update data:    {}", update_data_root_.string());
+    REXLOG_DEBUG("  Update data:    {}", update_data_root_.string());
   }
-  REXLOG_INFO("  Cache root:     {}", cache_root_.string());
+  REXLOG_DEBUG("  Cache root:     {}", cache_root_.string());
   if (!metadata_root_.empty()) {
-    REXLOG_INFO("  Metadata root:  {}", metadata_root_.string());
+    REXLOG_DEBUG("  Metadata root:  {}", metadata_root_.string());
   }
 
   return true;

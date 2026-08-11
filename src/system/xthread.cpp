@@ -1443,8 +1443,8 @@ XHostThread::XHostThread(KernelState* kernel_state, uint32_t stack_size, uint32_
 }
 
 void XHostThread::Execute() {
-  REXSYS_INFO("XThread::Execute thid {} (handle={:08X}, '{}', native={:08X}, <host>)", thread_id_,
-              handle(), thread_name_, thread_->system_id());
+  REXSYS_DEBUG("XThread::Execute thid {} (handle={:08X}, '{}', native={:08X}, <host>)", thread_id_,
+               handle(), thread_name_, thread_->system_id());
 
   // Let the kernel know we are starting.
   kernel_state_->OnThreadExecute(this);

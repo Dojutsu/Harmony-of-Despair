@@ -124,7 +124,6 @@ X_STATUS Runtime::Setup(RuntimeConfig config) {
 
   function_dispatcher_ =
       std::make_unique<runtime::FunctionDispatcher>(memory_.get(), export_resolver_.get());
-  REXSYS_INFO("FunctionDispatcher initialized");
 
   // Create virtual file system
   file_system_ = std::make_unique<rex::filesystem::VirtualFileSystem>();
@@ -142,7 +141,7 @@ X_STATUS Runtime::Setup(RuntimeConfig config) {
                     input_status);
         input_system_.reset();
       } else {
-        REXSYS_INFO("Input system initialized");
+        REXSYS_DEBUG("Input system initialized");
       }
     }
   }
@@ -162,7 +161,7 @@ X_STATUS Runtime::Setup(RuntimeConfig config) {
                     audio_status);
         audio_system_.reset();
       } else {
-        REXSYS_INFO("Audio system initialized");
+        REXSYS_DEBUG("Audio system initialized");
       }
     }
   }
@@ -174,7 +173,7 @@ X_STATUS Runtime::Setup(RuntimeConfig config) {
 
   // Skip GPU initialization in tool mode (for analysis tools like codegen)
   if (tool_mode_) {
-    REXSYS_INFO("Runtime initialized in tool mode (no GPU)");
+    REXSYS_DEBUG("Runtime initialized in tool mode (no GPU)");
     setup_complete_ = true;
     return X_STATUS_SUCCESS;
   }
@@ -188,12 +187,12 @@ X_STATUS Runtime::Setup(RuntimeConfig config) {
     if (XFAILED(gpu_status)) {
       return fail(gpu_status, "GPU setup failed");
     }
-    REXSYS_INFO("GPU system initialized (presentation={})", with_presentation);
+    REXSYS_DEBUG("GPU system initialized (presentation={})", with_presentation);
   } else {
-    REXSYS_INFO("Runtime initialized without graphics system (native rendering mode)");
+    REXSYS_DEBUG("Runtime initialized without graphics system (native rendering mode)");
   }
 
-  REXSYS_INFO("Runtime initialized successfully");
+  REXSYS_DEBUG("Runtime initialized successfully");
   setup_complete_ = true;
   return X_STATUS_SUCCESS;
 }
@@ -306,7 +305,7 @@ bool Runtime::SetupVfs() {
     REXSYS_ERROR("Runtime::SetupVfs: Failed to register host path device");
     return false;
   }
-  REXSYS_INFO("  Mounted {} at {}", abs_game_root.string(), mount_path);
+  REXSYS_DEBUG("  Mounted {} at {}", abs_game_root.string(), mount_path);
 
   // Register symbolic links for game: and D:
   file_system_->RegisterSymbolicLink("game:", mount_path);
@@ -322,7 +321,7 @@ bool Runtime::SetupVfs() {
           std::make_unique<rex::filesystem::HostPathDevice>(update_mount, abs_update_root, true);
       if (update_device->Initialize() && file_system_->RegisterDevice(std::move(update_device))) {
         file_system_->RegisterSymbolicLink("update:", update_mount);
-        REXSYS_INFO("  Mounted {} at update:", abs_update_root.string());
+        REXSYS_DEBUG("  Mounted {} at update:", abs_update_root.string());
       }
     }
   }
@@ -349,7 +348,7 @@ bool Runtime::SetupVfs() {
 }
 
 X_STATUS Runtime::LoadXexImage(const std::string_view module_path) {
-  REXSYS_INFO("Loading XEX image: {}", std::string(module_path));
+  REXSYS_DEBUG("Loading XEX image: {}", std::string(module_path));
 
   auto module = system::object_ref<system::UserModule>(new system::UserModule(kernel_state_.get()));
   X_STATUS status = module->LoadFromFile(module_path);

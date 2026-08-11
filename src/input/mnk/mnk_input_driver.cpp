@@ -155,7 +155,6 @@ MnkInputDriver::~MnkInputDriver() {
 }
 
 X_STATUS MnkInputDriver::Setup() {
-  REXLOG_INFO("MnK input driver initialized");
   return X_STATUS_SUCCESS;
 }
 

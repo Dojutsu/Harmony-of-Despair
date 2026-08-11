@@ -593,7 +593,7 @@ void LoadConfig(const std::filesystem::path& config_path) {
   try {
     auto config = toml::parse_file(config_path.string());
     ApplyTomlTable(config, "");
-    REXLOG_INFO("Loaded config from {}", config_path.string());
+    REXLOG_DEBUG("Loaded config from {}", config_path.string());
   } catch (const toml::parse_error& err) {
     REXLOG_ERROR("Failed to parse config {}: {}", config_path.string(), err.what());
   }

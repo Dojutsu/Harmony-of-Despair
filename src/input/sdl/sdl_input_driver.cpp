@@ -620,8 +620,8 @@ DeviceId SDLInputDriver::AllocateDeviceId() {
 }
 
 bool SDLInputDriver::TestSDLVersion() const {
-  REXLOG_INFO("SDL: Using version {}.{}.{}", SDL_MAJOR_VERSION, SDL_MINOR_VERSION,
-              SDL_MICRO_VERSION);
+  REXLOG_DEBUG("SDL: Using version {}.{}.{}", SDL_MAJOR_VERSION, SDL_MINOR_VERSION,
+               SDL_MICRO_VERSION);
   return true;
 }
 
