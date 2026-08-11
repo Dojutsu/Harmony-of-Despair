@@ -34,6 +34,7 @@ set(REXUI_OVERLAY_SOURCES
 # Vulkan UI backend
 set(REXUI_VULKAN_SOURCES
     vulkan/linked_type_descriptor_set_allocator.cpp
+    vulkan/vulkan_moltenvk.cpp
     vulkan/single_layout_descriptor_set_pool.cpp
     vulkan/spirv_tools_context.cpp
     vulkan/ui_samplers.cpp
@@ -67,6 +68,10 @@ if(WIN32)
     set(REXUI_PLATFORM_SOURCES
         surface_win.cpp
     )
+elseif(APPLE)
+    set(REXUI_PLATFORM_SOURCES
+        surface_mac.cpp
+    )
 else()
     set(REXUI_PLATFORM_SOURCES
         surface_gnulinux.cpp
@@ -98,6 +103,7 @@ target_include_directories(rexui PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_include_directories(rexui PRIVATE
+    ${PROJECT_BINARY_DIR}/include  # Generated macOS Vulkan path data
     ${REXGLUE_ROOT}/src  # For ui/shaders/bytecode includes
     ${REXGLUE_ROOT}/thirdparty/stb  # stb_image.h for icon decoding
 )
@@ -140,7 +146,7 @@ if(REXGLUE_USE_VULKAN)
 endif()
 
 # Platform-specific dependencies
-if(NOT WIN32)
+if(UNIX AND NOT APPLE)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(X11_XCB REQUIRED x11-xcb)
 
@@ -150,6 +156,8 @@ if(NOT WIN32)
     target_link_libraries(rexui PUBLIC
         ${X11_XCB_LIBRARIES}
     )
+elseif(APPLE)
+    target_link_libraries(rexui PRIVATE "-framework CoreFoundation")
 endif()
 
 # D3D12 backend dependencies
@@ -160,5 +168,4 @@ if(REXGLUE_USE_D3D12)
         dxc-headers
     )
 endif()
-
 

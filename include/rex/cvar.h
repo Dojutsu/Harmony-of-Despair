@@ -111,6 +111,8 @@
 #include <utility>
 #include <vector>
 
+#include <rex/string/numeric.h>
+
 namespace rex::cvar {
 
 //=============================================================================
@@ -342,7 +344,7 @@ inline bool ParseDouble(std::string_view s, double& out) {
                                   category,                                                      \
                                   desc,                                                          \
                                   [](std::string_view v) {                                       \
-                                    bool val = (v == "true" || v == "1" || v == "yes");          \
+                                    bool val = ::rex::string::from_string<bool>(v, false);       \
                                     FLAGS_##name##_storage_() = val;                             \
                                     return true;                                                 \
                                   },                                                             \

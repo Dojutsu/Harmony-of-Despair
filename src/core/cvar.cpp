@@ -390,7 +390,7 @@ const FlagEntry* GetFlagInfo(std::string_view name) {
 template <>
 bool Query<bool>(std::string_view name) {
   std::string v = GetFlagByName(name);
-  return v == "true" || v == "1" || v == "yes";
+  return rex::string::from_string<bool>(v, false);
 }
 
 template <>

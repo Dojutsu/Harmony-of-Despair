@@ -12,6 +12,7 @@
 #include <rex/ui/windowed_app_context_sdl.h>
 
 #include <cstdlib>
+#include <vector>
 
 #include <SDL3/SDL.h>
 
@@ -22,6 +23,9 @@
 namespace rex::ui {
 
 SDLWindowedAppContext::~SDLWindowedAppContext() {
+  if (event_watch_registered_) {
+    SDL_RemoveEventWatch(WatchEvent, this);
+  }
   // Execute leftover pending functions before the loop machinery goes away,
   // mirroring the shutdown contract documented in WindowedAppContext.
   ExecutePendingFunctionsFromUIThread();
@@ -31,7 +35,10 @@ SDLWindowedAppContext::~SDLWindowedAppContext() {
 }
 
 bool SDLWindowedAppContext::Initialize() {
-#if !REX_PLATFORM_WIN32
+#if REX_PLATFORM_MAC
+  // macOS presents via a CAMetalLayer surface obtained from the Cocoa driver.
+  SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "cocoa");
+#elif !REX_PLATFORM_WIN32
   // The Surface types the presenters consume are Win32Hwnd and XcbWindow;
   // force X11 so an xcb connection is retrievable (there is no Wayland
   // surface type).
@@ -48,6 +55,11 @@ bool SDLWindowedAppContext::Initialize() {
   }
   wakeup_event_type_ = first;
   paint_event_type_ = first + 1;
+  if (!SDL_AddEventWatch(WatchEvent, this)) {
+    REXLOG_ERROR("SDL_AddEventWatch failed: {}", SDL_GetError());
+    return false;
+  }
+  event_watch_registered_ = true;
   return true;
 }
 
@@ -82,6 +94,22 @@ void SDLWindowedAppContext::ProcessEvent(SDL_Event& event) {
     return;
   }
   if (event.type == paint_event_type_) {
+    // Cocoa may enqueue its quit request behind an already queued paint. Once
+    // termination has been requested, CAMetalLayer may stop supplying
+    // drawables, so entering the paint first can block forever in
+    // -[CAMetalLayer nextDrawable] and prevent the quit event from being
+    // processed. Give an already queued quit request priority over rendering.
+    // Pump explicitly because a continuous stream of custom paint events can
+    // otherwise keep SDL_WaitEvent from returning to Cocoa to collect the
+    // application-menu quit request.
+    SDL_PumpEvents();
+    SDL_Event quit_event{};
+    if (SDL_PeepEvents(&quit_event, 1, SDL_GETEVENT, SDL_EVENT_QUIT, SDL_EVENT_QUIT) > 0) {
+      ProcessEvent(quit_event);
+      if (HasQuitFromUIThread()) {
+        return;
+      }
+    }
     if (WindowSDL* window = GetWindow(event.user.windowID)) {
       window->HandlePaintEvent();
     }
@@ -94,6 +122,13 @@ void SDLWindowedAppContext::ProcessEvent(SDL_Event& event) {
     return;
   }
   switch (event.type) {
+    case SDL_EVENT_QUIT:
+      if (synchronously_handled_quit_events_ != 0) {
+        --synchronously_handled_quit_events_;
+      } else {
+        ProcessQuitRequest();
+      }
+      break;
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
       if (WindowSDL* window = GetWindow(event.key.windowID)) {
@@ -134,6 +169,38 @@ void SDLWindowedAppContext::ProcessEvent(SDL_Event& event) {
     }
     default:
       break;
+  }
+}
+
+bool SDLCALL SDLWindowedAppContext::WatchEvent(void* userdata, SDL_Event* event) {
+  auto* context = static_cast<SDLWindowedAppContext*>(userdata);
+  if (event->type == SDL_EVENT_QUIT && SDL_IsMainThread() && context->IsInUIThread()) {
+    // Cocoa stops making Metal drawables available as part of its termination
+    // request. Handle the request synchronously while SDL is queueing it,
+    // before rendering can enter another blocking nextDrawable call.
+    ++context->synchronously_handled_quit_events_;
+    context->ProcessQuitRequest();
+  }
+  return true;
+}
+
+void SDLWindowedAppContext::ProcessQuitRequest() {
+  // Use the normal close-request path rather than terminating the message loop
+  // directly. Window listeners use OnClosing to stop guest, audio and GPU
+  // threads; bypassing it leaves the process hanging during teardown.
+  std::vector<SDL_WindowID> window_ids;
+  window_ids.reserve(windows_.size());
+  for (const auto& [id, window] : windows_) {
+    (void)window;
+    window_ids.push_back(id);
+  }
+  for (SDL_WindowID id : window_ids) {
+    if (WindowSDL* window = GetWindow(id)) {
+      SDL_Event close_event{};
+      close_event.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+      close_event.window.windowID = id;
+      window->HandleWindowEvent(close_event);
+    }
   }
 }
 

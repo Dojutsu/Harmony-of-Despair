@@ -29,6 +29,11 @@
 
 #if REX_PLATFORM_WIN32
 #include <rex/ui/surface_win.h>
+#elif REX_PLATFORM_MAC
+#include <CoreFoundation/CoreFoundation.h>
+#include <SDL3/SDL_metal.h>
+
+#include <rex/ui/surface_mac.h>
 #else
 #include <X11/Xlib-xcb.h>
 #include <rex/ui/surface_gnulinux.h>
@@ -128,10 +133,17 @@ WindowSDL::~WindowSDL() {
 }
 
 bool WindowSDL::OpenImpl() {
-  // SDL window coordinates are physical pixels on Windows and X11.
+  // SDL window coordinates are physical pixels on Windows and X11. Cocoa
+  // uses logical points and applies the backing scale itself.
   SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN;
-  sdl_window_ = SDL_CreateWindow(GetTitle().c_str(), int(SizeToPhysical(GetDesiredLogicalWidth())),
-                                 int(SizeToPhysical(GetDesiredLogicalHeight())), flags);
+#if REX_PLATFORM_MAC
+  int initial_width = int(GetDesiredLogicalWidth());
+  int initial_height = int(GetDesiredLogicalHeight());
+#else
+  int initial_width = int(SizeToPhysical(GetDesiredLogicalWidth()));
+  int initial_height = int(SizeToPhysical(GetDesiredLogicalHeight()));
+#endif
+  sdl_window_ = SDL_CreateWindow(GetTitle().c_str(), initial_width, initial_height, flags);
   if (!sdl_window_) {
     REXLOG_ERROR("SDL_CreateWindow failed: {}", SDL_GetError());
     return false;
@@ -161,6 +173,11 @@ bool WindowSDL::OpenImpl() {
     // Borderless desktop fullscreen (a NULL display mode is SDL3's default).
     SDL_SetWindowFullscreen(sdl_window_, true);
   }
+#if REX_PLATFORM_MAC
+  CFPreferencesSetAppValue(CFSTR("ApplePressAndHoldEnabled"), kCFBooleanFalse,
+                           kCFPreferencesCurrentApplication);
+  CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
+#endif
   // SDL3 requires explicit opt-in for text input events.
   SDL_StartTextInput(sdl_window_);
   ApplyCursorVisibilityNow();
@@ -300,8 +317,8 @@ std::unique_ptr<Surface> WindowSDL::CreateSurfaceImpl(Surface::TypeFlags allowed
   if (!sdl_window_) {
     return nullptr;
   }
-  SDL_PropertiesID props = SDL_GetWindowProperties(sdl_window_);
 #if REX_PLATFORM_WIN32
+  SDL_PropertiesID props = SDL_GetWindowProperties(sdl_window_);
   if (allowed_types & Surface::kTypeFlag_Win32Hwnd) {
     HWND hwnd = static_cast<HWND>(
         SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
@@ -311,7 +328,19 @@ std::unique_ptr<Surface> WindowSDL::CreateSurfaceImpl(Surface::TypeFlags allowed
       return std::make_unique<Win32HwndSurface>(hinstance, hwnd);
     }
   }
+#elif REX_PLATFORM_MAC
+  if (allowed_types & Surface::kTypeFlag_CAMetalLayer) {
+    SDL_MetalView metal_view = SDL_Metal_CreateView(sdl_window_);
+    if (metal_view) {
+      void* layer = SDL_Metal_GetLayer(metal_view);
+      if (layer) {
+        return std::make_unique<CAMetalLayerSurface>(sdl_window_, metal_view, layer);
+      }
+      SDL_Metal_DestroyView(metal_view);
+    }
+  }
 #else
+  SDL_PropertiesID props = SDL_GetWindowProperties(sdl_window_);
   if (allowed_types & Surface::kTypeFlag_XcbWindow) {
     auto* display = static_cast<Display*>(
         SDL_GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr));
@@ -354,8 +383,15 @@ void WindowSDL::HandleWindowEvent(SDL_Event& event) {
       // only (mirrors the Win32 WM_SIZE handling).
       SDL_WindowFlags flags = SDL_GetWindowFlags(sdl_window_);
       if (!(flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MINIMIZED))) {
+#if REX_PLATFORM_MAC
+        // Cocoa reports the client size in logical points. Converting it from
+        // the backing DPI a second time would halve the desired size on Retina
+        // displays.
+        OnDesiredLogicalSizeUpdate(uint32_t(event.window.data1), uint32_t(event.window.data2));
+#else
         OnDesiredLogicalSizeUpdate(SizeToLogical(uint32_t(event.window.data1)),
                                    SizeToLogical(uint32_t(event.window.data2)));
+#endif
       }
       break;
     }

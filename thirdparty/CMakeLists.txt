@@ -5,10 +5,20 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 #=============================================================================
 # Architecture detection
 #=============================================================================
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+    # On Apple, CMAKE_OSX_ARCHITECTURES is the target arch; CMAKE_SYSTEM_PROCESSOR
+    # reflects the host (e.g. arm64 on Apple Silicon even when cross-building x86_64).
+    if("arm64" IN_LIST CMAKE_OSX_ARCHITECTURES)
+        set(IS_ARM64 TRUE)
+        set(IS_X86_64 FALSE)
+    else()
+        set(IS_ARM64 FALSE)
+        set(IS_X86_64 TRUE)
+    endif()
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
     set(IS_ARM64 FALSE)
     set(IS_X86_64 TRUE)
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|ARM64)$")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|ARM64|arm64)$")
     set(IS_ARM64 TRUE)
     set(IS_X86_64 FALSE)
 else()
@@ -226,9 +236,16 @@ set(SDL_TEST OFF CACHE BOOL "" FORCE)
 set(SDL_UNIX_CONSOLE_BUILD ON CACHE BOOL "" FORCE)
 
 # Video provides the windowing/event layer; presenters create their own
-# D3D12/Vulkan surfaces from native handles, so SDL_RENDER and the SDL
-# graphics API integrations stay off.
+# D3D12/Vulkan surfaces from native handles, so SDL_RENDER stays off.
 set(SDL_VIDEO ON CACHE BOOL "" FORCE)
+if(APPLE)
+    # macOS uses SDL for windowing + Metal/Vulkan surface creation.
+    set(SDL_METAL ON CACHE BOOL "" FORCE)
+    set(SDL_VULKAN ON CACHE BOOL "" FORCE)
+else()
+    set(SDL_METAL OFF CACHE BOOL "" FORCE)
+    set(SDL_VULKAN OFF CACHE BOOL "" FORCE)
+endif()
 set(SDL_RENDER OFF CACHE BOOL "" FORCE)
 set(SDL_HAPTIC OFF CACHE BOOL "" FORCE)
 set(SDL_SENSOR OFF CACHE BOOL "" FORCE)
@@ -247,11 +264,9 @@ endif()
 set(SDL_TRAY OFF CACHE BOOL "" FORCE)
 set(SDL_CAMERA OFF CACHE BOOL "" FORCE)
 
-# Disable graphics APIs (unused without video)
+# Disable graphics APIs (unused without video) — only on non-Apple
 set(SDL_OPENGL OFF CACHE BOOL "" FORCE)
 set(SDL_OPENGLES OFF CACHE BOOL "" FORCE)
-set(SDL_VULKAN OFF CACHE BOOL "" FORCE)
-set(SDL_METAL OFF CACHE BOOL "" FORCE)
 
 # Disable dummy drivers
 set(SDL_DISKAUDIO OFF CACHE BOOL "" FORCE)

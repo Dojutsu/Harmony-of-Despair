@@ -46,6 +46,8 @@ if(WIN32)
     )
     target_compile_definitions(rexcore PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
 elseif(UNIX)
+    # Linux and macOS/Darwin share the POSIX sources; Darwin-specific behavior
+    # is selected inside them with #if defined(__APPLE__).
     target_sources(rexcore PRIVATE
         atomic_posix.cpp
         clock_posix.cpp
@@ -88,7 +90,9 @@ target_include_directories(rexcore PRIVATE
     ${PROJECT_SOURCE_DIR}/thirdparty/cli11/include
 )
 
-if(UNIX)
+if(APPLE)
+    target_link_libraries(rexcore PRIVATE pthread)
+elseif(UNIX)
     target_link_libraries(rexcore PRIVATE pthread rt dl)
 endif()
 
@@ -123,4 +127,3 @@ if(REXGLUE_ENABLE_PERF_COUNTERS)
     target_compile_definitions(rexcore PUBLIC
         $<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PERF_COUNTERS>)
 endif()
-

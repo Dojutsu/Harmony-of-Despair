@@ -6,7 +6,7 @@
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  *
- * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+ * @modified    Tom Clay & Rien Gupta, 2026 - Adapted for ReXGlue runtime (POSIX + macOS)
  */
 
 #include <assert.h>
@@ -20,6 +20,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+
 #include <rex/assert.h>
 #include <rex/filesystem.h>
 #include <rex/logging.h>
@@ -30,6 +34,20 @@
 #include <ftw.h>
 #include <libgen.h>
 #include <pwd.h>
+
+// macOS off_t is 64-bit with no *64 large-file variants; Linux keeps the
+// explicit *64 forms for legacy 32-bit off_t distributions.
+#if defined(__APPLE__)
+using rex_off64_t = off_t;
+#define rex_fseeko64 fseeko
+#define rex_ftello64 ftello
+#define rex_ftruncate64 ftruncate
+#else
+using rex_off64_t = off64_t;
+#define rex_fseeko64 fseeko64
+#define rex_ftello64 ftello64
+#define rex_ftruncate64 ftruncate64
+#endif
 
 namespace rex {
 
@@ -52,10 +70,33 @@ std::filesystem::path to_path(const std::u16string_view source) {
 namespace filesystem {
 
 std::filesystem::path GetExecutablePath() {
+#if defined(__APPLE__)
+  // Darwin has no /proc; query the executable path via the dyld API. The first
+  // call reports the required buffer size.
+  uint32_t executable_path_size = 0;
+  _NSGetExecutablePath(nullptr, &executable_path_size);
+  if (!executable_path_size) {
+    return {};
+  }
+
+  std::string executable_path(executable_path_size, '\0');
+  if (_NSGetExecutablePath(executable_path.data(), &executable_path_size) != 0) {
+    return {};
+  }
+
+  if (!executable_path.empty() && executable_path.back() == '\0') {
+    executable_path.pop_back();
+  }
+
+  std::error_code ec;
+  std::filesystem::path canonical_path = std::filesystem::weakly_canonical(executable_path, ec);
+  return ec ? std::filesystem::path(executable_path) : canonical_path;
+#else
   char buff[FILENAME_MAX] = "";
   readlink("/proc/self/exe", buff, FILENAME_MAX);
   std::string s(buff);
   return s;
+#endif
 }
 
 std::filesystem::path GetExecutableFolder() {
@@ -87,11 +128,11 @@ FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode) {
 }
 
 bool Seek(FILE* file, int64_t offset, int origin) {
-  return fseeko64(file, off64_t(offset), origin) == 0;
+  return rex_fseeko64(file, rex_off64_t(offset), origin) == 0;
 }
 
 int64_t Tell(FILE* file) {
-  return int64_t(ftello64(file));
+  return int64_t(rex_ftello64(file));
 }
 
 bool TruncateStdioFile(FILE* file, uint64_t length) {
@@ -102,7 +143,7 @@ bool TruncateStdioFile(FILE* file, uint64_t length) {
   if (position < 0) {
     return false;
   }
-  if (ftruncate64(fileno(file), off64_t(length))) {
+  if (rex_ftruncate64(fileno(file), rex_off64_t(length))) {
     return false;
   }
   if (uint64_t(position) > length) {
