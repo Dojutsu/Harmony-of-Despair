@@ -41,16 +41,16 @@ static const char* LifecycleBadge(rex::cvar::Lifecycle lc) {
   return "";
 }
 
-static ImVec4 LifecycleColor(rex::cvar::Lifecycle lc) {
+static ImVec4 LifecycleColor(rex::cvar::Lifecycle lc, const SettingsStyle& style) {
   switch (lc) {
     case rex::cvar::Lifecycle::kHotReload:
-      return {0.4f, 1.0f, 0.4f, 1.0f};
+      return style.lifecycle_live;
     case rex::cvar::Lifecycle::kRequiresRestart:
-      return {1.0f, 1.0f, 0.4f, 1.0f};
+      return style.lifecycle_restart;
     case rex::cvar::Lifecycle::kInitOnly:
-      return {1.0f, 0.4f, 0.4f, 1.0f};
+      return style.lifecycle_init_only;
   }
-  return {1.0f, 1.0f, 1.0f, 1.0f};
+  return style.lifecycle_unknown;
 }
 
 static rex::ui::VirtualKey ImGuiKeyToVirtualKey(ImGuiKey key) {
@@ -391,7 +391,7 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
         }
         if (conflict_count > 0) {
           ImGui::SameLine();
-          ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "(!)");
+          ImGui::TextColored(imgui_drawer()->style().settings.warning, "(!)");
           if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Key '%s' is also bound to %d other action(s)", current_val.c_str(),
                               conflict_count);
@@ -408,7 +408,8 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
       continue;
     } else {
       // Non-keybind CVARs: colored label on left, value widget on right
-      ImGui::TextColored(LifecycleColor(entry.lifecycle), "%-20s", entry.name.c_str());
+      ImGui::TextColored(LifecycleColor(entry.lifecycle, imgui_drawer()->style().settings), "%-20s",
+                         entry.name.c_str());
       if (ImGui::IsItemHovered()) {
         const char* lifecycle_label = "";
         switch (entry.lifecycle) {
