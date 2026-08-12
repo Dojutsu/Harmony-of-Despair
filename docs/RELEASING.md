@@ -107,7 +107,7 @@ If a regular release branch is already open, close it without merging before cut
 
 Only when the public API is changing. Single commit on `development`:
 
-1. Edit `CMakeLists.txt` line 6: change `PROJECT VERSION 0.<old>.0` to `PROJECT VERSION 0.<new>.0`.
+1. Edit the `VERSION` line of the `project()` call in `CMakeLists.txt`: change `0.<old>.0` to `0.<new>.0`.
 2. Commit message: `chore: bump API floor to 0.<new>`.
 3. The next release branch is `release/0.<new>.0` and the tag is `v0.<new>.0`.
 
