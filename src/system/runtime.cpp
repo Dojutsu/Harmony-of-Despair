@@ -203,6 +203,8 @@ X_STATUS Runtime::Setup(const rex::PPCImageInfo& image_info, RuntimeConfig confi
     return status;
   }
 
+  codegen_flags_ = image_info.codegen_flags;
+
   if (!function_dispatcher_->InitializeFunctionTable(image_info.code_base, image_info.code_size,
                                                      image_info.image_base, image_info.image_size,
                                                      /*is_entrypoint=*/true)) {
@@ -243,6 +245,14 @@ X_STATUS Runtime::Setup(const rex::PPCImageInfo& image_info, RuntimeConfig confi
   REXSYS_DEBUG("Runtime setup complete (code: {:08X}-{:08X}, image: {:08X}-{:08X})",
                image_info.code_base, image_info.code_base + image_info.code_size,
                image_info.image_base, image_info.image_base + image_info.image_size);
+
+  const auto& flags = image_info.codegen_flags;
+  REXSYS_DEBUG(
+      "Codegen config: skip_lr={} skip_msr={} ctr={} xer={} cr={} reserved={} "
+      "non_argument={} non_volatile={}",
+      flags.skip_lr, flags.skip_msr, flags.ctr_as_local, flags.xer_as_local, flags.cr_as_local,
+      flags.reserved_as_local, flags.non_argument_as_local, flags.non_volatile_as_local);
+
   return X_STATUS_SUCCESS;
 }
 
