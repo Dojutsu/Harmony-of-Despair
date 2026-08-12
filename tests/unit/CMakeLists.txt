@@ -1,6 +1,7 @@
 # Unit Tests for ReXGlue core components
 
 add_executable(unit_tests
+    test_memory.cpp
     memory/heap_allocation_test.cpp
     kernel/object_table_test.cpp
     core/cvar_test.cpp
@@ -25,6 +26,7 @@ target_sources(unit_tests PRIVATE
 target_include_directories(unit_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(unit_tests PRIVATE

@@ -19,18 +19,11 @@
 #include <rex/system/thread_state.h>
 #include <rex/system/xmemory.h>
 
+#include "test_memory.h"
+
 namespace {
 
-rex::memory::Memory& GetTestMemory() {
-  static rex::memory::Memory memory;
-  static bool initialized = false;
-  if (!initialized) {
-    rex::InitLogging();
-    REQUIRE(memory.Initialize());
-    initialized = true;
-  }
-  return memory;
-}
+using rex::testing::GetTestMemory;
 
 void DummyFn(PPCContext&, uint8_t*) {}
 
@@ -204,7 +197,7 @@ TEST_CASE("FunctionDispatcher: ExecuteTrap restores the interrupted register sta
   rex::runtime::ExportResolver resolver;
   rex::runtime::FunctionDispatcher dispatcher(&memory, &resolver);
 
-  constexpr uint32_t kTrapModBase = 0x84000000u;
+  constexpr uint32_t kTrapModBase = 0x89000000u;
   constexpr uint32_t kCodeSize = 0x10000u;
   constexpr uint32_t kImageSize = 0x100000u;
   REQUIRE(dispatcher.InitializeFunctionTable(kTrapModBase, kCodeSize, kTrapModBase, kImageSize));
