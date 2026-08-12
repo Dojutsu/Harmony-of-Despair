@@ -40,9 +40,10 @@ PPCFunc* ResolveIndirectFunction(uint32_t guest_address);
 #define REX_JOIN(x, y) x##y
 #define REX_XSTRINGIFY(x) #x
 #define REX_STRINGIFY(x) REX_XSTRINGIFY(x)
+// REX_FUNC is the bare signature; the declaring site supplies linkage, either
+// by writing extern "C" itself or by using REX_EXTERN.
 #define REX_FUNC(x) void x([[maybe_unused]] PPCContext& __restrict ctx, uint8_t* base)
 #define REX_EXTERN(x) extern "C" REX_FUNC(x)
-#define REX_WEAK_FUNC(x) __attribute__((weak, noinline)) REX_FUNC(x)
 
 //=============================================================================
 // Function Mapping
