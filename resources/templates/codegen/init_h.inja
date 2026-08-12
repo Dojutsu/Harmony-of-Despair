@@ -90,16 +90,16 @@ extern PPCFuncMapping PPCFuncMappings[];
 #if defined(__clang__)
 #define REX_FUNC_PROLOGUE()                     \
   __builtin_assume(((size_t)base & 0x1F) == 0); \
-  ZoneNamedN(___tracy_guest_zone, __func__, true)
+  ZoneNamedN(___tracy_guest_zone, __func__, TracyIsStarted)
 #elif defined(__GNUC__)
 #define REX_FUNC_PROLOGUE()         \
   do {                              \
     if (((size_t)base & 0x1F) != 0) \
       __builtin_unreachable();      \
   } while (0);                      \
-  ZoneNamedN(___tracy_guest_zone, __func__, true)
+  ZoneNamedN(___tracy_guest_zone, __func__, TracyIsStarted)
 #else
-#define REX_FUNC_PROLOGUE() ZoneNamedN(___tracy_guest_zone, __func__, true)
+#define REX_FUNC_PROLOGUE() ZoneNamedN(___tracy_guest_zone, __func__, TracyIsStarted)
 #endif
 #else
 #if defined(__clang__)
