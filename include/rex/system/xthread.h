@@ -123,6 +123,8 @@ struct X_FIBER_CONTEXT {
   uint8_t register_save_area[0xA50 - 0x38];  // non-volatile PPCContext register save area
 };
 static_assert_size(X_FIBER_CONTEXT, 0xA50);
+static_assert(sizeof(X_FIBER_CONTEXT::register_save_area) >= ::PPCContext::kNonVolatileSaveSize,
+              "fiber register save area too small for PPCContext non-volatiles");
 
 struct X_KTHREAD;
 struct X_KPROCESS;

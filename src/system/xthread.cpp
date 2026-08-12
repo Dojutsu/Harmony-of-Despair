@@ -747,8 +747,8 @@ void XThread::DeliverAPCs() {
       if (dispatcher->GetFunction(apc->kernel_routine)) {
         uint64_t kernel_args[] = {apc_ptr, scratch_address_ + 0, scratch_address_ + 4,
                                   scratch_address_ + 8, scratch_address_ + 12};
-        dispatcher->Execute(thread_state_.get(), apc->kernel_routine, kernel_args,
-                            rex::countof(kernel_args));
+        dispatcher->ExecuteTrap(thread_state_.get(), apc->kernel_routine, kernel_args,
+                                rex::countof(kernel_args));
       } else {
         REXSYS_ERROR("DeliverAPCs: kernel_routine {:08X} not found", uint32_t(apc->kernel_routine));
       }
@@ -765,8 +765,8 @@ void XThread::DeliverAPCs() {
     if (normal_routine) {
       if (dispatcher->GetFunction(normal_routine)) {
         uint64_t normal_args[] = {normal_context, arg1, arg2};
-        dispatcher->Execute(thread_state_.get(), normal_routine, normal_args,
-                            rex::countof(normal_args));
+        dispatcher->ExecuteTrap(thread_state_.get(), normal_routine, normal_args,
+                                rex::countof(normal_args));
       } else {
         REXSYS_ERROR("DeliverAPCs: normal_routine {:08X} not found", normal_routine);
       }
@@ -809,11 +809,11 @@ void XThread::RundownAPCs() {
       if (apc->rundown_routine == XAPC::kDummyRundownRoutine) {
         // No-op.
       } else if (apc->rundown_routine) {
-        auto fn = kernel_state_->function_dispatcher()->GetFunction(apc->rundown_routine);
-        if (fn) {
-          auto* ctx = thread_state_->context();
-          ctx->r3.u64 = apc_ptr;
-          fn(*ctx, mem->virtual_membase());
+        auto* dispatcher = kernel_state_->function_dispatcher();
+        if (dispatcher->GetFunction(apc->rundown_routine)) {
+          uint64_t rundown_args[] = {apc_ptr};
+          dispatcher->Execute(thread_state_.get(), apc->rundown_routine, rundown_args,
+                              rex::countof(rundown_args));
         } else {
           REXSYS_WARN("RundownAPCs: rundown_routine {:08X} not found",
                       uint32_t(apc->rundown_routine));
