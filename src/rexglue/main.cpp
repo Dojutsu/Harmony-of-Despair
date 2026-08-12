@@ -86,7 +86,6 @@ int main(int argc, char** argv) {
   ctx.verbose = verbose;
   ctx.overwrite_existing = force;
   ctx.generate_despite_errors = force;
-  ctx.skip_upgrade_consent = force;
 
   bool tty = IsStderrTty();
   rexglue::ui::Init({.tty = tty, .color = ColorEnabled(tty)});

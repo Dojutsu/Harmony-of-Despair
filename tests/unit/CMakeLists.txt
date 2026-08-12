@@ -21,7 +21,6 @@ add_executable(unit_tests
 )
 
 target_sources(unit_tests PRIVATE
-    ${PROJECT_SOURCE_DIR}/src/rexglue/commands/migration_scan.cpp
     ${PROJECT_SOURCE_DIR}/src/rexglue/ui/ui.cpp
     ${PROJECT_SOURCE_DIR}/src/rexglue/ui/progress.cpp
 )
