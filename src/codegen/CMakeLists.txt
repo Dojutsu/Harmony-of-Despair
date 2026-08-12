@@ -8,6 +8,8 @@ set(CODEGEN_CORE_SOURCES
     code_emitter.cpp
     decoded_binary.cpp
     codegen_writer.cpp
+    output_partition.cpp
+    output_stamp.cpp
     config.cpp
     function_graph.cpp
     function_scanner.cpp

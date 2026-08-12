@@ -617,6 +617,7 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
     for (auto it = sehInfo->scopes.rbegin(); it != sehInfo->scopes.rend(); ++it) {
       const auto& scope = *it;
       if (scope.filter == 0 && scope.handler != 0) {
+        ctx.reference(fmt::format("sub_{:08X}", scope.handler));
         emit_println(body, "\t\t\tsub_{:08X}(ctx, base);  // __finally handler", scope.handler);
       }
     }
@@ -624,6 +625,7 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
     if (sehInfo->restoreHelper != 0) {
       auto* restoreFn = ctx.graph.getFunction(sehInfo->restoreHelper);
       if (restoreFn && !restoreFn->name().empty()) {
+        ctx.reference(restoreFn->name());
         emit_println(body, "\t\t\t{}(ctx, base);  // Restore caller registers", restoreFn->name());
       }
     }

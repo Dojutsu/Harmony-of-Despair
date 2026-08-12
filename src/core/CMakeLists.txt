@@ -11,11 +11,11 @@ add_library(rexcore OBJECT
     exception_handler.cpp
     filesystem.cpp
     filesystem_wildcard.cpp
+    hash.cpp
     logging.cpp
     memory.cpp
     mutex.cpp
     ring_buffer.cpp
-    sha256.cpp
     string_buffer.cpp
     threading.cpp
     timer_queue.cpp

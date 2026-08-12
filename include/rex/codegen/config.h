@@ -83,6 +83,10 @@ struct RecompilerConfig {
   std::string outDirectoryPath;     ///< Output directory for generated code
   std::string templateDir;          ///< Optional custom template directory for overrides
 
+  /// Every TOML that fed this config, in load order. LoadFromTable() gets a
+  /// parsed table, so a manifest-embedded entry omits the manifest itself.
+  std::vector<std::string> loadedFiles;
+
   // === Code generation options (optional) ===
   bool skipLr = false;
   bool ctrAsLocalVariable = false;

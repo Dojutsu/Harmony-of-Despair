@@ -6,7 +6,7 @@ add_executable(unit_tests
     kernel/object_table_test.cpp
     core/cvar_test.cpp
     core/fiber_test.cpp
-    core/sha256_test.cpp
+    core/hash_test.cpp
     core/stream_test.cpp
     core/chrono_test.cpp
     ppc/import_function_test.cpp
@@ -15,6 +15,9 @@ add_executable(unit_tests
     system/achievement_manager_test.cpp
     system/function_dispatcher_test.cpp
     input/input_assignment_test.cpp
+    codegen/codegen_writer_test.cpp
+    codegen/output_partition_test.cpp
+    codegen/output_stamp_test.cpp
 )
 
 target_sources(unit_tests PRIVATE

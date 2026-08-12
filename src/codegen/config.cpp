@@ -407,6 +407,7 @@ bool LoadRecursive(const std::filesystem::path& filePath, RecompilerConfig& cfg,
     return false;
   }
   visited.insert(canonicalStr);
+  cfg.loadedFiles.push_back(canonicalStr);
 
   toml::table toml;
   try {

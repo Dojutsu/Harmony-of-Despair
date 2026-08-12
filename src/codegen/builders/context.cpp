@@ -217,6 +217,7 @@ void BuilderContext::emit_function_call(uint32_t address) {
           if (locals.r[i])
             println("\tctx.r{} = r{};", i, i);
         }
+        emitCtx.reference(name);
         println("\t{}(ctx, base);", name);
         for (size_t i = 14; i < 32; ++i) {
           if (locals.r[i])
@@ -225,6 +226,7 @@ void BuilderContext::emit_function_call(uint32_t address) {
         return;
       }
 
+      emitCtx.reference(name);
       println("\t{}(ctx, base);", name);
       return;
     }
@@ -255,6 +257,7 @@ void BuilderContext::emit_function_call(uint32_t address) {
         std::replace(func_name.begin(), func_name.end(), '.', '_');
       }
 
+      emitCtx.reference(func_name);
       println("\t{}(ctx, base);", func_name);
       return;
     }
@@ -293,6 +296,7 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
       if (const auto* callTarget = findCallTarget(base)) {
         if (callTarget->isFunction()) {
           auto* targetFn = callTarget->asFunction();
+          emitCtx.reference(targetFn->name());
           println("\tif ({}{}.{}) {{", not_ ? "!" : "", cr(insn.operands[0]), cond);
           println("\t\t{}(ctx, base);", targetFn->name());
           println("\t\treturn;");
@@ -302,6 +306,7 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
           std::string func_name = "__imp__" + importTarget.name;
           std::replace(func_name.begin(), func_name.end(), '@', '_');
           std::replace(func_name.begin(), func_name.end(), '.', '_');
+          emitCtx.reference(func_name);
           println("\tif ({}{}.{}) {{", not_ ? "!" : "", cr(insn.operands[0]), cond);
           println("\t\t{}(ctx, base);", func_name);
           println("\t\treturn;");
