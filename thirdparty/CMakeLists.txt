@@ -1,4 +1,5 @@
 # Third-party vendored dependencies for ReXGlue
+include(${PROJECT_SOURCE_DIR}/cmake/rexglue_vulkan_stack.cmake)
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 
@@ -45,7 +46,7 @@ set(REQUIRED_SUBMODULES
 
 if(REXGLUE_USE_VULKAN)
     list(APPEND REQUIRED_SUBMODULES
-        volk vulkan-headers vulkan-memory-allocator
+        vulkan-headers vulkan-memory-allocator
         spirv-headers spirv-tools glslang
     )
 endif()
@@ -185,6 +186,8 @@ add_subdirectory(utfcpp)
 # Vulkan dependencies (only when Vulkan backend is enabled)
 #=============================================================================
 if(REXGLUE_USE_VULKAN)
+    message(STATUS "Vulkan stack: SDK ${REXGLUE_VULKAN_SDK_VERSION}")
+
     # Vulkan-Headers
     set(VULKAN_HEADERS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
     set(VULKAN_HEADERS_ENABLE_INSTALL ON CACHE BOOL "" FORCE)
@@ -194,14 +197,6 @@ if(REXGLUE_USE_VULKAN)
     # VulkanMemoryAllocator
     set(VMA_ENABLE_INSTALL ON CACHE BOOL "" FORCE)
     add_subdirectory(vulkan-memory-allocator)
-
-    # volk
-    set(VOLK_INSTALL ON CACHE BOOL "" FORCE)
-    set(VOLK_PULL_IN_VULKAN OFF CACHE BOOL "" FORCE)
-    add_subdirectory(volk)
-    target_link_libraries(volk PUBLIC Vulkan::Headers)
-    target_link_libraries(volk_headers INTERFACE Vulkan::Headers)
-    target_compile_options(volk PRIVATE -w)
 endif()
 
 #=============================================================================
@@ -304,13 +299,10 @@ if(REXGLUE_USE_VULKAN)
     set(SPIRV_HEADERS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
     add_subdirectory(spirv-headers)
 
-    # SPIRV-Tools
-    set(SPIRV_SKIP_EXECUTABLES ON CACHE BOOL "" FORCE)
-    set(SPIRV_SKIP_TESTS ON CACHE BOOL "" FORCE)
-    set(SPIRV_WERROR OFF CACHE BOOL "" FORCE)
-    set(SKIP_SPIRV_TOOLS_INSTALL ON CACHE BOOL "" FORCE)
-    add_subdirectory(spirv-tools)
-    target_compile_options(SPIRV-Tools-static PRIVATE -w)
+    add_library(spirv-tools-headers INTERFACE)
+    target_include_directories(spirv-tools-headers SYSTEM INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/spirv-tools/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
     # glslang/SPIRV - SPIR-V code generation for shader translation
     set(ENABLE_GLSLANG_BINARIES OFF CACHE BOOL "" FORCE)

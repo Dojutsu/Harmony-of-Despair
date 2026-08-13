@@ -139,9 +139,9 @@ endif()
 
 if(REXGLUE_USE_VULKAN)
     target_link_libraries(rexui PUBLIC
-        volk::volk
+        Vulkan::Headers
         GPUOpen::VulkanMemoryAllocator
-        SPIRV-Tools-static
+        spirv-tools-headers
     )
 endif()
 

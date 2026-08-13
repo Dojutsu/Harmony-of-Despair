@@ -116,9 +116,9 @@ if(REXGLUE_USE_D3D12)
 endif()
 if(REXGLUE_USE_VULKAN)
     target_link_libraries(rexruntime PUBLIC
-        volk::volk
+        Vulkan::Headers
         GPUOpen::VulkanMemoryAllocator
-        SPIRV-Tools-static
+        spirv-tools-headers
     )
     target_compile_definitions(rexruntime PUBLIC REX_HAS_VULKAN=1)
 endif()

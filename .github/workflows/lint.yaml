@@ -27,3 +27,9 @@ jobs:
             -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.c' \) \
             | xargs clang-format --dry-run --Werror
 
+      - name: Check Vulkan dependency pins
+        run: python scripts/check_vulkan_stack.py
+
+      - name: Run script tests
+        run: python -m pytest scripts/tests -v
+
