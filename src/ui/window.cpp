@@ -42,6 +42,11 @@ REXCVAR_DEFINE_INT32(monitor, 0, "UI/Window",
     .range(0, 16)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_STRING(video_driver, "", "UI/Window",
+                      "SDL video driver to use, such as \"wayland\" or \"x11\". Empty picks "
+                      "SDL's default for the session")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 REXCVAR_DEFINE_INT32(video_mode_width, 1280, "Display", "Guest video mode width in pixels")
     .range(640, 0x0FFF)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -448,9 +453,16 @@ void Window::OnSurfaceChanged(bool new_surface_potentially_exists) {
     return;
   }
 
-  presenter_surface_ = CreateSurface(presenter_->GetSupportedSurfaceTypes());
+  Surface::TypeFlags supported_types = presenter_->GetSupportedSurfaceTypes();
+  presenter_surface_ = CreateSurface(supported_types);
   if (presenter_surface_) {
     presenter_->SetWindowSurfaceFromUIThread(this, presenter_surface_.get());
+  } else if (phase_ == Phase::kOpen) {
+    // Usually a session whose native surface extension the driver lacks.
+    REXLOG_ERROR(
+        "No presentable surface for this window. The graphics provider supports surface types "
+        "{:#x}. Set the video_driver cvar to force a different session type.",
+        supported_types);
   }
 }
 

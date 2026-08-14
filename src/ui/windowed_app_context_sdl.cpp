@@ -12,12 +12,15 @@
 #include <rex/ui/windowed_app_context_sdl.h>
 
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 #include <SDL3/SDL.h>
 
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
+#include <rex/ui/flags.h>
 #include <rex/ui/window_sdl.h>
 
 namespace rex::ui {
@@ -35,19 +38,24 @@ SDLWindowedAppContext::~SDLWindowedAppContext() {
 }
 
 bool SDLWindowedAppContext::Initialize() {
+  // Picked before SDL_InitSubSystem, long before a graphics instance can say
+  // which surface extensions it has, so the cvar is the escape hatch.
+  std::string requested_driver = REXCVAR_GET(video_driver);
 #if REX_PLATFORM_MAC
   // macOS presents via a CAMetalLayer surface obtained from the Cocoa driver.
-  SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "cocoa");
-#elif !REX_PLATFORM_WIN32
-  // The Surface types the presenters consume are Win32Hwnd and XcbWindow;
-  // force X11 so an xcb connection is retrievable (there is no Wayland
-  // surface type).
-  SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "x11");
+  if (requested_driver.empty()) {
+    requested_driver = "cocoa";
+  }
 #endif
+  if (!requested_driver.empty()) {
+    SDL_SetHint(SDL_HINT_VIDEO_DRIVER, requested_driver.c_str());
+  }
   if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
     REXLOG_ERROR("SDL_InitSubSystem(SDL_INIT_VIDEO) failed: {}", SDL_GetError());
     return false;
   }
+  const char* video_driver_in_use = SDL_GetCurrentVideoDriver();
+  REXLOG_INFO("SDL video driver: {}", video_driver_in_use ? video_driver_in_use : "unknown");
   uint32_t first = SDL_RegisterEvents(2);
   if (first == 0) {
     REXLOG_ERROR("SDL_RegisterEvents failed: {}", SDL_GetError());
