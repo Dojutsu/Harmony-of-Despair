@@ -22,10 +22,6 @@
 #include <cstring>
 #include <string_view>
 
-#if REX_PLATFORM_WIN32
-#include <Windows.h>
-#endif
-
 REXCVAR_DEFINE_BOOL(mnk_mode, false, "Input", "Enable keyboard/mouse controller emulation");
 REXCVAR_DEFINE_BOOL(mnk_mouse, false, "Input",
                     "Use the mouse for the right stick. Off means the right stick comes "
@@ -171,6 +167,8 @@ void MnkInputDriver::OnClosing(rex::ui::UIEvent&) {
     if (mouse_captured_) {
       mouse_captured_ = false;
       attached_window_->SetCursorVisibility(precapture_cursor_visibility_);
+      attached_window_->SetRelativeMouseMode(false);
+      relative_mouse_mode_ = false;
       attached_window_->ReleaseMouse();
     }
     attached_window_->RemoveInputListener(this);
@@ -314,14 +312,14 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
   if (REXCVAR_GET(mnk_mouse)) {
     double sensitivity = REXCVAR_GET(mnk_sensitivity);
     constexpr double kBaseScale = 200.0;
-    rx += static_cast<int32_t>(mouse_dx_ * sensitivity * kBaseScale);
-    ry += static_cast<int32_t>(-mouse_dy_ * sensitivity * kBaseScale);
+    rx += static_cast<int32_t>(double(mouse_dx_) * sensitivity * kBaseScale);
+    ry += static_cast<int32_t>(double(-mouse_dy_) * sensitivity * kBaseScale);
   }
   // Drained unconditionally: deltas keep accumulating in OnMouseMove while the
   // mouse is off, and toggling it on would otherwise dump the whole backlog
   // into one frame as a camera snap.
-  mouse_dx_ = 0;
-  mouse_dy_ = 0;
+  mouse_dx_ = 0.0f;
+  mouse_dy_ = 0.0f;
 
   auto clamp16 = [](int32_t v) -> int16_t {
     return static_cast<int16_t>(std::clamp(v, (int32_t)INT16_MIN, (int32_t)INT16_MAX));
@@ -376,30 +374,13 @@ void MnkInputDriver::EnqueueKeystroke(uint16_t vk_pad, bool down) {
   keystroke_queue_.push(ks);
 }
 
-void MnkInputDriver::CenterCursor() {
-  if (!attached_window_)
-    return;
-  int32_t cx = static_cast<int32_t>(attached_window_->GetActualLogicalWidth() / 2);
-  int32_t cy = static_cast<int32_t>(attached_window_->GetActualLogicalHeight() / 2);
-  prev_mouse_x_ = cx;
-  prev_mouse_y_ = cy;
-#if REX_PLATFORM_WIN32
-  HWND hwnd = static_cast<HWND>(attached_window_->GetNativeWindowHandle());
-  if (hwnd) {
-    POINT pt = {static_cast<LONG>(cx), static_cast<LONG>(cy)};
-    ClientToScreen(hwnd, &pt);
-    SetCursorPos(pt.x, pt.y);
-  }
-#endif
-}
-
 void MnkInputDriver::UpdateMouseCapture() {
   if (!attached_window_)
     return;
 
   // Mouse look is opt-in. Without this gate, enabling keyboard input would
-  // also hide the cursor and warp it to center every frame, which breaks the
-  // ImGui overlays for anyone driving the game from the keyboard alone.
+  // also hide and lock the cursor, which breaks the ImGui overlays for anyone
+  // driving the game from the keyboard alone.
   bool should_capture = IsEnabled() && REXCVAR_GET(mnk_mouse) && has_focus_ && is_active();
 
   if (should_capture && !mouse_captured_) {
@@ -407,18 +388,31 @@ void MnkInputDriver::UpdateMouseCapture() {
     precapture_cursor_visibility_ = attached_window_->GetCursorVisibility();
     attached_window_->SetCursorVisibility(rex::ui::Window::CursorVisibility::kHidden);
     attached_window_->CaptureMouse();
+    relative_mouse_mode_ = attached_window_->SetRelativeMouseMode(true);
+    if (!relative_mouse_mode_) {
+      REXLOG_WARN("Pointer lock unavailable, mouse look falls back to recentering the cursor");
+    }
     // Reset deltas to avoid a spike on capture start
-    mouse_dx_ = 0;
-    mouse_dy_ = 0;
+    mouse_dx_ = 0.0f;
+    mouse_dy_ = 0.0f;
   } else if (!should_capture && mouse_captured_) {
     mouse_captured_ = false;
     attached_window_->SetCursorVisibility(precapture_cursor_visibility_);
+    attached_window_->SetRelativeMouseMode(false);
+    relative_mouse_mode_ = false;
     attached_window_->ReleaseMouse();
   }
 
-  // Re-center cursor each frame while captured to prevent edge clamping
-  if (mouse_captured_) {
-    CenterCursor();
+  // Without a pointer lock the cursor still has to be pulled off the window
+  // edges. The reference position only moves if the warp actually took.
+  if (mouse_captured_ && !relative_mouse_mode_) {
+    int32_t center_x = 0;
+    int32_t center_y = 0;
+    if (attached_window_->WarpMouseToCenter(center_x, center_y)) {
+      std::lock_guard lock(state_mutex_);
+      prev_mouse_x_ = center_x;
+      prev_mouse_y_ = center_y;
+    }
   }
 }
 
@@ -488,8 +482,14 @@ void MnkInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
   std::lock_guard lock(state_mutex_);
   int32_t x = e.x();
   int32_t y = e.y();
-  mouse_dx_ += x - prev_mouse_x_;
-  mouse_dy_ += y - prev_mouse_y_;
+  if (relative_mouse_mode_) {
+    // The pointer is locked, so the absolute position no longer moves.
+    mouse_dx_ += e.dx();
+    mouse_dy_ += e.dy();
+  } else {
+    mouse_dx_ += float(x - prev_mouse_x_);
+    mouse_dy_ += float(y - prev_mouse_y_);
+  }
   prev_mouse_x_ = x;
   prev_mouse_y_ = y;
 }
@@ -498,11 +498,13 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
   std::lock_guard lock(state_mutex_);
   has_focus_ = false;
   std::memset(key_down_, 0, sizeof(key_down_));
-  mouse_dx_ = 0;
-  mouse_dy_ = 0;
+  mouse_dx_ = 0.0f;
+  mouse_dy_ = 0.0f;
   if (mouse_captured_ && attached_window_) {
     mouse_captured_ = false;
     attached_window_->SetCursorVisibility(precapture_cursor_visibility_);
+    attached_window_->SetRelativeMouseMode(false);
+    relative_mouse_mode_ = false;
     attached_window_->ReleaseMouse();
   }
 }

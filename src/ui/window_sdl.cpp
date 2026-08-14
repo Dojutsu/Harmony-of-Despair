@@ -14,6 +14,7 @@
 #include <rex/ui/window_sdl.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 
@@ -236,6 +237,48 @@ void* WindowSDL::GetNativeWindowHandle() const {
 #else
   return nullptr;
 #endif
+}
+
+bool WindowSDL::SetRelativeMouseMode(bool enable) {
+  if (!sdl_window_) {
+    return false;
+  }
+  if (!SDL_SetWindowRelativeMouseMode(sdl_window_, enable)) {
+    REXLOG_WARN("SDL_SetWindowRelativeMouseMode({}) failed: {}", enable, SDL_GetError());
+    return false;
+  }
+  return enable;
+}
+
+bool WindowSDL::WarpMouseToCenter(int32_t& x_out, int32_t& y_out) {
+  if (!sdl_window_) {
+    return false;
+  }
+  int width = 0;
+  int height = 0;
+  SDL_GetWindowSize(sdl_window_, &width, &height);
+  if (width <= 0 || height <= 0) {
+    return false;
+  }
+  float center_x = float(width) * 0.5f;
+  float center_y = float(height) * 0.5f;
+  SDL_WarpMouseInWindow(sdl_window_, center_x, center_y);
+  // The warp reports nothing back and compositors may drop it, so confirm.
+  float actual_x = 0.0f;
+  float actual_y = 0.0f;
+  SDL_GetMouseState(&actual_x, &actual_y);
+  if (std::fabs(actual_x - center_x) > 1.0f || std::fabs(actual_y - center_y) > 1.0f) {
+    return false;
+  }
+  float density = GetPixelDensity();
+  x_out = int32_t(center_x * density);
+  y_out = int32_t(center_y * density);
+  return true;
+}
+
+float WindowSDL::GetPixelDensity() const {
+  float density = sdl_window_ ? SDL_GetWindowPixelDensity(sdl_window_) : 1.0f;
+  return density > 0.0f ? density : 1.0f;
 }
 
 uint32_t WindowSDL::GetLatestDpiImpl() const {
@@ -491,10 +534,7 @@ void WindowSDL::HandleTextInputEvent(SDL_Event& event) {
 
 void WindowSDL::HandleMouseEvent(SDL_Event& event) {
   // SDL3 reports float window coordinates; listeners expect physical pixels.
-  float density = sdl_window_ ? SDL_GetWindowPixelDensity(sdl_window_) : 1.0f;
-  if (density <= 0.0f) {
-    density = 1.0f;
-  }
+  float density = GetPixelDensity();
   WindowDestructionReceiver destruction_receiver(this);
   switch (event.type) {
     case SDL_EVENT_MOUSE_MOTION: {
@@ -503,7 +543,8 @@ void WindowSDL::HandleMouseEvent(SDL_Event& event) {
         RearmCursorAutoHideTimer();
       }
       MouseEvent e(this, MouseEvent::Button::kNone, int32_t(event.motion.x * density),
-                   int32_t(event.motion.y * density));
+                   int32_t(event.motion.y * density), 0, 0, event.motion.xrel * density,
+                   event.motion.yrel * density);
       OnMouseMove(e, destruction_receiver);
       break;
     }

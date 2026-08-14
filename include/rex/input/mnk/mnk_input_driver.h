@@ -54,7 +54,6 @@ class MnkInputDriver final : public InputDriver,
 
  private:
   bool IsEnabled() const;
-  void CenterCursor();
   void UpdateMouseCapture();
   void SetKeyState(uint16_t vk, bool down);
   void EnqueueKeystroke(uint16_t vk_pad, bool down);
@@ -64,12 +63,15 @@ class MnkInputDriver final : public InputDriver,
   std::mutex state_mutex_;
   bool key_down_[256] = {};
 
-  // Mouse delta tracking
-  int32_t mouse_dx_ = 0;
-  int32_t mouse_dy_ = 0;
+  // Mouse delta tracking. Fractional because relative motion arrives in
+  // fractions of a pixel, and truncating each event drops slow movement.
+  float mouse_dx_ = 0.0f;
+  float mouse_dy_ = 0.0f;
   int32_t prev_mouse_x_ = 0;
   int32_t prev_mouse_y_ = 0;
   bool mouse_captured_ = false;
+  // Whether the window has the pointer locked and is reporting relative motion.
+  bool relative_mouse_mode_ = false;
   // Cursor visibility to restore on capture release - the window owner may run
   // an auto-hide policy that capture must not permanently override.
   rex::ui::Window::CursorVisibility precapture_cursor_visibility_ =

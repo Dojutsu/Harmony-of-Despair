@@ -302,6 +302,20 @@ class Window {
   void CaptureMouse();
   void ReleaseMouse();
 
+  // Locks the pointer and switches motion events to relative deltas
+  // (MouseEvent::dx/dy), for mouse look. Returns whether it took.
+  virtual bool SetRelativeMouseMode(bool enable) {
+    (void)enable;
+    return false;
+  }
+  // Fallback when relative mode isn't available. Returns false, leaving the
+  // outputs untouched, unless the pointer verifiably reached the center.
+  virtual bool WarpMouseToCenter(int32_t& x_out, int32_t& y_out) {
+    (void)x_out;
+    (void)y_out;
+    return false;
+  }
+
   // Desired state stored by the common Window, externally modifiable, read-only
   // in the implementation.
   CursorVisibility GetCursorVisibility() const { return cursor_visibility_; }

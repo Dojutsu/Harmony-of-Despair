@@ -32,6 +32,8 @@ class WindowSDL final : public Window {
   ~WindowSDL() override;
 
   void* GetNativeWindowHandle() const override;
+  bool SetRelativeMouseMode(bool enable) override;
+  bool WarpMouseToCenter(int32_t& x_out, int32_t& y_out) override;
 
   // Called by SDLWindowedAppContext on the UI thread.
   void HandleWindowEvent(SDL_Event& event);
@@ -70,6 +72,10 @@ class WindowSDL final : public Window {
 
   void ApplyCursorVisibilityNow();
   void RearmCursorAutoHideTimer();
+
+  // Ratio between SDL window coordinates and the physical pixels listeners
+  // expect. Never zero.
+  float GetPixelDensity() const;
 
   SDL_Window* sdl_window_ = nullptr;
   SDL_WindowID sdl_window_id_ = 0;
