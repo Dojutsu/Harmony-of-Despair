@@ -14,6 +14,7 @@
 #include <rex/ui/window.h>
 #include <rex/ui/window_listener.h>
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <queue>
@@ -54,10 +55,19 @@ class MnkInputDriver final : public InputDriver,
 
  private:
   bool IsEnabled() const;
-  void UpdateMouseCapture();
   void SetKeyState(uint16_t vk, bool down);
   void EnqueueKeystroke(uint16_t vk_pad, bool down);
 
+  // Called from the guest thread. The rest of the capture path stays on the UI
+  // thread, since every Window call in it reaches SDL.
+  void QueueMouseCaptureUpdate(bool should_capture);
+  void ApplyMouseCaptureFromUIThread();
+  void ReleaseMouseCaptureFromUIThread(rex::ui::Window* window);
+  void RecenterCursorFromUIThread(int32_t x, int32_t y);
+  // Safe to call from any thread.
+  void DetachFromWindow();
+
+  // Only the UI thread writes it, so only guest thread access needs the lock.
   rex::ui::Window* attached_window_ = nullptr;
 
   std::mutex state_mutex_;
@@ -65,8 +75,11 @@ class MnkInputDriver final : public InputDriver,
 
   // Mouse delta tracking. Fractional because relative motion arrives in
   // fractions of a pixel, and truncating each event drops slow movement.
+  // Filled on the UI thread, drained on the guest thread, hence the lock.
   float mouse_dx_ = 0.0f;
   float mouse_dy_ = 0.0f;
+
+  // UI thread only.
   int32_t prev_mouse_x_ = 0;
   int32_t prev_mouse_y_ = 0;
   bool mouse_captured_ = false;
@@ -76,7 +89,12 @@ class MnkInputDriver final : public InputDriver,
   // an auto-hide policy that capture must not permanently override.
   rex::ui::Window::CursorVisibility precapture_cursor_visibility_ =
       rex::ui::Window::CursorVisibility::kVisible;
-  bool has_focus_ = true;
+
+  // Guest thread to UI thread. The queued flag coalesces the posts.
+  std::atomic<bool> mouse_capture_requested_{false};
+  std::atomic<bool> mouse_capture_update_queued_{false};
+
+  std::atomic<bool> has_focus_{true};
 
   // Keystroke queue
   std::queue<X_INPUT_KEYSTROKE> keystroke_queue_;
