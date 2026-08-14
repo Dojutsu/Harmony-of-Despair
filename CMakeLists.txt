@@ -270,6 +270,8 @@ if(REXGLUE_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
+include(cmake/rexglue_link_audit.cmake)
+
 # Print configuration summary
 message(STATUS "===========================================")
 message(STATUS "ReXGlue Configuration Summary:")

@@ -48,7 +48,6 @@ target_link_libraries(rexapp_compile_test PRIVATE
     rexui
     rexinput
     rexaudio
-    rexgraphics
 )
 add_dependencies(unit_tests rexapp_compile_test)
 
