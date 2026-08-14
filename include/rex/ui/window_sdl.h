@@ -54,6 +54,7 @@ class WindowSDL final : public Window {
   void ApplyNewMouseCapture() override;
   void ApplyNewMouseRelease() override;
   void ApplyNewCursorVisibility(CursorVisibility old_cursor_visibility) override;
+  void ApplyNewTextInputActive() override;
   void FocusImpl() override;
 
   std::unique_ptr<Surface> CreateSurfaceImpl(Surface::TypeFlags allowed_types) override;
@@ -71,6 +72,7 @@ class WindowSDL final : public Window {
   void DestroySDLWindow();
 
   void ApplyCursorVisibilityNow();
+  void ApplyTextInputActiveNow();
   void RearmCursorAutoHideTimer();
 
   // Ratio between SDL window coordinates and the physical pixels listeners

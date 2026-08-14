@@ -396,6 +396,21 @@ void Window::ReleaseMouse() {
   }
 }
 
+void Window::SetTextInputActive(bool active) {
+  if (text_input_active_ == active) {
+    return;
+  }
+  text_input_active_ = active;
+  if (!CanApplyState()) {
+    return;
+  }
+  WindowDestructionReceiver destruction_receiver(this);
+  ApplyNewTextInputActive();
+  if (destruction_receiver.IsWindowDestroyedOrStateInapplicable()) {
+    return;
+  }
+}
+
 void Window::SetCursorVisibility(CursorVisibility new_cursor_visibility) {
   if (cursor_visibility_ == new_cursor_visibility) {
     return;

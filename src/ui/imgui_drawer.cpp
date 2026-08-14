@@ -99,6 +99,7 @@ ImGuiDrawer::ImGuiDrawer(rex::ui::Window* window, size_t z_order, FontSetupCallb
 
 ImGuiDrawer::~ImGuiDrawer() {
   SetPresenter(nullptr);
+  SetWindowTextInputActive(false);
   if (!dialogs_.empty()) {
     window_->RemoveInputListener(this);
     if (internal_state_) {
@@ -157,6 +158,10 @@ void ImGuiDrawer::Initialize() {
   ImGui::SetCurrentContext(internal_state_);
 
   auto& io = ImGui::GetIO();
+
+  auto& platform_io = ImGui::GetPlatformIO();
+  platform_io.Platform_SetImeDataFn = PlatformSetImeData;
+  platform_io.Platform_ImeUserData = this;
 
   // TODO(gibbed): disable imgui.ini saving for now,
   // imgui assumes paths are char* so we can't throw a good path at it on
@@ -656,6 +661,26 @@ void ImGuiDrawer::SwitchToPhysicalMouseAndUpdateMousePosition(const MouseEvent& 
   UpdateMousePosition(float(e.x()), float(e.y()));
 }
 
+void ImGuiDrawer::PlatformSetImeData(ImGuiContext* context, ImGuiViewport* viewport,
+                                     ImGuiPlatformImeData* data) {
+  (void)context;
+  (void)viewport;
+  auto* drawer = static_cast<ImGuiDrawer*>(ImGui::GetPlatformIO().Platform_ImeUserData);
+  if (drawer) {
+    drawer->SetWindowTextInputActive(data->WantTextInput);
+  }
+}
+
+void ImGuiDrawer::SetWindowTextInputActive(bool active) {
+  if (text_input_active_ == active) {
+    return;
+  }
+  text_input_active_ = active;
+  // SDL text input is main thread only, and in detached mode Draw is not.
+  Window* window = window_;
+  window->app_context().CallInUIThread([window, active] { window->SetTextInputActive(active); });
+}
+
 void ImGuiDrawer::DetachIfLastDialogRemoved() {
   // IsDrawingDialogs() is also checked because in a situation of removing the
   // only dialog, then adding a dialog, from within a dialog's Draw function,
@@ -664,6 +689,9 @@ void ImGuiDrawer::DetachIfLastDialogRemoved() {
   if (!dialogs_.empty() || IsDrawingDialogs()) {
     return;
   }
+  // Detaching stops Draw, so there is no later frame to notice that the
+  // removed dialog took a focused InputText with it.
+  SetWindowTextInputActive(false);
   if (presenter_) {
     presenter_->RemoveUIDrawerFromUIThread(this);
   }

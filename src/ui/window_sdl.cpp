@@ -179,8 +179,9 @@ bool WindowSDL::OpenImpl() {
                            kCFPreferencesCurrentApplication);
   CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
 #endif
-  // SDL3 requires explicit opt-in for text input events.
-  SDL_StartTextInput(sdl_window_);
+  // SDL3 requires explicit opt in for text input events. Reapplied from the
+  // desired state so a reopened window comes back with the state it had.
+  ApplyTextInputActiveNow();
   ApplyCursorVisibilityNow();
   SDL_ShowWindow(sdl_window_);
 
@@ -310,6 +311,21 @@ void WindowSDL::ApplyNewMouseCapture() {
 
 void WindowSDL::ApplyNewMouseRelease() {
   SDL_CaptureMouse(false);
+}
+
+void WindowSDL::ApplyNewTextInputActive() {
+  ApplyTextInputActiveNow();
+}
+
+void WindowSDL::ApplyTextInputActiveNow() {
+  if (!sdl_window_) {
+    return;
+  }
+  if (IsTextInputActive()) {
+    SDL_StartTextInput(sdl_window_);
+  } else {
+    SDL_StopTextInput(sdl_window_);
+  }
 }
 
 void WindowSDL::ApplyNewCursorVisibility(CursorVisibility old_cursor_visibility) {

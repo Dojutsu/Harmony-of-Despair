@@ -317,6 +317,13 @@ class Window {
   }
 
   // Desired state stored by the common Window, externally modifiable, read-only
+  // in the implementation. Whether the window is an active text input field for
+  // the OS input method. Leaving it on for the session pulls in IME candidate
+  // windows and the on screen keyboard during button-only gameplay.
+  bool IsTextInputActive() const { return text_input_active_; }
+  void SetTextInputActive(bool active);
+
+  // Desired state stored by the common Window, externally modifiable, read-only
   // in the implementation.
   CursorVisibility GetCursorVisibility() const { return cursor_visibility_; }
   // Setting this to kAutoHidden from any _other_ visibility should hide the
@@ -534,6 +541,7 @@ class Window {
   // captured, in case something has released it in the OS.
   virtual void ApplyNewMouseCapture() {}
   virtual void ApplyNewMouseRelease() {}
+  virtual void ApplyNewTextInputActive() {}
   virtual void ApplyNewCursorVisibility(CursorVisibility old_cursor_visibility) {
     (void)old_cursor_visibility;
   }
@@ -710,6 +718,8 @@ class Window {
   std::unique_ptr<MenuItem> main_menu_;
 
   uint32_t mouse_capture_request_count_ = 0;
+
+  bool text_input_active_ = false;
 
   CursorVisibility cursor_visibility_ = CursorVisibility::kVisible;
 

@@ -122,6 +122,15 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
 
   double frame_time_tick_frequency_;
   uint64_t last_frame_time_ticks_;
+
+  // ImGui's IME hook, called from EndFrame with the frame being ended.
+  // ImGuiIO::WantTextInput would be a frame behind.
+  static void PlatformSetImeData(ImGuiContext* context, ImGuiViewport* viewport,
+                                 ImGuiPlatformImeData* data);
+  void SetWindowTextInputActive(bool active);
+
+  // Last value handed to the window, so detaching can clear it without a frame.
+  bool text_input_active_ = false;
 };
 
 }  // namespace ui
