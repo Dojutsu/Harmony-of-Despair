@@ -93,6 +93,14 @@ bool SDLAudioDriver::Initialize() {
     }
   }
 
+  // The endpoint layout decides which mix the callback runs, and it is the
+  // first thing worth knowing when a report says the balance is wrong on one
+  // speaker setup and right on another.
+  const char* device_name = SDL_GetAudioDeviceName(sdl_device);
+  REXAPU_INFO("audio endpoint '{}': {} ch, {} Hz, format 0x{:04X}; submitting {} ch",
+              device_name ? device_name : "?", obtained_spec.channels, obtained_spec.freq,
+              static_cast<uint32_t>(obtained_spec.format), static_cast<int>(sdl_device_channels_));
+
   if (!SDL_ResumeAudioDevice(sdl_device)) {
     REXAPU_ERROR("SDL_ResumeAudioDevice() failed: {}", SDL_GetError());
     return false;
@@ -168,6 +176,7 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
   }
   // Snapshot once. A change mid-callback would split the frame across two mixes.
   const StereoFold fold = GetStereoFold();
+  const SurroundMix mix = GetSurroundMix();
   const float gain = GetOutputGain();
   while (additional_amount > 0) {
     static uint32_t sdl_callback_count = 0;
@@ -195,7 +204,8 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
                                                             gain);
             break;
           case 6:
-            conversion::sequential_6_BE_to_interleaved_6_LE(data, buffer, channel_samples_, gain);
+            conversion::sequential_6_BE_to_interleaved_6_LE(data, buffer, channel_samples_, mix,
+                                                            gain);
             break;
           default:
             assert_unhandled_case(driver->sdl_device_channels_);

@@ -1,6 +1,6 @@
 /**
  * @file        audio/downmix.h
- * @brief       Output-stage mix parameters: 5.1 to stereo fold and master gain
+ * @brief       Output-stage mix parameters: 5.1 fold, 5.1 matrix and master gain
  *
  * @copyright   Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
  *              All rights reserved.
@@ -30,10 +30,32 @@ struct StereoFold {
   float scale = 0.58578644f;  // 1/(1+0.707)
 };
 
+/**
+ * Weights applied when the guest's 5.1 render reaches a device with more than
+ * two channels, which the output stage passes through rather than folding.
+ * Same channel order and the same implicit front weight of 1.0 as StereoFold,
+ * so the two structs describe one mix in two destinations.
+ *
+ * Defaults are unity, a passthrough, because a title whose render really is
+ * 5.1 wants its own mix reproduced. A title that packs something other than an
+ * LFE into the LFE slot sets `lfe` to drop or attenuate it: that slot is
+ * reproduced around 10 dB hot, so full-band content placed there arrives far
+ * louder than it was authored, and a downstream downmix that folds it without
+ * low-passing carries the whole band into the other channels.
+ */
+struct SurroundMix {
+  float center = 1.0f;
+  float surround = 1.0f;
+  float lfe = 1.0f;
+};
+
 /// Safe to call from any thread. The output stage picks the new values up on
 /// its next device callback.
 void SetStereoFold(const StereoFold& fold);
 StereoFold GetStereoFold();
+
+void SetSurroundMix(const SurroundMix& mix);
+SurroundMix GetSurroundMix();
 
 /// Linear master gain applied to the stereo fold and to 5.1 passthrough alike.
 /// 1.0 is unity. Above unity can clip, and the output stage clamps.

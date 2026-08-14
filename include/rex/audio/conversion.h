@@ -23,8 +23,10 @@ namespace rex::audio::conversion {
 
 #if REX_ARCH_AMD64
 inline void sequential_6_BE_to_interleaved_6_LE(float* output, const float* input,
-                                                size_t ch_sample_count, float gain) {
-  // The gain pass below walks the output four floats at a time.
+                                                size_t ch_sample_count, const SurroundMix& mix,
+                                                float gain) {
+  // The gain pass below walks the output four floats at a time, and its weight
+  // table assumes 6 channels divide evenly into those windows.
   assert_true(ch_sample_count % 2 == 0);
 
   const uint32_t* in = reinterpret_cast<const uint32_t*>(input);
@@ -47,12 +49,21 @@ inline void sequential_6_BE_to_interleaved_6_LE(float* output, const float* inpu
 
   // Second pass rather than fusing into the shuffle above, which stores as integers.
   // 6 KB per 5.33 ms frame, so skipping it at unity gain is not worth the asymmetry.
-  const __m128 g = _mm_set1_ps(gain);
+  //
+  // Six interleaved channels across four-float windows repeat every 12 floats,
+  // so three weight vectors cover every alignment the loop ever sees. The
+  // assert above makes the sample count even, which makes the float count a
+  // multiple of 12, so the cycle closes with no tail to handle.
+  const float c = mix.center * gain;
+  const float s = mix.surround * gain;
+  const float l = mix.lfe * gain;
+  const __m128 w[3] = {_mm_setr_ps(gain, gain, c, l), _mm_setr_ps(s, s, gain, gain),
+                       _mm_setr_ps(c, l, s, s)};
   const __m128 lo = _mm_set1_ps(-1.0f);
   const __m128 hi = _mm_set1_ps(1.0f);
   const size_t count = ch_sample_count * 6;
-  for (size_t i = 0; i < count; i += 4) {
-    const __m128 v = _mm_mul_ps(_mm_loadu_ps(&output[i]), g);
+  for (size_t i = 0, phase = 0; i < count; i += 4, phase = (phase + 1) % 3) {
+    const __m128 v = _mm_mul_ps(_mm_loadu_ps(&output[i]), w[phase]);
     _mm_storeu_ps(&output[i], _mm_min_ps(_mm_max_ps(v, lo), hi));
   }
 }
@@ -100,10 +111,13 @@ inline void sequential_6_BE_to_interleaved_2_LE(float* output, const float* inpu
 }
 #else
 inline void sequential_6_BE_to_interleaved_6_LE(float* output, const float* input,
-                                                size_t ch_sample_count, float gain) {
+                                                size_t ch_sample_count, const SurroundMix& mix,
+                                                float gain) {
+  const float w[6] = {
+      gain, gain, mix.center * gain, mix.lfe * gain, mix.surround * gain, mix.surround * gain};
   for (size_t sample = 0; sample < ch_sample_count; sample++) {
     for (size_t channel = 0; channel < 6; channel++) {
-      const float v = rex::byte_swap(input[channel * ch_sample_count + sample]) * gain;
+      const float v = rex::byte_swap(input[channel * ch_sample_count + sample]) * w[channel];
       output[sample * 6 + channel] = std::clamp(v, -1.0f, 1.0f);
     }
   }
