@@ -177,6 +177,10 @@ bool Memory::Initialize() {
   virtual_membase_ = mapping_base_;
   physical_membase_ = mapping_base_ + 0x100000000ull;
 
+  REXSYS_INFO("Guest memory arena mapped: virtual base 0x{:016X}, physical base 0x{:016X}",
+              reinterpret_cast<uintptr_t>(virtual_membase_),
+              reinterpret_cast<uintptr_t>(physical_membase_));
+
   // Prepare virtual heaps.
   heaps_.v00000000.Initialize(this, virtual_membase_, memory::HeapType::kGuestVirtual, 0x00000000,
                               0x40000000, 4096);
@@ -538,10 +542,11 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
   }
   uint32_t virtual_address = HostToGuestVirtual(host_address);
   BaseHeap* heap = LookupHeap(virtual_address);
-  if (!heap) {
-    return false;
-  }
-  if (heap->heap_type() != memory::HeapType::kGuestPhysical) {
+  if (!heap || heap->heap_type() != memory::HeapType::kGuestPhysical) {
+    REXSYS_ERROR(
+        "Unhandled guest access violation: {} of guest 0x{:08X} (host 0x{:016X}) on thread 0x{:X}",
+        is_write ? "write" : "read", virtual_address, reinterpret_cast<uintptr_t>(host_address),
+        rex::thread::current_thread_id());
     return false;
   }
 
