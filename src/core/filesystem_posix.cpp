@@ -190,14 +190,22 @@ class PosixFileHandle : public FileHandle {
   bool Read(size_t file_offset, void* buffer, size_t buffer_length,
             size_t* out_bytes_read) override {
     ssize_t out = pread(handle_, buffer, buffer_length, file_offset);
-    *out_bytes_read = out;
-    return out >= 0 ? true : false;
+    if (out < 0) {
+      *out_bytes_read = 0;
+      return false;
+    }
+    *out_bytes_read = static_cast<size_t>(out);
+    return true;
   }
   bool Write(size_t file_offset, const void* buffer, size_t buffer_length,
              size_t* out_bytes_written) override {
     ssize_t out = pwrite(handle_, buffer, buffer_length, file_offset);
-    *out_bytes_written = out;
-    return out >= 0 ? true : false;
+    if (out < 0) {
+      *out_bytes_written = 0;
+      return false;
+    }
+    *out_bytes_written = static_cast<size_t>(out);
+    return true;
   }
   bool SetLength(size_t length) override { return ftruncate(handle_, length) >= 0 ? true : false; }
   void Flush() override { fsync(handle_); }
@@ -211,28 +219,26 @@ std::unique_ptr<FileHandle> FileHandle::OpenExisting(const std::filesystem::path
                                                      bool /*allow_share_delete*/) {
   // POSIX allows unlinking/replacing an open file, so there is no share-delete
   // analog to thread through here.
-  int open_access = 0;
-  if (desired_access & FileAccess::kGenericRead) {
-    open_access |= O_RDONLY;
+  // O_RDONLY/O_WRONLY/O_RDWR are an enumeration in the O_ACCMODE bits, not
+  // independent flags. kGenericExecute grants neither right, matching
+  // GENERIC_EXECUTE on the Windows path.
+  constexpr uint32_t kReadRights =
+      FileAccess::kGenericRead | FileAccess::kGenericAll | FileAccess::kFileReadData;
+  constexpr uint32_t kWriteRights = FileAccess::kGenericWrite | FileAccess::kGenericAll |
+                                    FileAccess::kFileWriteData | FileAccess::kFileAppendData;
+
+  const bool want_read = (desired_access & kReadRights) != 0;
+  const bool want_write = (desired_access & kWriteRights) != 0;
+
+  int open_access = O_RDONLY;
+  if (want_read && want_write) {
+    open_access = O_RDWR;
+  } else if (want_write) {
+    open_access = O_WRONLY;
   }
-  if (desired_access & FileAccess::kGenericWrite) {
-    open_access |= O_WRONLY;
-  }
-  if (desired_access & FileAccess::kGenericExecute) {
-    open_access |= O_RDONLY;
-  }
-  if (desired_access & FileAccess::kGenericAll) {
-    open_access |= O_RDWR;
-  }
-  if (desired_access & FileAccess::kFileReadData) {
-    open_access |= O_RDONLY;
-  }
-  if (desired_access & FileAccess::kFileWriteData) {
-    open_access |= O_WRONLY;
-  }
-  if (desired_access & FileAccess::kFileAppendData) {
-    open_access |= O_APPEND;
-  }
+
+  // No O_APPEND for kFileAppendData: writes go through pwrite with an explicit
+  // offset, which O_APPEND would override.
   int handle = open(path.c_str(), open_access);
   if (handle == -1) {
     // TODO(benvanik): pick correct response.

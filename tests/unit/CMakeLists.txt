@@ -6,6 +6,7 @@ add_executable(unit_tests
     kernel/object_table_test.cpp
     core/cvar_test.cpp
     core/fiber_test.cpp
+    core/filesystem_test.cpp
     core/hash_test.cpp
     core/stream_test.cpp
     core/chrono_test.cpp
