@@ -149,12 +149,17 @@ endif()
 if(UNIX AND NOT APPLE)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(X11_XCB REQUIRED x11-xcb)
+    # Required, not optional: vulkan/api.h pulls in <wayland-client.h> on every
+    # Linux build.
+    pkg_check_modules(WAYLAND REQUIRED wayland-client)
 
-    target_include_directories(rexui PRIVATE
+    target_include_directories(rexui PUBLIC
         ${X11_XCB_INCLUDE_DIRS}
+        ${WAYLAND_INCLUDE_DIRS}
     )
     target_link_libraries(rexui PUBLIC
         ${X11_XCB_LIBRARIES}
+        ${WAYLAND_LIBRARIES}
     )
 elseif(APPLE)
     target_link_libraries(rexui PRIVATE "-framework CoreFoundation")

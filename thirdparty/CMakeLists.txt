@@ -268,8 +268,11 @@ set(SDL_DISKAUDIO OFF CACHE BOOL "" FORCE)
 set(SDL_DUMMYAUDIO OFF CACHE BOOL "" FORCE)
 set(SDL_DUMMYVIDEO OFF CACHE BOOL "" FORCE)
 
-# Linux audio backends
+# Linux video and audio backends. Both video drivers are always built so the
+# one in use stays a runtime choice.
 if(UNIX AND NOT APPLE)
+    set(SDL_X11               ON  CACHE BOOL "" FORCE)
+    set(SDL_WAYLAND           ON  CACHE BOOL "" FORCE)
     set(SDL_ALSA              ON  CACHE BOOL "" FORCE)
     set(SDL_ALSA_SHARED       ON  CACHE BOOL "" FORCE)
     set(SDL_PULSEAUDIO        ON  CACHE BOOL "" FORCE)

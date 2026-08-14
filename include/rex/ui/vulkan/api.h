@@ -36,6 +36,12 @@
 #ifndef VK_USE_PLATFORM_XCB_KHR
 #define VK_USE_PLATFORM_XCB_KHR
 #endif
+// From the platform, never the build system: it gates members of
+// VulkanInstance::Functions, so every includer has to agree, plugins included.
+#ifndef VK_USE_PLATFORM_WAYLAND_KHR
+#define VK_USE_PLATFORM_WAYLAND_KHR
+#endif
+#include <wayland-client.h>
 #endif
 
 #if REX_PLATFORM_WIN32

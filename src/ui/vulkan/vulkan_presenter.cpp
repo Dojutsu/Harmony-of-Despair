@@ -429,6 +429,9 @@ Surface::TypeFlags VulkanPresenter::GetSurfaceTypesSupportedByInstance(
   }
 #endif
 #if REX_PLATFORM_GNU_LINUX
+  if (instance_extensions.ext_KHR_wayland_surface) {
+    type_flags |= Surface::kTypeFlag_WaylandSurface;
+  }
   if (instance_extensions.ext_KHR_xcb_surface) {
     type_flags |= Surface::kTypeFlag_XcbWindow;
   }
@@ -816,6 +819,17 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
         surface_create_info.connection = xcb_window_surface.connection();
         surface_create_info.window = xcb_window_surface.window();
         vulkan_surface_create_result = ifn.vkCreateXcbSurfaceKHR(
+            instance, &surface_create_info, nullptr, &paint_context_.vulkan_surface);
+      } break;
+      case Surface::kTypeIndex_WaylandSurface: {
+        auto& wayland_surface = static_cast<const WaylandSurface&>(new_surface);
+        VkWaylandSurfaceCreateInfoKHR surface_create_info;
+        surface_create_info.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
+        surface_create_info.pNext = nullptr;
+        surface_create_info.flags = 0;
+        surface_create_info.display = wayland_surface.display();
+        surface_create_info.surface = wayland_surface.surface();
+        vulkan_surface_create_result = ifn.vkCreateWaylandSurfaceKHR(
             instance, &surface_create_info, nullptr, &paint_context_.vulkan_surface);
       } break;
 #endif
