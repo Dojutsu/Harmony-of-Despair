@@ -48,6 +48,10 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
   void AddDialog(ImGuiDialog* dialog);
   void RemoveDialog(ImGuiDialog* dialog);
 
+  // Whether Draw would render anything, so a caller that has to marshal to the
+  // UI thread can skip the round trip entirely.
+  bool HasDialogs() const { return !dialogs_.empty(); }
+
   // SetPresenter may be called from the destructor.
   void SetPresenter(Presenter* new_presenter);
   void SetImmediateDrawer(ImmediateDrawer* new_immediate_drawer);
