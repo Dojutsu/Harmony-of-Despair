@@ -190,6 +190,12 @@ std::optional<size_t> RegisterFlag(FlagEntry entry);
 void UnregisterFlag(std::string_view name);
 
 bool SetFlagByName(std::string_view name, std::string_view value);
+
+// Applies a value parsed off the command line. Returns false only when the
+// value is rejected (unparseable, or outside the flag's constraints); a value
+// skipped because a higher-priority source already won returns true.
+bool SetFlagFromCommandLine(std::string_view name, std::string_view value);
+
 std::string GetFlagByName(std::string_view name);
 
 // Which source last wrote this flag. Returns Source::kDefault for unknown names.
