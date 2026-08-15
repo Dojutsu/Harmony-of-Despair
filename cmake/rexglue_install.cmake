@@ -138,19 +138,17 @@ if(REXGLUE_USE_D3D12)
 endif()
 
 if(APPLE AND REXGLUE_USE_VULKAN)
-    rexglue_find_macos_vulkan_runtime(_rexglue_macos_vulkan_runtime_root)
-    if(_rexglue_macos_vulkan_runtime_root)
-        foreach(_rexglue_runtime_file IN LISTS REXGLUE_MACOS_VULKAN_STAGED_FILES)
-            if(EXISTS "${_rexglue_macos_vulkan_runtime_root}/${_rexglue_runtime_file}")
-                get_filename_component(_rexglue_runtime_dir "${_rexglue_runtime_file}" DIRECTORY)
-                install(FILES "${_rexglue_macos_vulkan_runtime_root}/${_rexglue_runtime_file}"
-                    DESTINATION ${CMAKE_INSTALL_DATADIR}/rexglue/vulkan/${_rexglue_runtime_dir}
-                )
-            endif()
-        endforeach()
-    else()
-        _rexglue_warn_missing_macos_vulkan_runtime()
-    endif()
+    install(FILES "$<TARGET_FILE:Vulkan::Loader>"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RENAME libvulkan.1.dylib
+    )
+    install(FILES "$<TARGET_FILE:MoltenVK::MoltenVK>"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RENAME libMoltenVK.dylib
+    )
+    install(FILES cmake/MoltenVK_icd.json
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/vulkan/icd.d
+    )
 endif()
 
 # Generate and install package config files
@@ -174,7 +172,6 @@ install(FILES
 
 install(FILES
     ${CMAKE_SOURCE_DIR}/cmake/rexglue_helpers.cmake
-    ${CMAKE_SOURCE_DIR}/cmake/rexglue_macos_vulkan_paths.h.in
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rexglue
 )
 

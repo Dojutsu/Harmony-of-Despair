@@ -24,6 +24,14 @@ add_library(rexcore OBJECT
 )
 add_library(rex::core ALIAS rexcore)
 
+if(APPLE)
+    # Apple's libc++ still gates std::jthread/std::stop_token behind the
+    # experimental-library feature flag. Only timer_queue.cpp uses them, and
+    # neither type crosses a header boundary.
+    set_source_files_properties(timer_queue.cpp PROPERTIES
+        COMPILE_OPTIONS "-fexperimental-library")
+endif()
+
 # Platform-specific sources
 if(WIN32)
     target_sources(rexcore PRIVATE

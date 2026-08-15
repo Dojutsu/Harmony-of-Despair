@@ -221,8 +221,6 @@ configure_file(
     ${CMAKE_CURRENT_BINARY_DIR}/include/rex/version.h
     @ONLY
 )
-rexglue_generate_macos_vulkan_paths_header(
-    ${CMAKE_CURRENT_BINARY_DIR}/include/rex/ui/vulkan/macos_vulkan_paths.h)
 
 # Output directories (multi-config appends /<Config>/ automatically)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${REXGLUE_ROOT}/out/${REX_PLATFORM}")

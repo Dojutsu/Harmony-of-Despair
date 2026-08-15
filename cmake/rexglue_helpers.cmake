@@ -8,184 +8,32 @@
 #==========================================================
 include_guard(GLOBAL)
 
-# Canonical macOS Vulkan SDK layout data. Build-time discovery, runtime
-# discovery, post-build staging, and installation all consume these lists.
-set(REXGLUE_MACOS_VULKAN_ROOT_SUFFIXES
-    "."
-    "macOS"
-)
-set(REXGLUE_MACOS_VULKAN_ROOT_MARKERS
-    "lib/libvulkan.1.dylib"
-    "Frameworks/vulkan.framework/vulkan"
-    "lib/libMoltenVK.dylib"
-)
-set(REXGLUE_MACOS_VULKAN_LOADER_FILES
-    "lib/libvulkan.1.dylib"
-    "lib/libvulkan.dylib"
-    "Frameworks/vulkan.framework/vulkan"
-    "lib/libMoltenVK.dylib"
-)
-set(REXGLUE_MACOS_VULKAN_SPIRV_TOOLS_FILES
-    "lib/libSPIRV-Tools-shared.dylib"
-    "Frameworks/libSPIRV-Tools-shared.dylib"
-)
-set(REXGLUE_MACOS_VULKAN_ICD_FILES
-    "share/vulkan/icd.d/MoltenVK_icd.json"
-    "Resources/vulkan/icd.d/MoltenVK_icd.json"
-    "vulkan/icd.d/MoltenVK_icd.json"
-)
-set(REXGLUE_MACOS_VULKAN_STAGED_FILES
-    "lib/libvulkan.1.dylib"
-    "lib/libvulkan.dylib"
-    "lib/libMoltenVK.dylib"
-    "share/vulkan/icd.d/MoltenVK_icd.json"
-)
-set(REXGLUE_MACOS_VULKAN_SDK_ENVIRONMENT_VARIABLES
-    "REX_VULKAN_SDK"
-    "VULKAN_SDK"
-)
-set(REXGLUE_MACOS_VULKAN_FALLBACK_ROOTS
-    "/usr/local"
-    "/opt/homebrew"
-)
-function(rexglue_generate_macos_vulkan_paths_header output_file)
-    foreach(_rexglue_list IN ITEMS
-            REXGLUE_MACOS_VULKAN_ROOT_SUFFIXES
-            REXGLUE_MACOS_VULKAN_ROOT_MARKERS
-            REXGLUE_MACOS_VULKAN_LOADER_FILES
-            REXGLUE_MACOS_VULKAN_SPIRV_TOOLS_FILES
-            REXGLUE_MACOS_VULKAN_ICD_FILES
-            REXGLUE_MACOS_VULKAN_SDK_ENVIRONMENT_VARIABLES
-            REXGLUE_MACOS_VULKAN_FALLBACK_ROOTS)
-        set(_rexglue_values "")
-        foreach(_rexglue_value IN LISTS ${_rexglue_list})
-            string(APPEND _rexglue_values "    \"${_rexglue_value}\",\n")
-        endforeach()
-        set(${_rexglue_list}_CXX "${_rexglue_values}")
-    endforeach()
-
-    get_filename_component(_rexglue_output_dir "${output_file}" DIRECTORY)
-    file(MAKE_DIRECTORY "${_rexglue_output_dir}")
-    configure_file(
-        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/rexglue_macos_vulkan_paths.h.in"
-        "${output_file}"
-        @ONLY
-    )
-endfunction()
-
-macro(_rexglue_normalize_macos_vulkan_root candidate out_var)
-    set(${out_var} "")
-    if(NOT "${candidate}" STREQUAL "")
-        foreach(_rexglue_root_suffix IN LISTS REXGLUE_MACOS_VULKAN_ROOT_SUFFIXES)
-            if(_rexglue_root_suffix STREQUAL ".")
-                set(_rexglue_candidate_root "${candidate}")
-            else()
-                set(_rexglue_candidate_root "${candidate}/${_rexglue_root_suffix}")
-            endif()
-            foreach(_rexglue_root_marker IN LISTS REXGLUE_MACOS_VULKAN_ROOT_MARKERS)
-                if(EXISTS "${_rexglue_candidate_root}/${_rexglue_root_marker}")
-                    set(${out_var} "${_rexglue_candidate_root}")
-                    break()
-                endif()
-            endforeach()
-            if(NOT "${${out_var}}" STREQUAL "")
-                break()
-            endif()
-        endforeach()
+function(_rexglue_stage_macos_vulkan_runtime target_name)
+    if(TARGET Vulkan::Loader AND TARGET MoltenVK::MoltenVK)
+        set(_rexglue_vulkan_loader Vulkan::Loader)
+        set(_rexglue_moltenvk MoltenVK::MoltenVK)
+        set(_rexglue_moltenvk_icd "${REXGLUE_ROOT}/cmake/MoltenVK_icd.json")
+    elseif(TARGET rex::vulkan-loader AND TARGET rex::moltenvk)
+        set(_rexglue_vulkan_loader rex::vulkan-loader)
+        set(_rexglue_moltenvk rex::moltenvk)
+        set(_rexglue_moltenvk_icd "${REXGLUE_MOLTENVK_ICD}")
+    else()
+        message(FATAL_ERROR "rexglue: pinned macOS Vulkan runtime targets are unavailable")
     endif()
-endmacro()
-
-macro(_rexglue_append_macos_vulkan_root roots_var candidate)
-    _rexglue_normalize_macos_vulkan_root("${candidate}" _rexglue_normalized_vulkan_root)
-    if(NOT "${_rexglue_normalized_vulkan_root}" STREQUAL "")
-        list(FIND ${roots_var} "${_rexglue_normalized_vulkan_root}" _rexglue_vulkan_root_index)
-        if(_rexglue_vulkan_root_index EQUAL -1)
-            list(APPEND ${roots_var} "${_rexglue_normalized_vulkan_root}")
-        endif()
-    endif()
-endmacro()
-
-function(rexglue_find_macos_vulkan_runtime out_var)
-    set(_rexglue_roots)
-
-    if(DEFINED REXGLUE_VULKAN_RUNTIME_DIR AND NOT "${REXGLUE_VULKAN_RUNTIME_DIR}" STREQUAL "")
-        _rexglue_append_macos_vulkan_root(_rexglue_roots "${REXGLUE_VULKAN_RUNTIME_DIR}")
-    endif()
-
-    if(DEFINED REXGLUE_SHARE_DIR AND EXISTS "${REXGLUE_SHARE_DIR}/vulkan")
-        _rexglue_append_macos_vulkan_root(_rexglue_roots "${REXGLUE_SHARE_DIR}/vulkan")
-    endif()
-
-    foreach(_rexglue_sdk_environment_variable
-            IN LISTS REXGLUE_MACOS_VULKAN_SDK_ENVIRONMENT_VARIABLES)
-        if(DEFINED ENV{${_rexglue_sdk_environment_variable}}
-           AND NOT "$ENV{${_rexglue_sdk_environment_variable}}" STREQUAL "")
-            _rexglue_append_macos_vulkan_root(
-                _rexglue_roots "$ENV{${_rexglue_sdk_environment_variable}}")
-        endif()
-    endforeach()
-
-    if(DEFINED ENV{HOME} AND IS_DIRECTORY "$ENV{HOME}/VulkanSDK")
-        file(GLOB _rexglue_sdk_versions LIST_DIRECTORIES true "$ENV{HOME}/VulkanSDK/*")
-        list(SORT _rexglue_sdk_versions COMPARE NATURAL ORDER DESCENDING)
-        foreach(_rexglue_sdk_version IN LISTS _rexglue_sdk_versions)
-            _rexglue_append_macos_vulkan_root(_rexglue_roots "${_rexglue_sdk_version}")
-        endforeach()
-    endif()
-
-    foreach(_rexglue_fallback_root IN LISTS REXGLUE_MACOS_VULKAN_FALLBACK_ROOTS)
-        _rexglue_append_macos_vulkan_root(_rexglue_roots "${_rexglue_fallback_root}")
-    endforeach()
-
-    set(_rexglue_runtime_root "")
-    if(_rexglue_roots)
-        list(GET _rexglue_roots 0 _rexglue_runtime_root)
-    endif()
-
-    set(${out_var} "${_rexglue_runtime_root}" PARENT_SCOPE)
-endfunction()
-
-function(_rexglue_warn_missing_macos_vulkan_runtime)
-    get_property(_rexglue_warning_emitted GLOBAL PROPERTY REXGLUE_MACOS_VULKAN_RUNTIME_WARNING_EMITTED)
-    if(NOT _rexglue_warning_emitted)
-        message(WARNING
-            "No macOS Vulkan runtime was found. Install the LunarG Vulkan SDK or set "
-            "REXGLUE_VULKAN_RUNTIME_DIR/REX_VULKAN_SDK to a Vulkan runtime root.")
-        set_property(GLOBAL PROPERTY REXGLUE_MACOS_VULKAN_RUNTIME_WARNING_EMITTED TRUE)
-    endif()
-endfunction()
-
-function(_rexglue_copy_macos_vulkan_runtime target_name runtime_root)
-    if("${runtime_root}" STREQUAL "")
-        _rexglue_warn_missing_macos_vulkan_runtime()
-        return()
-    endif()
-
-    set(_rexglue_runtime_files)
-    foreach(_rexglue_runtime_file IN LISTS REXGLUE_MACOS_VULKAN_STAGED_FILES)
-        if(EXISTS "${runtime_root}/${_rexglue_runtime_file}")
-            list(APPEND _rexglue_runtime_files "${_rexglue_runtime_file}")
-        endif()
-    endforeach()
-
-    if(NOT _rexglue_runtime_files)
-        _rexglue_warn_missing_macos_vulkan_runtime()
-        return()
-    endif()
-
-    set(_rexglue_runtime_commands)
-    foreach(_rexglue_runtime_file IN LISTS _rexglue_runtime_files)
-        get_filename_component(_rexglue_runtime_dir "${_rexglue_runtime_file}" DIRECTORY)
-        list(APPEND _rexglue_runtime_commands
-            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${target_name}>/vulkan/${_rexglue_runtime_dir}"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${runtime_root}/${_rexglue_runtime_file}"
-                "$<TARGET_FILE_DIR:${target_name}>/vulkan/${_rexglue_runtime_dir}"
-        )
-    endforeach()
 
     add_custom_command(TARGET ${target_name} POST_BUILD
-        ${_rexglue_runtime_commands}
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:${target_name}>/vulkan/lib"
+            "$<TARGET_FILE_DIR:${target_name}>/vulkan/share/vulkan/icd.d"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:${_rexglue_vulkan_loader}>"
+            "$<TARGET_FILE_DIR:${target_name}>/vulkan/lib/libvulkan.1.dylib"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:${_rexglue_moltenvk}>"
+            "$<TARGET_FILE_DIR:${target_name}>/vulkan/lib/libMoltenVK.dylib"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_rexglue_moltenvk_icd}"
+            "$<TARGET_FILE_DIR:${target_name}>/vulkan/share/vulkan/icd.d/MoltenVK_icd.json"
         VERBATIM
     )
 endfunction()
@@ -319,8 +167,7 @@ function(rexglue_configure_target target_name)
     endforeach()
 
     if(APPLE AND REXGLUE_USE_VULKAN)
-        rexglue_find_macos_vulkan_runtime(_rexglue_macos_vulkan_runtime_root)
-        _rexglue_copy_macos_vulkan_runtime(${target_name} "${_rexglue_macos_vulkan_runtime_root}")
+        _rexglue_stage_macos_vulkan_runtime(${target_name})
     endif()
 endfunction()
 
