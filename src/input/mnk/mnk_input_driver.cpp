@@ -135,7 +135,17 @@ bool TokenPressed(const bool (&key_down)[256], std::string_view token, uint8_t l
   return idx < 256 && key_down[idx];
 }
 
+std::atomic<bool> mouse_look_active{true};
+
 }  // namespace
+
+void SetMouseLookActive(bool active) {
+  mouse_look_active.store(active, std::memory_order_relaxed);
+}
+
+bool IsMouseLookActive() {
+  return mouse_look_active.load(std::memory_order_relaxed);
+}
 
 using rex::ui::VirtualKey;
 
@@ -251,7 +261,8 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
 
   // Mouse look is opt in. Without this gate, keyboard input alone would hide
   // and lock the cursor, breaking the ImGui overlays.
-  QueueMouseCaptureUpdate(IsEnabled() && REXCVAR_GET(mnk_mouse) && has_focus_ && is_active());
+  QueueMouseCaptureUpdate(IsEnabled() && REXCVAR_GET(mnk_mouse) && IsMouseLookActive() &&
+                          has_focus_ && is_active());
 
   if (!is_active() || !has_focus_) {
     if (out_state) {
@@ -320,7 +331,7 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
   if (IsBindPressed(key_down_, REXCVAR_GET(keybind_rstick_down)))
     ry -= INT16_MAX;
 
-  if (REXCVAR_GET(mnk_mouse)) {
+  if (REXCVAR_GET(mnk_mouse) && IsMouseLookActive()) {
     double sensitivity = REXCVAR_GET(mnk_sensitivity);
     constexpr double kBaseScale = 200.0;
     rx += static_cast<int32_t>(double(mouse_dx_) * sensitivity * kBaseScale);

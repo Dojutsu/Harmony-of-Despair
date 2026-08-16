@@ -22,6 +22,9 @@
 
 namespace rex::input::mnk {
 
+void SetMouseLookActive(bool active);
+bool IsMouseLookActive();
+
 class MnkInputDriver final : public InputDriver,
                              public rex::ui::WindowInputListener,
                              public rex::ui::WindowListener {
