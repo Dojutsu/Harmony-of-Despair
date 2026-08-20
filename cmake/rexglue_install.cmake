@@ -138,18 +138,19 @@ if(REXGLUE_USE_D3D12)
 endif()
 
 if(APPLE AND REXGLUE_USE_VULKAN)
-    add_custom_target(rexglue_vulkan_runtime_deps ALL DEPENDS Vulkan::Loader MoltenVK::MoltenVK)
-
     install(FILES "$<TARGET_FILE:Vulkan::Loader>"
         DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        CONFIGURATIONS Release
         RENAME libvulkan.1.dylib
     )
     install(FILES "$<TARGET_FILE:MoltenVK::MoltenVK>"
         DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        CONFIGURATIONS Release
         RENAME libMoltenVK.dylib
     )
     install(FILES cmake/MoltenVK_icd.json
         DESTINATION ${CMAKE_INSTALL_DATADIR}/vulkan/icd.d
+        CONFIGURATIONS Release
     )
 endif()
 

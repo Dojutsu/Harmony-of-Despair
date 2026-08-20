@@ -211,12 +211,11 @@ if(REXGLUE_USE_VULKAN)
         string(REGEX REPLACE "\\.[0-9]+$" "" VulkanHeaders_VERSION
             "${REXGLUE_VULKAN_SDK_VERSION}")
         add_subdirectory(vulkan-loader EXCLUDE_FROM_ALL)
-        set_target_properties(vulkan-framework PROPERTIES EXCLUDE_FROM_ALL TRUE)
+        set_target_properties(vulkan PROPERTIES EXCLUDE_FROM_ALL FALSE)
 
         set(MVK_BUILD_SHADER_CONVERTER_TOOL OFF CACHE BOOL "" FORCE)
         set(MVK_EXCLUDE_SPIRV_TOOLS ON CACHE BOOL "" FORCE)
         add_subdirectory(moltenvk)
-        add_custom_target(rexglue-vulkan-runtime ALL DEPENDS vulkan MoltenVK)
     endif()
 endif()
 
