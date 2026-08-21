@@ -79,6 +79,25 @@ function(rex_compute_version out_var)
 endfunction()
 
 #==========================================================
+# rex_version_channel(<out_var> VERSION <string>)
+#
+# release = exact v* tag, rc = release/* branch, dev = anything else.
+# Stable across commits, unlike the full version, so it is safe in cache keys.
+#==========================================================
+function(rex_version_channel out_var)
+    set(one_value VERSION)
+    cmake_parse_arguments(ARG "" "${one_value}" "" ${ARGN})
+
+    if(ARG_VERSION MATCHES "-rc\\.")
+        set(${out_var} "rc" PARENT_SCOPE)
+    elseif(ARG_VERSION MATCHES "-dev\\.")
+        set(${out_var} "dev" PARENT_SCOPE)
+    else()
+        set(${out_var} "release" PARENT_SCOPE)
+    endif()
+endfunction()
+
+#==========================================================
 # rex_resolve_version(<out_var>
 #     FLOOR_MAJOR <int>
 #     FLOOR_MINOR <int>

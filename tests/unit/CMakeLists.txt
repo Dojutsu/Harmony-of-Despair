@@ -1,28 +1,27 @@
 # Unit Tests for ReXGlue core components
 
 add_executable(unit_tests
+    test_memory.cpp
     memory/heap_allocation_test.cpp
     kernel/object_table_test.cpp
     core/cvar_test.cpp
     core/fiber_test.cpp
-    core/sha256_test.cpp
+    core/filesystem_test.cpp
+    core/hash_test.cpp
     core/stream_test.cpp
-    core/byte_order_test.cpp
     core/chrono_test.cpp
-    codegen/config_test.cpp
-    codegen/template_registry_test.cpp
     ppc/import_function_test.cpp
     ppc/stack_test.cpp
     system/guest_path_test.cpp
     system/achievement_manager_test.cpp
     system/function_dispatcher_test.cpp
-    codegen/manifest_test.cpp
-    rexglue/migration_scan_test.cpp
-    rexglue/ui_test.cpp
+    input/input_assignment_test.cpp
+    codegen/codegen_writer_test.cpp
+    codegen/output_partition_test.cpp
+    codegen/output_stamp_test.cpp
 )
 
 target_sources(unit_tests PRIVATE
-    ${PROJECT_SOURCE_DIR}/src/rexglue/commands/migration_scan.cpp
     ${PROJECT_SOURCE_DIR}/src/rexglue/ui/ui.cpp
     ${PROJECT_SOURCE_DIR}/src/rexglue/ui/progress.cpp
 )
@@ -30,6 +29,7 @@ target_sources(unit_tests PRIVATE
 target_include_directories(unit_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(unit_tests PRIVATE
@@ -48,7 +48,6 @@ target_link_libraries(rexapp_compile_test PRIVATE
     rexui
     rexinput
     rexaudio
-    rexgraphics
 )
 add_dependencies(unit_tests rexapp_compile_test)
 

@@ -551,7 +551,7 @@ object_ref<XThread> KernelState::PrepareModuleLaunch(object_ref<UserModule> modu
   }
 
   SetExecutableModule(module);
-  REXSYS_INFO("KernelState: Preparing module launch...");
+  REXSYS_DEBUG("KernelState: Preparing module launch...");
 
   // Create a thread to run in.
   // We start suspended so the caller can inspect/attach before resume.
@@ -906,8 +906,8 @@ void KernelState::RegisterRecompiledModule(const char* pe_name, const char* gues
     }
   }
 
-  REXSYS_INFO("Registered recompiled module: pe='{}' guest='{}' lib='{}'", info.pe_name,
-              info.guest_path, info.shared_lib_name);
+  REXSYS_DEBUG("Registered recompiled module: pe='{}' guest='{}' lib='{}'", info.pe_name,
+               info.guest_path, info.shared_lib_name);
   recompiled_modules_.push_back(std::move(info));
 }
 
