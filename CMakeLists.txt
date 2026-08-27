@@ -10,6 +10,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(generated/rexglue.cmake)
 
+# rexruntime exposes public UI headers that include imgui.h, but its build-tree
+# target does not forward the private rexui/imgui object-library usage requirements.
+target_include_directories(rexruntime INTERFACE
+    "$<TARGET_PROPERTY:imgui,INTERFACE_INCLUDE_DIRECTORIES>")
+
 # Sources
 set(HARMONYRECOMP_SOURCES
     src/main.cpp
