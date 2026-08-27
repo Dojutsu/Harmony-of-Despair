@@ -359,6 +359,19 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
     out_state->gamepad.thumb_rx = clamp16(rx);
     out_state->gamepad.thumb_ry = clamp16(ry);
   }
+  // A host press and release may both arrive between two guest polls. Keep
+  // such a press visible for this state sample, then apply its deferred
+  // release. Keys that have already been observed still release immediately.
+  for (size_t i = 0; i < std::size(key_down_); ++i) {
+    if (key_down_[i]) {
+      key_seen_down_[i] = true;
+    }
+    if (key_release_pending_[i]) {
+      key_down_[i] = false;
+      key_seen_down_[i] = false;
+      key_release_pending_[i] = false;
+    }
+  }
   return X_ERROR_SUCCESS;
 }
 
@@ -486,6 +499,10 @@ void MnkInputDriver::OnKeyDown(rex::ui::KeyEvent& e) {
   std::lock_guard lock(state_mutex_);
   uint16_t vk = static_cast<uint16_t>(e.virtual_key());
   SetKeyState(vk, true);
+  if (vk < std::size(key_seen_down_)) {
+    key_seen_down_[vk] = false;
+    key_release_pending_[vk] = false;
+  }
 }
 
 void MnkInputDriver::OnKeyUp(rex::ui::KeyEvent& e) {
@@ -493,7 +510,15 @@ void MnkInputDriver::OnKeyUp(rex::ui::KeyEvent& e) {
     return;
   std::lock_guard lock(state_mutex_);
   uint16_t vk = static_cast<uint16_t>(e.virtual_key());
-  SetKeyState(vk, false);
+  if (vk < std::size(key_down_) && key_down_[vk] && !key_seen_down_[vk]) {
+    key_release_pending_[vk] = true;
+  } else {
+    SetKeyState(vk, false);
+    if (vk < std::size(key_seen_down_)) {
+      key_seen_down_[vk] = false;
+      key_release_pending_[vk] = false;
+    }
+  }
 }
 
 void MnkInputDriver::OnMouseDown(rex::ui::MouseEvent& e) {
@@ -566,6 +591,8 @@ void MnkInputDriver::OnLostFocus(rex::ui::UISetupEvent&) {
   {
     std::lock_guard lock(state_mutex_);
     std::memset(key_down_, 0, sizeof(key_down_));
+    std::memset(key_seen_down_, 0, sizeof(key_seen_down_));
+    std::memset(key_release_pending_, 0, sizeof(key_release_pending_));
     mouse_dx_ = 0.0f;
     mouse_dy_ = 0.0f;
   }
