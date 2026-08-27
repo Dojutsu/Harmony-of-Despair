@@ -190,15 +190,14 @@ bool FunctionDispatcher::InitializeFunctionTable(uint32_t code_base, uint32_t co
     return false;
   }
 
-  uint32_t new_table_end = image_base + image_size + (code_size + kThunkReserveSize) * 2;
+  uint32_t new_image_end = image_base + image_size;
   uint32_t new_code_end = code_base + code_size + kThunkReserveSize;
   for (const auto& existing : module_tables_) {
-    uint32_t existing_table_end =
-        existing.image_base + existing.image_size + (existing.code_size + kThunkReserveSize) * 2;
+    uint32_t existing_image_end = existing.image_base + existing.image_size;
     uint32_t existing_code_end = existing.code_base + existing.code_size + kThunkReserveSize;
-    if (image_base < existing_table_end && new_table_end > existing.image_base) {
+    if (image_base < existing_image_end && new_image_end > existing.image_base) {
       REXLOG_ERROR("Module image range [{:08X}, {:08X}) overlaps existing [{:08X}, {:08X})",
-                   image_base, new_table_end, existing.image_base, existing_table_end);
+                   image_base, new_image_end, existing.image_base, existing_image_end);
       return false;
     }
     if (code_base < existing_code_end && new_code_end > existing.code_base) {

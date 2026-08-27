@@ -787,8 +787,12 @@ bool Memory::Restore(stream::ByteStream* stream) {
 bool Memory::InitializeFunctionTable(uint32_t code_base, uint32_t code_size, uint32_t image_base,
                                      uint32_t image_size) {
   constexpr uint32_t kThunkReserveSize = runtime::FunctionDispatcher::kThunkReserveSize;
-  uint32_t table_base = image_base + image_size;
   uint32_t table_size = (code_size + kThunkReserveSize) * 2;
+  // Large entrypoint images may have loadable DLLs immediately above them.
+  // Harmony of Despair's default table would otherwise cover 0x83000000,
+  // where its player modules are loaded. Keep its table in unused title space;
+  // the matching generated entrypoint dispatch uses the same address.
+  uint32_t table_base = image_base == 0x82000000 ? 0x88000000 : image_base + image_size;
 
   REXSYS_DEBUG(
       "Initializing function table at {:08X}, size {:08X} for code {:08X}-{:08X} "

@@ -379,6 +379,9 @@ class KernelState {
   std::unordered_set<std::string> loading_paths_;
   std::vector<TerminateNotification> terminate_notifications_;
   std::vector<RecompiledModuleInfo> recompiled_modules_;
+  // Active recompiled UserModules keyed by their registered logical guest
+  // identity. This is authoritative across VFS path rewriting during load.
+  std::unordered_map<std::string, object_ref<UserModule>> loaded_recompiled_modules_;
   std::unordered_map<std::string, rex::platform::DynamicLibrary> module_libraries_;
   // FreeLibrary deferred to teardown so guest threads still in unloaded code
   // don't return into freed pages. Drained at the end of ~KernelState.

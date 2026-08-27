@@ -705,19 +705,38 @@ object_ref<UserModule> KernelState::LoadUserModule(const std::string_view raw_na
         rex::string::utf8_find_base_guest_path(executable_module_->path()), name);
   }
 
-  // loading_paths_ serializes concurrent loaders of the same path; we
+  // Recompiled modules are registered by logical guest identity rather than
+  // by the spelling used for a particular load request. Resolve that identity
+  // before the fast-path lookup so aliases don't reach the shared-library
+  // collision guard below.
+  auto requested_recomp = FindRecompiledModule(path);
+  const std::string load_key = requested_recomp
+                                   ? std::string("recompiled:") + requested_recomp->guest_path
+                                   : std::string("path:") + path;
+
+  // loading_paths_ serializes concurrent loaders of the same identity; we
   // can't hold the global lock across LoadFromFile or DllMain ATTACH.
   {
     auto global_lock = global_critical_region_.Acquire();
-    for (auto& existing_module : user_modules_) {
-      if (existing_module->path() == path) {
-        return existing_module;
+    if (requested_recomp) {
+      auto loaded_it = loaded_recompiled_modules_.find(requested_recomp->guest_path);
+      if (loaded_it != loaded_recompiled_modules_.end()) {
+        REXSYS_INFO(
+            "LoadUserModule: reusing module guest='{}' request='{}' resolved='{}' existing='{}'",
+            requested_recomp->guest_path, raw_name, path, loaded_it->second->path());
+        return loaded_it->second;
+      }
+    } else {
+      for (auto& existing_module : user_modules_) {
+        if (existing_module->path() == path) {
+          return existing_module;
+        }
       }
     }
-    auto [it, inserted] = loading_paths_.emplace(path);
+    auto [it, inserted] = loading_paths_.emplace(load_key);
     (void)it;
     if (!inserted) {
-      REXSYS_WARN("LoadUserModule: '{}' already being loaded by another thread", path);
+      REXSYS_WARN("LoadUserModule: '{}' already being loaded by another thread", load_key);
       return nullptr;
     }
   }
@@ -729,7 +748,7 @@ object_ref<UserModule> KernelState::LoadUserModule(const std::string_view raw_na
       auto lock = ks->global_critical_region_.Acquire();
       ks->loading_paths_.erase(key);
     }
-  } loading_guard{this, path};
+  } loading_guard{this, load_key};
 
   auto module = object_ref<UserModule>(new UserModule(this));
   X_STATUS status = module->LoadFromFile(path);
@@ -743,7 +762,7 @@ object_ref<UserModule> KernelState::LoadUserModule(const std::string_view raw_na
 
   // Wire recompiled code (if any) before publishing to user_modules_, so a
   // failure in this block leaves no half-loaded entry behind.
-  auto recomp = FindRecompiledModule(path);
+  auto recomp = requested_recomp;
   bool wired_recomp = false;
   if (recomp && !recomp->shared_lib_name.empty()) {
     const std::string& lib_key = recomp->guest_path;
@@ -811,6 +830,15 @@ object_ref<UserModule> KernelState::LoadUserModule(const std::string_view raw_na
   {
     auto global_lock = global_critical_region_.Acquire();
     user_modules_.push_back(module);
+    if (requested_recomp) {
+      const auto [loaded_it, inserted] =
+          loaded_recompiled_modules_.emplace(requested_recomp->guest_path, module);
+      (void)loaded_it;
+      assert_true(inserted);
+      if (!requested_recomp->shared_lib_name.empty()) {
+        assert_true(module_libraries_.contains(requested_recomp->guest_path));
+      }
+    }
   }
 
   if (module->is_dll_module() && module->entry_point() && call_entry) {
@@ -853,9 +881,11 @@ void KernelState::UnloadUserModule(const object_ref<UserModule>& module, bool ca
   {
     auto global_lock = global_critical_region_.Acquire();
 
-    auto recomp = FindRecompiledModule(module->path());
-    if (recomp) {
-      const std::string& key = recomp->guest_path;
+    auto loaded_recomp_it = std::find_if(
+        loaded_recompiled_modules_.begin(), loaded_recompiled_modules_.end(),
+        [&module](const auto& entry) { return entry.second.get() == module.get(); });
+    if (loaded_recomp_it != loaded_recompiled_modules_.end()) {
+      const std::string key = loaded_recomp_it->first;
       auto cleared_range = function_dispatcher_->UnregisterModule(key);
       if (cleared_range) {
         for (auto& km : kernel_modules_) {
@@ -863,13 +893,20 @@ void KernelState::UnloadUserModule(const object_ref<UserModule>& module, bool ca
         }
       }
 
-      if (!recomp->shared_lib_name.empty()) {
-        auto lib_it = module_libraries_.find(key);
-        if (lib_it != module_libraries_.end()) {
-          deferred_unload_libraries_.push_back(std::move(lib_it->second));
-          module_libraries_.erase(lib_it);
-        }
+      auto lib_it = module_libraries_.find(key);
+      auto registration_it = std::find_if(
+          recompiled_modules_.begin(), recompiled_modules_.end(),
+          [&key](const auto& info) { return info.guest_path == key; });
+      assert_true(registration_it != recompiled_modules_.end());
+      if (registration_it != recompiled_modules_.end() &&
+          !registration_it->shared_lib_name.empty()) {
+        assert_true(lib_it != module_libraries_.end());
       }
+      if (lib_it != module_libraries_.end()) {
+        deferred_unload_libraries_.push_back(std::move(lib_it->second));
+        module_libraries_.erase(lib_it);
+      }
+      loaded_recompiled_modules_.erase(loaded_recomp_it);
     }
 
     auto iter = std::find_if(user_modules_.begin(), user_modules_.end(),
