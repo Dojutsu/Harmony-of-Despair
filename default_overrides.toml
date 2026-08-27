@@ -1,0 +1,14 @@
+# Function-discovery corrections for the Harmony entrypoint image.
+#
+# Keep these in source configuration: generated C++ is replaced by every
+# codegen run.
+
+[functions]
+0x826444A8 = {}
+0x8239BDA0 = {}
+
+# This is a resume dispatcher: its jump table enters the body beginning at
+# 0x8277EE40 at many internal labels. Model that body as a register-sharing
+# chunk so all of the dispatch targets are emitted in the parent function.
+0x8277ECF0 = { end = 0x8277F268 }
+0x8277EE40 = { parent = 0x8277ECF0, end = 0x8277F268, share_registers = true }
