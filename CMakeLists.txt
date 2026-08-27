@@ -12,8 +12,15 @@ include(generated/rexglue.cmake)
 
 # rexruntime exposes public UI headers that include imgui.h, but its build-tree
 # target does not forward the private rexui/imgui object-library usage requirements.
-target_include_directories(rexruntime INTERFACE
-    "$<TARGET_PROPERTY:imgui,INTERFACE_INCLUDE_DIRECTORIES>")
+# Apply the workaround only when rexruntime is a real non-imported target from an
+# in-tree ReXGlue build; installed SDKs provide a different target layout.
+if(TARGET rexruntime AND TARGET imgui)
+    get_target_property(_harmonyrecomp_rexruntime_imported rexruntime IMPORTED)
+    if(NOT _harmonyrecomp_rexruntime_imported)
+        target_include_directories(rexruntime INTERFACE
+            "$<TARGET_PROPERTY:imgui,INTERFACE_INCLUDE_DIRECTORIES>")
+    endif()
+endif()
 
 # Sources
 set(HARMONYRECOMP_SOURCES
