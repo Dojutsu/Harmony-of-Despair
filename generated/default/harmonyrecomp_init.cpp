@@ -4,6 +4,8 @@
 #include "harmonyrecomp_init.h"
 
 
+void RegisterRecompiledModules(rex::system::KernelState*);
+
 
 const rex::PPCImageInfo PPCImageConfig = {
     .code_base = REX_CODE_BASE,
@@ -12,6 +14,8 @@ const rex::PPCImageInfo PPCImageConfig = {
     .image_size = REX_IMAGE_SIZE,
     .func_mappings = PPCFuncMappings,
     .rexcrt_heap = REXCRT_HEAP,
+
+    .register_modules = RegisterRecompiledModules,
 
     .codegen_flags = {
         .skip_lr = false,
@@ -53,15 +57,6 @@ PPCFuncMapping PPCFuncMappings[] = {
 	{ 0x82212E70, sub_82212E70 },
 	{ 0x82212FB8, sub_82212FB8 },
 	{ 0x82213028, sub_82213028 },
-	{ 0x82213038, sub_82213038 },
-	{ 0x82213048, sub_82213048 },
-	{ 0x82213058, sub_82213058 },
-	{ 0x82213068, sub_82213068 },
-	{ 0x82213078, sub_82213078 },
-	{ 0x82213088, sub_82213088 },
-	{ 0x82213098, sub_82213098 },
-	{ 0x822130A8, sub_822130A8 },
-	{ 0x822130B8, sub_822130B8 },
 	{ 0x822130C8, sub_822130C8 },
 	{ 0x82213118, sub_82213118 },
 	{ 0x82213160, sub_82213160 },
@@ -3168,6 +3163,7 @@ PPCFuncMapping PPCFuncMappings[] = {
 	{ 0x8239B728, sub_8239B728 },
 	{ 0x8239B748, sub_8239B748 },
 	{ 0x8239B9F8, sub_8239B9F8 },
+	{ 0x8239BDA0, sub_8239BDA0 },
 	{ 0x8239BDB0, sub_8239BDB0 },
 	{ 0x8239BE68, sub_8239BE68 },
 	{ 0x8239BEC0, sub_8239BEC0 },
@@ -8147,7 +8143,6 @@ PPCFuncMapping PPCFuncMappings[] = {
 	{ 0x8259FDB8, sub_8259FDB8 },
 	{ 0x8259FE10, sub_8259FE10 },
 	{ 0x8259FE80, sub_8259FE80 },
-	{ 0x8259FF48, sub_8259FF48 },
 	{ 0x8259FF58, sub_8259FF58 },
 	{ 0x825A01B0, sub_825A01B0 },
 	{ 0x825A0240, sub_825A0240 },
@@ -8550,7 +8545,6 @@ PPCFuncMapping PPCFuncMappings[] = {
 	{ 0x825B9AF8, sub_825B9AF8 },
 	{ 0x825B9B30, sub_825B9B30 },
 	{ 0x825B9BA8, sub_825B9BA8 },
-	{ 0x825B9BC0, sub_825B9BC0 },
 	{ 0x825B9BD8, sub_825B9BD8 },
 	{ 0x825B9BE0, sub_825B9BE0 },
 	{ 0x825B9C58, sub_825B9C58 },
@@ -9527,7 +9521,6 @@ PPCFuncMapping PPCFuncMappings[] = {
 	{ 0x825F3260, sub_825F3260 },
 	{ 0x825F3308, sub_825F3308 },
 	{ 0x825F3318, sub_825F3318 },
-	{ 0x825F3398, sub_825F3398 },
 	{ 0x825F3400, sub_825F3400 },
 	{ 0x825F3488, sub_825F3488 },
 	{ 0x825F3558, sub_825F3558 },
@@ -10930,7 +10923,6 @@ PPCFuncMapping PPCFuncMappings[] = {
 	{ 0x8264D0C8, sub_8264D0C8 },
 	{ 0x8264D190, sub_8264D190 },
 	{ 0x8264D260, sub_8264D260 },
-	{ 0x8264D278, sub_8264D278 },
 	{ 0x8264D290, sub_8264D290 },
 	{ 0x8264D328, sub_8264D328 },
 	{ 0x8264D388, sub_8264D388 },

@@ -20034,16 +20034,6 @@ loc_82602C60:
 	return;
 }
 
-// Temporary codegen workaround: adjustor tail thunk omitted from discovery.
-DEFINE_REX_FUNC(sub_826444A8) {
-	REX_FUNC_PROLOGUE();
-	// addi r3,r3,8
-	ctx.r3.s64 = ctx.r3.s64 + 8;
-	// b 0x82642d40
-	sub_82642D40(ctx, base);
-	return;
-}
-
 DEFINE_REX_FUNC(sub_826444B0) {
 	REX_FUNC_PROLOGUE();
 	// addi r3,r3,-8
@@ -32449,3 +32439,4 @@ DEFINE_REX_FUNC(sub_82893CC8) {
 	__restgprlr_25(ctx, base);
 	return;
 }
+
