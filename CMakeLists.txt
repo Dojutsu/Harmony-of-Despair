@@ -25,6 +25,7 @@ endif()
 # Sources
 set(HARMONYRECOMP_SOURCES
     src/main.cpp
+    src/game_data.cpp
 )
 
 if(WIN32)
@@ -35,6 +36,24 @@ endif()
 
 rexglue_setup_target(harmonyrecomp GPU_PLUGINS xenos)
 
+add_executable(harmonyrecomp-import
+    tools/import_main.cpp
+    src/game_data.cpp
+)
+target_include_directories(harmonyrecomp-import PRIVATE src)
+target_link_libraries(harmonyrecomp-import PRIVATE rex::runtime)
+add_dependencies(harmonyrecomp harmonyrecomp-import)
+
 # Read-only validation/extraction utility used to audit the source STFS package.
 add_executable(stfs_inspect tools/stfs_inspect.cpp)
 target_link_libraries(stfs_inspect PRIVATE rex::runtime)
+
+include(CTest)
+enable_testing()
+add_executable(game_data_tests
+    tests/game_data_tests.cpp
+    src/game_data.cpp
+)
+target_include_directories(game_data_tests PRIVATE src)
+target_link_libraries(game_data_tests PRIVATE rex::runtime)
+add_test(NAME game-data COMMAND game_data_tests)

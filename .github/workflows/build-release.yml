@@ -34,6 +34,7 @@ jobs:
           rm -rf dist
           mkdir -p dist/HarmonyRecomp-linux-amd64
           cp "$build/harmonyrecomp" \
+            "$build/harmonyrecomp-import" \
             "$build/libharmonyrecomp_dllAlucard.so" \
             "$build/libharmonyrecomp_dllAxeArmor.so" \
             "$build/libharmonyrecomp_dllCharlotte.so" \
