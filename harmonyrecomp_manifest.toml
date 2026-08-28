@@ -9,3 +9,39 @@ game_root = "../harmonygame"
 file_path = "../harmonygame/default.xex"
 out_directory_path = "generated/default"
 includes = ["default_overrides.toml"]
+
+[[modules]]
+guest_path = "data/player_dll/dllAlucard.dll"
+file_path = "../harmonygame/data/player_dll/dllAlucard.dll"
+out_directory_path = "generated/dllalucard"
+includes = []
+
+[[modules]]
+guest_path = "data/player_dll/dllAxeArmor.dll"
+file_path = "../harmonygame/data/player_dll/dllAxeArmor.dll"
+out_directory_path = "generated/dllaxearmor"
+includes = []
+
+[[modules]]
+guest_path = "data/player_dll/dllCharlotte.dll"
+file_path = "../harmonygame/data/player_dll/dllCharlotte.dll"
+out_directory_path = "generated/dllcharlotte"
+includes = []
+
+[[modules]]
+guest_path = "data/player_dll/dllJonathan.dll"
+file_path = "../harmonygame/data/player_dll/dllJonathan.dll"
+out_directory_path = "generated/dlljonathan"
+includes = []
+
+[[modules]]
+guest_path = "data/player_dll/dllShanoa.dll"
+file_path = "../harmonygame/data/player_dll/dllShanoa.dll"
+out_directory_path = "generated/dllshanoa"
+includes = ["dllshanoa_overrides.toml"]
+
+[[modules]]
+guest_path = "data/player_dll/dllSoma.dll"
+file_path = "../harmonygame/data/player_dll/dllSoma.dll"
+out_directory_path = "generated/dllsoma"
+includes = ["dllsoma_overrides.toml"]

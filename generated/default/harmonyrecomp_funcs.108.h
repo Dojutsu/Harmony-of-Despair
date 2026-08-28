@@ -2,8 +2,6 @@
 
 #include "harmonyrecomp_pch.h"
 
-DECLARE_REX_FUNC(sub_8263B1B0);
-
 DECLARE_REX_FUNC(__imp__RtlEnterCriticalSection);
 DECLARE_REX_FUNC(__imp__RtlLeaveCriticalSection);
 DECLARE_REX_FUNC(__imp__RtlTryEnterCriticalSection);

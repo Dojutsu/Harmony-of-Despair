@@ -1,0 +1,19 @@
+{
+  "fingerprint": "9456c862968e36f3ecdd6793490c5319",
+  "outputs": [
+    "codegen.partition.json",
+    "harmonyrecomp_funcs.0.h",
+    "harmonyrecomp_funcs.1.h",
+    "harmonyrecomp_funcs.2.h",
+    "harmonyrecomp_funcs.h",
+    "harmonyrecomp_init.cpp",
+    "harmonyrecomp_init.h",
+    "harmonyrecomp_pch.h",
+    "harmonyrecomp_recomp.0.cpp",
+    "harmonyrecomp_recomp.1.cpp",
+    "harmonyrecomp_recomp.2.cpp",
+    "harmonyrecomp_register.cpp",
+    "sources.cmake"
+  ],
+  "version": 1
+}

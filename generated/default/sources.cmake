@@ -6,6 +6,7 @@
 set(GENERATED_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/harmonyrecomp_init.cpp
     ${CMAKE_CURRENT_LIST_DIR}/harmonyrecomp_register.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/module_registry.cpp
     ${CMAKE_CURRENT_LIST_DIR}/harmonyrecomp_recomp.0.cpp
     ${CMAKE_CURRENT_LIST_DIR}/harmonyrecomp_recomp.1.cpp
     ${CMAKE_CURRENT_LIST_DIR}/harmonyrecomp_recomp.2.cpp

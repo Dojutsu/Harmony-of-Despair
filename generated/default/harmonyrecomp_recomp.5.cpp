@@ -17866,20 +17866,6 @@ loc_8259FF40:
 	goto loc_8259FF1C;
 }
 
-// Temporary codegen workaround: this four-instruction leaf is referenced
-// indirectly but was omitted by ReXGlue's function discovery.
-DEFINE_REX_FUNC(sub_8259FF48) {
-	REX_FUNC_PROLOGUE();
-	// lbz r11,8(r3)
-	ctx.r11.u64 = REX_LOAD_U8(ctx.r3.u32 + 8);
-	// cntlzw r11,r11
-	ctx.r11.u64 = ctx.r11.u32 == 0 ? 32 : __builtin_clz(ctx.r11.u32);
-	// rlwinm r3,r11,27,31,31 (srwi r3,r11,5)
-	ctx.r3.u64 = __builtin_rotateleft64(ctx.r11.u32 | (ctx.r11.u64 << 32), 27) & 0x1;
-	// blr
-	return;
-}
-
 DEFINE_REX_FUNC(sub_825A4F50) {
 	REX_FUNC_PROLOGUE();
 	PPCRegister temp{};
@@ -33121,3 +33107,4 @@ DEFINE_REX_FUNC(sub_82893F28) {
 	// blr 
 	return;
 }
+

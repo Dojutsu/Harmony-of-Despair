@@ -4,14 +4,19 @@
 #include "harmonyrecomp_init.h"
 
 
+void RegisterRecompiledModules(rex::system::KernelState*);
+
 
 const rex::PPCImageInfo PPCImageConfig = {
     .code_base = REX_CODE_BASE,
     .code_size = REX_CODE_SIZE,
     .image_base = REX_IMAGE_BASE,
     .image_size = REX_IMAGE_SIZE,
+    .function_table_base = REX_FUNCTION_TABLE_BASE,
     .func_mappings = PPCFuncMappings,
     .rexcrt_heap = REXCRT_HEAP,
+
+    .register_modules = RegisterRecompiledModules,
 
     .codegen_flags = {
         .skip_lr = false,
@@ -3168,6 +3173,7 @@ PPCFuncMapping PPCFuncMappings[] = {
 	{ 0x8239B728, sub_8239B728 },
 	{ 0x8239B748, sub_8239B748 },
 	{ 0x8239B9F8, sub_8239B9F8 },
+	{ 0x8239BDA0, sub_8239BDA0 },
 	{ 0x8239BDB0, sub_8239BDB0 },
 	{ 0x8239BE68, sub_8239BE68 },
 	{ 0x8239BEC0, sub_8239BEC0 },
@@ -5071,6 +5077,7 @@ PPCFuncMapping PPCFuncMappings[] = {
 	{ 0x82455128, sub_82455128 },
 	{ 0x82455130, sub_82455130 },
 	{ 0x82455138, sub_82455138 },
+	{ 0x824552C0, sub_824552C0 },
 	{ 0x824552DC, sub_824552DC },
 	{ 0x824552F8, sub_824552F8 },
 	{ 0x82455328, sub_82455328 },
@@ -10794,6 +10801,7 @@ PPCFuncMapping PPCFuncMappings[] = {
 	{ 0x82647C48, sub_82647C48 },
 	{ 0x82647C50, sub_82647C50 },
 	{ 0x82647CC8, sub_82647CC8 },
+	{ 0x82647CD8, sub_82647CD8 },
 	{ 0x82647CE0, sub_82647CE0 },
 	{ 0x82647CE8, sub_82647CE8 },
 	{ 0x82647CF0, sub_82647CF0 },
@@ -10893,6 +10901,7 @@ PPCFuncMapping PPCFuncMappings[] = {
 	{ 0x8264C888, sub_8264C888 },
 	{ 0x8264C890, sub_8264C890 },
 	{ 0x8264C8A0, sub_8264C8A0 },
+	{ 0x8264C8D0, sub_8264C8D0 },
 	{ 0x8264C8D8, sub_8264C8D8 },
 	{ 0x8264C900, sub_8264C900 },
 	{ 0x8264C950, sub_8264C950 },
@@ -10909,6 +10918,7 @@ PPCFuncMapping PPCFuncMappings[] = {
 	{ 0x8264CB60, sub_8264CB60 },
 	{ 0x8264CB68, sub_8264CB68 },
 	{ 0x8264CB70, sub_8264CB70 },
+	{ 0x8264CB78, sub_8264CB78 },
 	{ 0x8264CB80, sub_8264CB80 },
 	{ 0x8264CBA8, sub_8264CBA8 },
 	{ 0x8264CBF8, sub_8264CBF8 },

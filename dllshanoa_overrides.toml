@@ -1,0 +1,5 @@
+# One-time Shanoa module initializer reached indirectly during character setup.
+# Automatic discovery omitted the exact 0x30-byte gap before the next function.
+
+[functions]
+0x83269E18 = { end = 0x83269E48 }

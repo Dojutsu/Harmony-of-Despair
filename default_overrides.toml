@@ -3,7 +3,38 @@
 # Keep these in source configuration: generated C++ is replaced by every
 # codegen run.
 
+# Keep the entrypoint dispatch table clear of the loadable player DLL range.
+# Codegen emits this same base into indirect lookups and runtime metadata.
+function_table_base = 0x88000000
+
 [functions]
+# Nine 16-byte virtual-call tail thunks referenced through function-pointer
+# tables. Each loads the object's vtable, selects the indicated slot, and
+# tail-dispatches through CTR.
+0x82213038 = { end = 0x82213048 }
+0x82213048 = { end = 0x82213058 }
+0x82213058 = { end = 0x82213068 }
+0x82213068 = { end = 0x82213078 }
+0x82213078 = { end = 0x82213088 }
+0x82213088 = { end = 0x82213098 }
+0x82213098 = { end = 0x822130A8 }
+0x822130A8 = { end = 0x822130B8 }
+0x822130B8 = { end = 0x822130C8 }
+
+# Other independently recovered indirect targets that were previously kept
+# alive only by manual edits to generated C++.
+0x8259FF48 = { end = 0x8259FF58 }
+0x825B9BC0 = { end = 0x825B9BD8 }
+0x825F3398 = { end = 0x825F3400 }
+0x8264D278 = { end = 0x8264D290 }
+0x82647CD8 = { end = 0x82647CE0 }
+0x8264CB78 = { end = 0x8264CB80 }
+0x8264C8D0 = { end = 0x8264C8D8 }
+
+# Masamune-specific indirect callback. Returns zero for an empty collection,
+# otherwise tail-dispatches to the existing helper at 0x824552DC.
+0x824552C0 = { end = 0x824552DC }
+
 0x826444A8 = {}
 0x8239BDA0 = {}
 

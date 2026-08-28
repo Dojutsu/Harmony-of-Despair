@@ -21697,25 +21697,6 @@ DEFINE_REX_FUNC(sub_8264D260) {
 	return;
 }
 
-// Temporary codegen workaround: virtual tail thunk referenced indirectly
-// through a function table, but omitted from ReXGlue's function discovery.
-DEFINE_REX_FUNC(sub_8264D278) {
-	REX_FUNC_PROLOGUE();
-	// lwz r11,72(r3)
-	ctx.r11.u64 = REX_LOAD_U32(ctx.r3.u32 + 72);
-	// addi r3,r11,64
-	ctx.r3.s64 = ctx.r11.s64 + 64;
-	// lwz r11,64(r11)
-	ctx.r11.u64 = REX_LOAD_U32(ctx.r11.u32 + 64);
-	// lwz r11,20(r11)
-	ctx.r11.u64 = REX_LOAD_U32(ctx.r11.u32 + 20);
-	// mtctr r11
-	ctx.ctr.u64 = ctx.r11.u64;
-	// bctr
-	REX_CALL_INDIRECT_FUNC(ctx.ctr.u32);
-	return;
-}
-
 DEFINE_REX_FUNC(sub_8264DA00) {
 	REX_FUNC_PROLOGUE();
 	uint32_t ea{};
@@ -33625,3 +33606,4 @@ loc_82879318:
 	__restgprlr_28(ctx, base);
 	return;
 }
+

@@ -1,0 +1,11 @@
+# Indirect player-code target observed during Chapter 1 startup. Automatic
+# discovery left the exact 0x30-byte gap before the next known function.
+
+[functions."830B9DC8"]
+end = 0x830B9DF8
+
+[functions."830A19B8"]
+end = 0x830A19C0
+
+[functions."830A2370"]
+end = 0x830A2378
