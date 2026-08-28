@@ -13,37 +13,28 @@ jobs:
   linux-amd64:
     runs-on: [self-hosted, linux, x64, buildserver]
     steps:
-      - name: Check out HarmonyRecomp
-        uses: actions/checkout@v4
-
-      - name: Prepare private build inputs
+      - name: Synchronize the clean server checkout
         shell: bash
         run: |
-          test -r /srv/ai/game-inputs/HarmonyRecomp/default.xex
-          rm -rf "$RUNNER_TEMP/rexglue-sdk"
-          git clone --local /srv/ai/git/rexglue-sdk.git "$RUNNER_TEMP/rexglue-sdk"
-          ln -sfn /srv/ai/game-inputs/HarmonyRecomp "$GITHUB_WORKSPACE/../harmonygame"
-
-      - name: Configure
-        shell: bash
-        run: |
-          cmake -S . -B out/build/ci -G Ninja \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_C_COMPILER=clang-20 \
-            -DCMAKE_CXX_COMPILER=clang++-20 \
-            -DCMAKE_CXX_FLAGS=-msse4.1 \
-            -DREXSDK_DIR="$RUNNER_TEMP/rexglue-sdk"
+          repo=/srv/ai/workspaces/codex/HarmonyRecomp
+          test -z "$(git -C "$repo" status --porcelain)"
+          git -C "$repo" fetch github master
+          test "$(git -C "$repo" rev-parse github/master)" = "$GITHUB_SHA"
+          git -C "$repo" checkout master
+          git -C "$repo" merge --ff-only github/master
 
       - name: Build
-        run: cmake --build out/build/ci --target harmonyrecomp --parallel
+        run: /home/owner/test-harmony-codex-build.sh
 
       - name: Package
         shell: bash
         run: |
+          build=/srv/ai/workspaces/codex/HarmonyRecomp/out/build/linux-amd64-relwithdebinfo
+          runtime=/srv/ai/build-cache/HarmonyRecomp/rexglue-out/linux-amd64
           mkdir -p dist/HarmonyRecomp-linux-amd64
-          cp out/build/ci/harmonyrecomp dist/HarmonyRecomp-linux-amd64/
-          find out/build/ci -type f \( -name '*.so' -o -name '*.dll' \) \
-            -exec cp -t dist/HarmonyRecomp-linux-amd64/ {} +
+          cp "$build/harmonyrecomp" "$build/librexgpu-xenosrd.so" \
+            "$runtime/librexruntimerd.so" "$runtime/libTracyClientrd.so" \
+            dist/HarmonyRecomp-linux-amd64/
           tar -C dist -czf dist/HarmonyRecomp-linux-amd64.tar.gz HarmonyRecomp-linux-amd64
 
       - name: Upload build
