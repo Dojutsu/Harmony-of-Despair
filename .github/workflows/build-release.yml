@@ -1,0 +1,60 @@
+name: Build and release
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux-amd64:
+    runs-on: [self-hosted, linux, x64, buildserver]
+    steps:
+      - name: Check out HarmonyRecomp
+        uses: actions/checkout@v4
+
+      - name: Prepare private build inputs
+        shell: bash
+        run: |
+          test -r /srv/ai/game-inputs/HarmonyRecomp/default.xex
+          rm -rf "$RUNNER_TEMP/rexglue-sdk"
+          git clone --local /srv/ai/git/rexglue-sdk.git "$RUNNER_TEMP/rexglue-sdk"
+          ln -sfn /srv/ai/game-inputs/HarmonyRecomp "$GITHUB_WORKSPACE/../harmonygame"
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B out/build/ci -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang-20 \
+            -DCMAKE_CXX_COMPILER=clang++-20 \
+            -DCMAKE_CXX_FLAGS=-msse4.1 \
+            -DREXSDK_DIR="$RUNNER_TEMP/rexglue-sdk"
+
+      - name: Build
+        run: cmake --build out/build/ci --target harmonyrecomp --parallel
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist/HarmonyRecomp-linux-amd64
+          cp out/build/ci/harmonyrecomp dist/HarmonyRecomp-linux-amd64/
+          find out/build/ci -type f \( -name '*.so' -o -name '*.dll' \) \
+            -exec cp -t dist/HarmonyRecomp-linux-amd64/ {} +
+          tar -C dist -czf dist/HarmonyRecomp-linux-amd64.tar.gz HarmonyRecomp-linux-amd64
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: HarmonyRecomp-linux-amd64
+          path: dist/HarmonyRecomp-linux-amd64.tar.gz
+          if-no-files-found: error
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/HarmonyRecomp-linux-amd64.tar.gz --generate-notes
