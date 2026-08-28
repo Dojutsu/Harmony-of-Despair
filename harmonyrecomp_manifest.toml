@@ -38,7 +38,7 @@ includes = []
 guest_path = "data/player_dll/dllShanoa.dll"
 file_path = "../harmonygame/data/player_dll/dllShanoa.dll"
 out_directory_path = "generated/dllshanoa"
-includes = []
+includes = ["dllshanoa_overrides.toml"]
 
 [[modules]]
 guest_path = "data/player_dll/dllSoma.dll"
