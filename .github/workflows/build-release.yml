@@ -103,8 +103,14 @@ jobs:
           $build = 'out/build/win-amd64-relwithdebinfo'
           cmake --build --preset win-amd64-relwithdebinfo --target game_data_tests --parallel
           ctest --test-dir $build --output-on-failure
-          & "$build/harmonyrecomp-import.exe" --verify "$env:RUNNER_TEMP/missing-harmony-data"
-          if ($LASTEXITCODE -eq 0) {
+          $missingData = Join-Path $env:RUNNER_TEMP 'missing-harmony-data'
+          $verify = Start-Process `
+            -FilePath "$build/harmonyrecomp-import.exe" `
+            -ArgumentList @('--verify', $missingData) `
+            -Wait `
+            -PassThru `
+            -NoNewWindow
+          if ($verify.ExitCode -eq 0) {
             throw 'Importer unexpectedly accepted a missing installation.'
           }
 
