@@ -62,3 +62,119 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${GITHUB_REF_NAME}" dist/HarmonyRecomp-linux-amd64.tar.gz --generate-notes
+
+  windows-amd64:
+    runs-on: windows-2022
+    steps:
+      - name: Check out HarmonyRecomp
+        uses: actions/checkout@v4
+
+      - name: Check out the pinned ReXGlue release
+        uses: actions/checkout@v4
+        with:
+          repository: rexglue/rexglue-sdk
+          ref: c94f5ebdcb3c9d1a460ca48e04f9758448f8d518
+          path: _deps/rexglue-sdk
+          submodules: recursive
+
+      - name: Apply the reviewed Harmony ReXGlue delta
+        shell: pwsh
+        run: git -C _deps/rexglue-sdk apply --check ../../thirdparty/patches/rexglue-harmony-a7df795.patch; git -C _deps/rexglue-sdk apply ../../thirdparty/patches/rexglue-harmony-a7df795.patch
+
+      - name: Install the established Windows toolchain
+        shell: pwsh
+        run: choco install llvm cmake ninja -y
+
+      - name: Use committed recompilation output
+        shell: pwsh
+        run: |
+          Get-ChildItem generated -Recurse -Filter codegen.d | Remove-Item -Force
+          Get-ChildItem generated -Recurse -Filter codegen.build.stamp | ForEach-Object {
+            $_.LastWriteTime = Get-Date
+          }
+
+      - name: Configure
+        shell: pwsh
+        run: cmake --preset win-amd64-relwithdebinfo -DREXSDK_DIR="$env:GITHUB_WORKSPACE/_deps/rexglue-sdk"
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build --preset win-amd64-relwithdebinfo --target harmonyrecomp --parallel
+
+      - name: Test importer validation
+        shell: pwsh
+        run: |
+          $build = 'out/build/win-amd64-relwithdebinfo'
+          cmake --build --preset win-amd64-relwithdebinfo --target game_data_tests --parallel
+          ctest --test-dir $build --output-on-failure
+          & "$build/harmonyrecomp-import.exe" --verify "$env:RUNNER_TEMP/missing-harmony-data"
+          if ($LASTEXITCODE -eq 0) {
+            throw 'Importer unexpectedly accepted a missing installation.'
+          }
+
+      - name: Package explicit redistributable allowlist
+        shell: pwsh
+        run: |
+          $build = 'out/build/win-amd64-relwithdebinfo'
+          $root = 'dist/HarmonyRecomp-windows-amd64'
+          Remove-Item dist -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+          $required = @(
+            'harmonyrecomp.exe',
+            'harmonyrecomp-import.exe',
+            'harmonyrecomp_dllAlucard.dll',
+            'harmonyrecomp_dllAxeArmor.dll',
+            'harmonyrecomp_dllCharlotte.dll',
+            'harmonyrecomp_dllJonathan.dll',
+            'harmonyrecomp_dllShanoa.dll',
+            'harmonyrecomp_dllSoma.dll',
+            'rexgpu-xenosrd.dll',
+            'rexruntimerd.dll',
+            'TracyClientrd.dll',
+            'MSVCP140.dll',
+            'VCRUNTIME140.dll',
+            'VCRUNTIME140_1.dll'
+          )
+          $projectRuntime = @($required | Where-Object { $_ -notmatch '^(MSVCP|VCRUNTIME)' })
+          foreach ($name in $projectRuntime) {
+            $source = Join-Path $build $name
+            if (!(Test-Path -LiteralPath $source -PathType Leaf)) {
+              throw "Required Windows runtime file is missing: $name"
+            }
+            Copy-Item -LiteralPath $source -Destination $root
+          }
+          foreach ($name in @('MSVCP140.dll', 'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll')) {
+            $source = Join-Path "$env:WINDIR/System32" $name
+            if (!(Test-Path -LiteralPath $source -PathType Leaf)) {
+              throw "Required Microsoft application-local runtime is missing: $name"
+            }
+            Copy-Item -LiteralPath $source -Destination $root
+          }
+          Copy-Item -LiteralPath README.md -Destination $root
+
+          $allowed = @($required + 'README.md')
+          $actual = @(Get-ChildItem -LiteralPath $root -File | ForEach-Object Name)
+          $unexpected = @($actual | Where-Object { $_ -notin $allowed })
+          $missing = @($allowed | Where-Object { $_ -notin $actual })
+          if ($unexpected.Count -or $missing.Count) {
+            throw "Release allowlist mismatch. Unexpected: $unexpected Missing: $missing"
+          }
+
+          $forbidden = @(Get-ChildItem -LiteralPath dist -Recurse -File | Where-Object {
+            $_.Extension -ieq '.xex' -or
+            $_.Name -iin @('default.xex', 'dllAlucard.dll', 'dllAxeArmor.dll',
+              'dllCharlotte.dll', 'dllJonathan.dll', 'dllShanoa.dll', 'dllSoma.dll')
+          })
+          if ($forbidden.Count) {
+            throw "Refusing to package original game input: $($forbidden.FullName)"
+          }
+
+          Compress-Archive -LiteralPath $root -DestinationPath 'dist/HarmonyRecomp-windows-amd64.zip'
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: HarmonyRecomp-windows-amd64
+          path: dist/HarmonyRecomp-windows-amd64.zip
+          if-no-files-found: error

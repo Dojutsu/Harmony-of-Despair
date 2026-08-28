@@ -11,6 +11,44 @@ companion importer accepts either:
 - the original Xbox 360 STFS/LIVE package; or
 - a complete directory you extracted from that package.
 
+### Windows first run
+
+1. Download and extract `HarmonyRecomp-windows-amd64.zip` to a normal writable
+   folder. Do not place original game data inside that folder.
+2. Open PowerShell in the extracted `HarmonyRecomp-windows-amd64` folder.
+3. Import either your owned STFS/LIVE package or its complete extracted folder:
+
+   ```powershell
+   .\harmonyrecomp-import.exe "D:\path\to\owned-package-or-complete-folder"
+   ```
+
+4. Confirm the transactional installation without starting the game:
+
+   ```powershell
+   .\harmonyrecomp-import.exe --verify
+   ```
+
+5. Start the game with:
+
+   ```powershell
+   .\harmonyrecomp.exe --license_mask=1
+   ```
+
+The importer stores the verified private data under
+`%LOCALAPPDATA%\HarmonyRecomp\game-data`. A normal launch discovers that
+location automatically. Launching `harmonyrecomp.exe` before importing shows a
+clear missing-data message and exits without starting the runtime.
+
+For development, bypass the managed installation with an explicit complete
+game-data directory:
+
+```powershell
+.\harmonyrecomp.exe --game_data_root="D:\path\to\complete-game-data" --license_mask=1
+```
+
+The explicit `--game_data_root` always wins. It is intentionally a development
+escape hatch and does not mark or modify the selected directory.
+
 Run:
 
 ```text
@@ -67,10 +105,10 @@ private user-owned data. They are required at runtime because ReXGlue loads the
 original executable/module images for Xbox metadata, data sections, imports,
 and the virtual game filesystem.
 
-The native HarmonyRecomp executable, recompiled `.so` module libraries, and
-ReXGlue runtime libraries are redistributable project output. GitHub Actions
-packages only an explicit allowlist and fails if any `.xex` or original
-`.dll` appears.
+The native HarmonyRecomp executable, recompiled `.so`/`.dll` module libraries,
+and ReXGlue runtime libraries are redistributable project output. GitHub
+Actions packages only an explicit platform allowlist and fails if any `.xex`,
+original player DLL, or other unapproved executable/DLL appears.
 
 The exact minimum gameplay-asset subset has not been derived yet. Until the
 authoritative complete extraction is audited, the importer deliberately keeps
