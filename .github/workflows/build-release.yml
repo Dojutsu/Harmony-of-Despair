@@ -89,23 +89,9 @@ jobs:
         shell: pwsh
         run: choco install llvm cmake ninja -y
 
-      - name: Use committed recompilation output
-        shell: pwsh
-        run: |
-          Get-ChildItem generated -Recurse -Filter codegen.d | Remove-Item -Force
-
       - name: Configure
         shell: pwsh
-        run: cmake --preset win-amd64-relwithdebinfo -DREXSDK_DIR="$env:GITHUB_WORKSPACE/_deps/rexglue-sdk"
-
-      - name: Mark reviewed generated outputs current
-        shell: pwsh
-        run: |
-          Get-ChildItem generated -Recurse -File | Where-Object {
-            $_.Name -eq 'codegen.build.stamp' -or
-            $_.Name -eq 'module_registry.cpp' -or
-            $_.Name -like 'harmonyrecomp_*.cpp'
-          } | ForEach-Object { $_.LastWriteTime = Get-Date }
+        run: cmake --preset win-amd64-relwithdebinfo -DREXSDK_DIR="$env:GITHUB_WORKSPACE/_deps/rexglue-sdk" -DREXGLUE_USE_PREGENERATED=ON
 
       - name: Build
         shell: pwsh
