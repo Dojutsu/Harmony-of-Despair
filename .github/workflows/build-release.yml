@@ -93,13 +93,19 @@ jobs:
         shell: pwsh
         run: |
           Get-ChildItem generated -Recurse -Filter codegen.d | Remove-Item -Force
-          Get-ChildItem generated -Recurse -Filter codegen.build.stamp | ForEach-Object {
-            $_.LastWriteTime = Get-Date
-          }
 
       - name: Configure
         shell: pwsh
         run: cmake --preset win-amd64-relwithdebinfo -DREXSDK_DIR="$env:GITHUB_WORKSPACE/_deps/rexglue-sdk"
+
+      - name: Mark reviewed generated outputs current
+        shell: pwsh
+        run: |
+          Get-ChildItem generated -Recurse -File | Where-Object {
+            $_.Name -eq 'codegen.build.stamp' -or
+            $_.Name -eq 'module_registry.cpp' -or
+            $_.Name -like 'harmonyrecomp_*.cpp'
+          } | ForEach-Object { $_.LastWriteTime = Get-Date }
 
       - name: Build
         shell: pwsh
