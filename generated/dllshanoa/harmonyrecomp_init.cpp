@@ -10,6 +10,7 @@ const rex::PPCImageInfo PPCImageConfig = {
     .code_size = REX_CODE_SIZE,
     .image_base = REX_IMAGE_BASE,
     .image_size = REX_IMAGE_SIZE,
+    .function_table_base = REX_FUNCTION_TABLE_BASE,
     .func_mappings = PPCFuncMappings,
     .rexcrt_heap = REXCRT_HEAP,
 
@@ -798,6 +799,7 @@ PPCFuncMapping PPCFuncMappings[] = {
 	{ 0x832681F0, sub_832681F0 },
 	{ 0x83268908, sub_83268908 },
 	{ 0x83269268, sub_83269268 },
+	{ 0x83269E18, sub_83269E18 },
 	{ 0x83269E48, sub_83269E48 },
 	{ 0x8326A0E0, sub_8326A0E0 },
 	{ 0x8326A1C0, sub_8326A1C0 },

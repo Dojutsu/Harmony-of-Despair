@@ -11,6 +11,7 @@
 
 #define REX_IMAGE_BASE 0x831B0000ull
 #define REX_IMAGE_SIZE 0x80000ull
+#define REX_FUNCTION_TABLE_BASE 0x83230000ull
 #define REX_CODE_BASE 0x831C0000ull
 #define REX_CODE_SIZE 0x1D034ull
 #define REX_THUNK_RESERVE_SIZE 0x10000ull
@@ -240,7 +241,7 @@ extern PPCFuncMapping PPCFuncMappings[];
 // Indirect Call Dispatch
 //
 // REX_LOOKUP_FUNC indexes into the per-module dispatch table at
-// IMAGE_BASE + IMAGE_SIZE. REX_CALL_INDIRECT_FUNC bounds-checks the target
+// REX_FUNCTION_TABLE_BASE. REX_CALL_INDIRECT_FUNC bounds-checks the target
 // against the caller's [REX_CODE_BASE, REX_CODE_BASE + REX_CODE_SIZE +
 // REX_THUNK_RESERVE_SIZE) range; out-of-bounds targets and in-bounds
 // unregistered slots fall back to rex::runtime::ResolveIndirectFunction,
@@ -255,7 +256,7 @@ extern PPCFuncMapping PPCFuncMappings[];
 #endif
 
 #define REX_LOOKUP_FUNC(x, y) \
-  (*(PPCFunc**)(x + REX_IMAGE_BASE + REX_IMAGE_SIZE + (u64(u32(y) - REX_CODE_BASE) * 2)))
+  (*(PPCFunc**)(x + REX_FUNCTION_TABLE_BASE + (u64(u32(y) - REX_CODE_BASE) * 2)))
 
 #define REX_CALL_INDIRECT_FUNC(x)                                                          \
   do {                                                                                     \

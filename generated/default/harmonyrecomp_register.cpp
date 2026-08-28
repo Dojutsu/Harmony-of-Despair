@@ -35,6 +35,15 @@ void harmonyrecomp_RegisterFunctions(rex::runtime::IModuleRegistrar* registrar) 
   registrar->SetFunction(0x82212E70, sub_82212E70);
   registrar->SetFunction(0x82212FB8, sub_82212FB8);
   registrar->SetFunction(0x82213028, sub_82213028);
+  registrar->SetFunction(0x82213038, sub_82213038);
+  registrar->SetFunction(0x82213048, sub_82213048);
+  registrar->SetFunction(0x82213058, sub_82213058);
+  registrar->SetFunction(0x82213068, sub_82213068);
+  registrar->SetFunction(0x82213078, sub_82213078);
+  registrar->SetFunction(0x82213088, sub_82213088);
+  registrar->SetFunction(0x82213098, sub_82213098);
+  registrar->SetFunction(0x822130A8, sub_822130A8);
+  registrar->SetFunction(0x822130B8, sub_822130B8);
   registrar->SetFunction(0x822130C8, sub_822130C8);
   registrar->SetFunction(0x82213118, sub_82213118);
   registrar->SetFunction(0x82213160, sub_82213160);
@@ -5045,6 +5054,7 @@ void harmonyrecomp_RegisterFunctions(rex::runtime::IModuleRegistrar* registrar) 
   registrar->SetFunction(0x82455128, sub_82455128);
   registrar->SetFunction(0x82455130, sub_82455130);
   registrar->SetFunction(0x82455138, sub_82455138);
+  registrar->SetFunction(0x824552C0, sub_824552C0);
   registrar->SetFunction(0x824552DC, sub_824552DC);
   registrar->SetFunction(0x824552F8, sub_824552F8);
   registrar->SetFunction(0x82455328, sub_82455328);
@@ -8121,6 +8131,7 @@ void harmonyrecomp_RegisterFunctions(rex::runtime::IModuleRegistrar* registrar) 
   registrar->SetFunction(0x8259FDB8, sub_8259FDB8);
   registrar->SetFunction(0x8259FE10, sub_8259FE10);
   registrar->SetFunction(0x8259FE80, sub_8259FE80);
+  registrar->SetFunction(0x8259FF48, sub_8259FF48);
   registrar->SetFunction(0x8259FF58, sub_8259FF58);
   registrar->SetFunction(0x825A01B0, sub_825A01B0);
   registrar->SetFunction(0x825A0240, sub_825A0240);
@@ -8523,6 +8534,7 @@ void harmonyrecomp_RegisterFunctions(rex::runtime::IModuleRegistrar* registrar) 
   registrar->SetFunction(0x825B9AF8, sub_825B9AF8);
   registrar->SetFunction(0x825B9B30, sub_825B9B30);
   registrar->SetFunction(0x825B9BA8, sub_825B9BA8);
+  registrar->SetFunction(0x825B9BC0, sub_825B9BC0);
   registrar->SetFunction(0x825B9BD8, sub_825B9BD8);
   registrar->SetFunction(0x825B9BE0, sub_825B9BE0);
   registrar->SetFunction(0x825B9C58, sub_825B9C58);
@@ -9499,6 +9511,7 @@ void harmonyrecomp_RegisterFunctions(rex::runtime::IModuleRegistrar* registrar) 
   registrar->SetFunction(0x825F3260, sub_825F3260);
   registrar->SetFunction(0x825F3308, sub_825F3308);
   registrar->SetFunction(0x825F3318, sub_825F3318);
+  registrar->SetFunction(0x825F3398, sub_825F3398);
   registrar->SetFunction(0x825F3400, sub_825F3400);
   registrar->SetFunction(0x825F3488, sub_825F3488);
   registrar->SetFunction(0x825F3558, sub_825F3558);
@@ -10765,6 +10778,7 @@ void harmonyrecomp_RegisterFunctions(rex::runtime::IModuleRegistrar* registrar) 
   registrar->SetFunction(0x82647C48, sub_82647C48);
   registrar->SetFunction(0x82647C50, sub_82647C50);
   registrar->SetFunction(0x82647CC8, sub_82647CC8);
+  registrar->SetFunction(0x82647CD8, sub_82647CD8);
   registrar->SetFunction(0x82647CE0, sub_82647CE0);
   registrar->SetFunction(0x82647CE8, sub_82647CE8);
   registrar->SetFunction(0x82647CF0, sub_82647CF0);
@@ -10864,6 +10878,7 @@ void harmonyrecomp_RegisterFunctions(rex::runtime::IModuleRegistrar* registrar) 
   registrar->SetFunction(0x8264C888, sub_8264C888);
   registrar->SetFunction(0x8264C890, sub_8264C890);
   registrar->SetFunction(0x8264C8A0, sub_8264C8A0);
+  registrar->SetFunction(0x8264C8D0, sub_8264C8D0);
   registrar->SetFunction(0x8264C8D8, sub_8264C8D8);
   registrar->SetFunction(0x8264C900, sub_8264C900);
   registrar->SetFunction(0x8264C950, sub_8264C950);
@@ -10880,6 +10895,7 @@ void harmonyrecomp_RegisterFunctions(rex::runtime::IModuleRegistrar* registrar) 
   registrar->SetFunction(0x8264CB60, sub_8264CB60);
   registrar->SetFunction(0x8264CB68, sub_8264CB68);
   registrar->SetFunction(0x8264CB70, sub_8264CB70);
+  registrar->SetFunction(0x8264CB78, sub_8264CB78);
   registrar->SetFunction(0x8264CB80, sub_8264CB80);
   registrar->SetFunction(0x8264CBA8, sub_8264CBA8);
   registrar->SetFunction(0x8264CBF8, sub_8264CBF8);
@@ -10901,6 +10917,7 @@ void harmonyrecomp_RegisterFunctions(rex::runtime::IModuleRegistrar* registrar) 
   registrar->SetFunction(0x8264D0C8, sub_8264D0C8);
   registrar->SetFunction(0x8264D190, sub_8264D190);
   registrar->SetFunction(0x8264D260, sub_8264D260);
+  registrar->SetFunction(0x8264D278, sub_8264D278);
   registrar->SetFunction(0x8264D290, sub_8264D290);
   registrar->SetFunction(0x8264D328, sub_8264D328);
   registrar->SetFunction(0x8264D388, sub_8264D388);

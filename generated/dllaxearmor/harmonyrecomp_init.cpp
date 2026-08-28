@@ -10,6 +10,7 @@ const rex::PPCImageInfo PPCImageConfig = {
     .code_size = REX_CODE_SIZE,
     .image_base = REX_IMAGE_BASE,
     .image_size = REX_IMAGE_SIZE,
+    .function_table_base = REX_FUNCTION_TABLE_BASE,
     .func_mappings = PPCFuncMappings,
     .rexcrt_heap = REXCRT_HEAP,
 
