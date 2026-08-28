@@ -1,1 +1,4 @@
 /out/
+
+# Private Harmony game binaries
+data/player_dll/
