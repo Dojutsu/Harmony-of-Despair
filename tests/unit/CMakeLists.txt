@@ -15,6 +15,8 @@ add_executable(unit_tests
     system/guest_path_test.cpp
     system/achievement_manager_test.cpp
     system/function_dispatcher_test.cpp
+    system/session_test.cpp
+    system/socket_test.cpp
     input/input_assignment_test.cpp
     codegen/codegen_writer_test.cpp
     codegen/output_partition_test.cpp
@@ -35,6 +37,7 @@ target_include_directories(unit_tests PRIVATE
 target_link_libraries(unit_tests PRIVATE
     rexcodegen
     rexruntime
+    xxHash::xxhash
     Catch2::Catch2WithMain
 )
 

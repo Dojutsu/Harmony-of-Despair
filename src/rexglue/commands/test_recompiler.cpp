@@ -414,6 +414,7 @@ bool RecompileTests(std::string_view binDir, std::string_view asmDir, std::strin
   templateData["functions_code"] = functionsOut.str();
   templateData["image_base"] = "82010000";
   templateData["image_size"] = "100000";
+  templateData["function_table_base"] = "82110000";
   templateData["code_base"] = "82010000";
   templateData["code_size"] = "100000";
 

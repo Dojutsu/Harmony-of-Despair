@@ -25,6 +25,7 @@
 // Test code base address (matches -Ttext=0x82010000 linker option)
 #define REX_IMAGE_BASE 0x{{ image_base }}ull
 #define REX_IMAGE_SIZE 0x{{ image_size }}ull
+#define REX_FUNCTION_TABLE_BASE 0x{{ function_table_base }}ull
 #define REX_CODE_BASE 0x{{ code_base }}ull
 #define REX_CODE_SIZE 0x{{ code_size }}ull
 #define REX_THUNK_RESERVE_SIZE 0x10000ull
@@ -190,4 +191,3 @@ inline std::atomic<i32>& ppc_global_lock_count_() {
     assert(old_count_ >= 1 && "LeaveGlobalLock called without matching EnterGlobalLock"); \
     rex::thread::global_critical_region::mutex().unlock();                                \
   } while (0)
-

@@ -95,12 +95,17 @@ class XSocket : public XObject {
 
   uint64_t native_handle() const { return native_handle_; }
   uint16_t bound_port() const { return bound_port_; }
+  void ConfigurePortTranslation(uint16_t guest_port, uint16_t native_port) {
+    guest_port_ = guest_port;
+    native_port_ = native_port;
+  }
 
   X_STATUS Initialize(AddressFamily af, Type type, Protocol proto);
   X_STATUS Close();
 
   X_STATUS SetOption(uint32_t level, uint32_t optname, void* optval_ptr, uint32_t optlen);
   X_STATUS IOControl(uint32_t cmd, uint8_t* arg_ptr);
+  X_STATUS SetNonBlocking(bool enabled);
 
   X_STATUS Connect(N_XSOCKADDR* name, int name_len);
   X_STATUS Bind(N_XSOCKADDR_IN* name, int name_len);
@@ -113,6 +118,7 @@ class XSocket : public XObject {
 
   int RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* from,
                uint32_t* from_len);
+  bool WaitReadable(uint32_t timeout_ms, bool infinite = false) const;
   int SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* to, uint32_t to_len);
 
   struct packet {
@@ -138,6 +144,8 @@ class XSocket : public XObject {
 
   bool bound_ = false;  // Explicitly bound to an IP address?
   uint16_t bound_port_ = 0;
+  uint16_t guest_port_ = 0;
+  uint16_t native_port_ = 0;
 
   bool broadcast_socket_ = false;
 

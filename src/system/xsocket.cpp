@@ -12,6 +12,7 @@
 #include <cstring>
 
 #include <rex/kernel/xam/module.h>
+#include <rex/logging.h>
 #include <rex/platform.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xsocket.h>
@@ -26,6 +27,7 @@
 #include <WS2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <sys/socket.h>
@@ -57,10 +59,14 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
     return X_STATUS_UNSUCCESSFUL;
   }
 
+  REXSYS_INFO("XSocket::Initialize: native={} af={} type={} proto={}", native_handle_,
+              uint32_t(af), uint32_t(type), uint32_t(proto));
+
   return X_STATUS_SUCCESS;
 }
 
 X_STATUS XSocket::Close() {
+  REXSYS_INFO("XSocket::Close: native={}", native_handle_);
   int ret = rex::net::socket_close(native_handle_);
   if (ret != 0) {
     return X_STATUS_UNSUCCESSFUL;
@@ -77,6 +83,8 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, 
   }
 
   int ret = setsockopt(native_handle_, level, optname, (char*)optval_ptr, optlen);
+  REXSYS_INFO("XSocket::SetOption: native={} level={:#x} option={:#x} length={} result={}",
+              native_handle_, level, optname, optlen, ret);
   if (ret < 0) {
     // TODO: WSAGetLastError()
     return X_STATUS_UNSUCCESSFUL;
@@ -100,8 +108,26 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
   return X_STATUS_SUCCESS;
 }
 
+X_STATUS XSocket::SetNonBlocking(bool enabled) {
+#if REX_PLATFORM_WIN32
+  u_long value = enabled ? 1 : 0;
+  return ioctlsocket(static_cast<SOCKET>(native_handle_), FIONBIO, &value) == 0
+             ? X_STATUS_SUCCESS
+             : X_STATUS_UNSUCCESSFUL;
+#else
+  int flags = fcntl(static_cast<int>(native_handle_), F_GETFL, 0);
+  if (flags < 0)
+    return X_STATUS_UNSUCCESSFUL;
+  int updated = enabled ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+  return fcntl(static_cast<int>(native_handle_), F_SETFL, updated) == 0 ? X_STATUS_SUCCESS
+                                                                       : X_STATUS_UNSUCCESSFUL;
+#endif
+}
+
 X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
   int ret = connect(native_handle_, (sockaddr*)name, name_len);
+  REXSYS_INFO("XSocket::Connect: native={} family={} length={} result={}", native_handle_,
+              name ? name->address_family : 0, name_len, ret);
   if (ret < 0) {
     return X_STATUS_UNSUCCESSFUL;
   }
@@ -116,7 +142,25 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
   }
 
   bound_ = true;
-  bound_port_ = name->sin_port;
+  sockaddr_in actual_address{};
+  socklen_t actual_length = sizeof(actual_address);
+  if (getsockname(native_handle_, reinterpret_cast<sockaddr*>(&actual_address), &actual_length) ==
+      0) {
+    // Keep the native/network-order value used by sockaddr. This is especially
+    // important for port 0, where the OS selects the real guest transport port.
+    bound_port_ = actual_address.sin_port;
+    REXSYS_INFO("XSocket::Bind: native={} local={:08X}:{}", native_handle_,
+                ntohl(actual_address.sin_addr.s_addr), ntohs(actual_address.sin_port));
+  } else {
+    bound_port_ = name->sin_port;
+    REXSYS_ERROR("XSocket::Bind: getsockname failed native={} error={}", native_handle_,
+#if REX_PLATFORM_WIN32
+                 WSAGetLastError()
+#else
+                 errno
+#endif
+    );
+  }
 
   return X_STATUS_SUCCESS;
 }
@@ -190,18 +234,60 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
   socklen_t nfromlen = sizeof(sockaddr_in);
   int ret = recvfrom(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
                      (sockaddr*)&nfrom, &nfromlen);
-  if (from) {
+  if (ret >= 0 && from) {
     from->sin_family = nfrom.sin_family;
     from->sin_addr = ntohl(nfrom.sin_addr.s_addr);  // BE <- BE
-    from->sin_port = nfrom.sin_port;
+    const uint16_t source_port = ntohs(nfrom.sin_port);
+    from->sin_port = native_port_ != 0 && source_port == native_port_ ? guest_port_ : source_port;
     std::memset(from->x_sin_zero, 0, sizeof(from->x_sin_zero));
   }
 
-  if (from_len) {
+  if (ret >= 0 && from_len) {
     *from_len = nfromlen;
   }
 
   return ret;
+}
+
+bool XSocket::WaitReadable(uint32_t timeout_ms, bool infinite) const {
+  fd_set read_set;
+  FD_ZERO(&read_set);
+#if REX_PLATFORM_WIN32
+  auto native_socket = static_cast<SOCKET>(native_handle_);
+#else
+  auto native_socket = static_cast<int>(native_handle_);
+#endif
+  FD_SET(native_socket, &read_set);
+  timeval timeout{static_cast<long>(timeout_ms / 1000),
+                  static_cast<long>((timeout_ms % 1000) * 1000)};
+  int result = select(
+#if REX_PLATFORM_WIN32
+      0,
+#else
+      native_socket + 1,
+#endif
+      &read_set, nullptr, nullptr, infinite ? nullptr : &timeout);
+#if REX_PLATFORM_WIN32
+  if (result == 0) {
+    u_long available = 0;
+    if (ioctlsocket(native_socket, FIONREAD, &available) == 0 && available != 0) {
+      REXSYS_ERROR(
+          "XSocket::WaitReadable: select reported no data but FIONREAD reports {} bytes "
+          "native={}",
+          available, native_handle_);
+    }
+  }
+#endif
+  if (result < 0) {
+    REXSYS_ERROR("XSocket::WaitReadable: select failed native={} error={}", native_handle_,
+#if REX_PLATFORM_WIN32
+                 WSAGetLastError()
+#else
+                 errno
+#endif
+    );
+  }
+  return result > 0 && FD_ISSET(native_socket, &read_set);
 }
 
 int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
@@ -223,9 +309,14 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
 
   sockaddr_in nto;
   if (to) {
-    nto.sin_addr.s_addr = to->sin_addr;
+    // N_XSOCKADDR_IN exposes logical host-order values through endian_store,
+    // while sockaddr_in requires network-order integer storage.
+    nto.sin_addr.s_addr = htonl(uint32_t(to->sin_addr));
     nto.sin_family = to->sin_family;
-    nto.sin_port = to->sin_port;
+    const uint16_t destination_port =
+        native_port_ != 0 && uint16_t(to->sin_port) == guest_port_ ? native_port_
+                                                                   : uint16_t(to->sin_port);
+    nto.sin_port = htons(destination_port);
   }
 
   return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,

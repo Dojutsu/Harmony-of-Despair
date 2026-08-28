@@ -215,11 +215,13 @@ class UserProfile {
   };
 
   UserProfile();
+  UserProfile(uint64_t xuid, std::string name, bool lan_online = false);
 
   uint64_t xuid() const { return xuid_; }
   std::string name() const { return name_; }
-  uint32_t signin_state() const { return 1; }
+  uint32_t signin_state() const { return lan_online_ ? 2 : 1; }
   uint32_t type() const { return 1 | 2; /* local | online profile? */ }
+  bool HasPrivilege(uint32_t privilege) const;
 
   void set_kernel_state(KernelState* ks) { kernel_state_ = ks; }
 
@@ -229,6 +231,7 @@ class UserProfile {
  private:
   uint64_t xuid_;
   std::string name_;
+  bool lan_online_;
   std::vector<std::unique_ptr<Setting>> setting_list_;
   std::unordered_map<uint32_t, Setting*> settings_;
   KernelState* kernel_state_ = nullptr;

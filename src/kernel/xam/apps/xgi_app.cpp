@@ -11,6 +11,7 @@
 
 #include <rex/kernel/xam/apps/xgi_app.h>
 #include <rex/logging.h>
+#include <rex/system/xam/session.h>
 #include <rex/thread.h>
 
 namespace rex {
@@ -20,6 +21,131 @@ using namespace rex::system;
 using namespace rex::system::xam;
 namespace apps {
 using namespace rex::system;
+
+namespace {
+constexpr uint32_t kSessionCreateHost = 1;
+constexpr uint32_t kInvalidUserIndex = 0xFFFFFFFFu;
+
+#pragma pack(push, 1)
+struct GuestSessionInfo {
+  uint8_t session_id[8];
+  uint8_t host_address[36];
+  uint8_t key[16];
+};
+struct GuestSearchResult {
+  GuestSessionInfo info;
+  rex::be<uint32_t> open_public_slots;
+  rex::be<uint32_t> open_private_slots;
+  rex::be<uint32_t> filled_public_slots;
+  rex::be<uint32_t> filled_private_slots;
+  rex::be<uint32_t> property_count;
+  rex::be<uint32_t> context_count;
+  rex::be<uint32_t> properties_ptr;
+  rex::be<uint32_t> contexts_ptr;
+};
+struct GuestSearchHeader {
+  rex::be<uint32_t> result_count;
+  rex::be<uint32_t> results_ptr;
+};
+struct GuestSessionMember {
+  rex::be<uint64_t> xuid;
+  rex::be<uint32_t> user_index;
+  rex::be<uint32_t> flags;
+};
+struct GuestSessionDetails {
+  rex::be<uint32_t> host_user_index;
+  rex::be<uint32_t> game_type;
+  rex::be<uint32_t> game_mode;
+  rex::be<uint32_t> flags;
+  rex::be<uint32_t> max_public_slots;
+  rex::be<uint32_t> max_private_slots;
+  rex::be<uint32_t> available_public_slots;
+  rex::be<uint32_t> available_private_slots;
+  rex::be<uint32_t> actual_member_count;
+  rex::be<uint32_t> returned_member_count;
+  rex::be<uint32_t> state;
+  rex::be<uint64_t> nonce;
+  GuestSessionInfo info;
+  uint8_t arbitration_id[8];
+  rex::be<uint32_t> members_ptr;
+};
+#pragma pack(pop)
+static_assert(sizeof(GuestSessionInfo) == 60);
+static_assert(sizeof(GuestSearchResult) == 92);
+static_assert(sizeof(GuestSessionDetails) == 124);
+
+void StoreSessionInfo(GuestSessionInfo* output, const SessionInfo& info) {
+  std::memset(output, 0, sizeof(*output));
+  std::memcpy(output->session_id, info.id.data(), info.id.size());
+  std::memcpy(output->host_address + 0, &info.host_address.ipv4, sizeof(uint32_t));
+  std::memcpy(output->host_address + 4, &info.host_address.ipv4, sizeof(uint32_t));
+  memory::store_and_swap<uint16_t>(output->host_address + 8, info.host_address.port);
+  std::memcpy(output->host_address + 10, info.ethernet_address.data(), 6);
+  std::memcpy(output->host_address + 16, info.online_address.data(), 20);
+  std::memcpy(output->key, info.key.data(), info.key.size());
+}
+SessionInfo LoadSessionInfo(const GuestSessionInfo* input) {
+  SessionInfo info;
+  std::memcpy(info.id.data(), input->session_id, info.id.size());
+  std::memcpy(&info.host_address.ipv4, input->host_address + 0, sizeof(uint32_t));
+  if (!info.host_address.ipv4)
+    std::memcpy(&info.host_address.ipv4, input->host_address + 4, sizeof(uint32_t));
+  info.host_address.port = memory::load_and_swap<uint16_t>(input->host_address + 8);
+  std::memcpy(info.ethernet_address.data(), input->host_address + 10, 6);
+  std::memcpy(info.online_address.data(), input->host_address + 16, 20);
+  std::memcpy(info.key.data(), input->key, info.key.size());
+  return info;
+}
+XSession* LookupSession(KernelState* state, uint32_t object_ptr) {
+  return state->session_manager()->LookupObject(object_ptr);
+}
+X_HRESULT WriteSearchResults(KernelState* state, uint32_t output_ptr, uint32_t output_size,
+                             uint32_t max_results, bool refresh_network,
+                             const std::vector<std::array<uint8_t, 8>>* requested_ids = nullptr) {
+  auto* manager = state->session_manager();
+  manager->discovery().SetTitleId(state->title_id());
+  if (refresh_network) {
+    // Entering search is a transition out of the local host flow. Tear down
+    // any abandoned advertisement before broadcasting so this instance can't
+    // rediscover (or continue advertising) its former lobby.
+    if (manager->discovery().IsAdvertising()) {
+      manager->discovery().StopAdvertising();
+      manager->registry().DeleteHostedBy(state->user_profile()->xuid());
+    }
+    for (auto& found : manager->discovery().Search(250, max_results))
+      manager->registry().UpsertDiscovered(std::move(found));
+  }
+  // The configured XUID is the logical local-host identity. Filtering by it
+  // also excludes the same session rediscovered through loopback or a second
+  // adapter without conflating unrelated remote sessions.
+  auto sessions = manager->registry().ListRemote(state->user_profile()->xuid());
+  if (requested_ids) {
+    std::erase_if(sessions, [&](const auto& session) {
+      return std::find(requested_ids->begin(), requested_ids->end(), session->info.id) ==
+             requested_ids->end();
+    });
+  }
+  size_t count = std::min<size_t>(sessions.size(), max_results);
+  size_t required = sizeof(GuestSearchHeader) + count * sizeof(GuestSearchResult);
+  if (!output_ptr || output_size < required)
+    return X_ERROR_INSUFFICIENT_BUFFER;
+  auto* header = state->memory()->TranslateVirtual<GuestSearchHeader*>(output_ptr);
+  auto* results =
+      state->memory()->TranslateVirtual<GuestSearchResult*>(output_ptr + sizeof(GuestSearchHeader));
+  std::memset(header, 0, required);
+  header->result_count = uint32_t(count);
+  header->results_ptr = output_ptr + sizeof(GuestSearchHeader);
+  for (size_t i = 0; i < count; ++i) {
+    std::lock_guard session_lock(*sessions[i]->mutex);
+    StoreSessionInfo(&results[i].info, sessions[i]->info);
+    results[i].open_public_slots = sessions[i]->OpenPublicSlots();
+    results[i].open_private_slots = sessions[i]->OpenPrivateSlots();
+    results[i].filled_public_slots = sessions[i]->FilledPublicSlots();
+    results[i].filled_private_slots = sessions[i]->FilledPrivateSlots();
+  }
+  return X_E_SUCCESS;
+}
+}  // namespace
 
 XgiApp::XgiApp(KernelState* kernel_state) : App(kernel_state, 0xFB) {}
 
@@ -104,15 +230,50 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t flags = memory::load_and_swap<uint32_t>(buffer + 4);
       uint32_t num_slots_public = memory::load_and_swap<uint32_t>(buffer + 8);
       uint32_t num_slots_private = memory::load_and_swap<uint32_t>(buffer + 12);
-      uint32_t user_xuid = memory::load_and_swap<uint32_t>(buffer + 16);
+      uint32_t user_index = memory::load_and_swap<uint32_t>(buffer + 16);
       uint32_t session_info_ptr = memory::load_and_swap<uint32_t>(buffer + 20);
       uint32_t nonce_ptr = memory::load_and_swap<uint32_t>(buffer + 24);
 
       REXKRNL_DEBUG(
           "XGISessionCreateImpl({:08X}, {:08X}, {}, {}, {:08X}, {:08X}, "
           "{:08X})",
-          session_ptr, flags, num_slots_public, num_slots_private, user_xuid, session_info_ptr,
+          session_ptr, flags, num_slots_public, num_slots_private, user_index, session_info_ptr,
           nonce_ptr);
+      auto* object = LookupSession(kernel_state_, session_ptr);
+      if (!object || !session_info_ptr || !nonce_ptr || user_index != 0) {
+        REXKRNL_ERROR(
+            "XGISessionCreateImpl rejected arguments: object={} info={:08X} nonce={:08X} "
+            "user={:08X}",
+            object != nullptr, session_info_ptr, nonce_ptr, user_index);
+        return X_E_INVALIDARG;
+      }
+      auto* profile = kernel_state_->user_profile();
+      auto* guest_info = memory_->TranslateVirtual<GuestSessionInfo*>(session_info_ptr);
+      auto& manager = *kernel_state_->session_manager();
+      manager.discovery().SetTitleId(kernel_state_->title_id());
+      std::shared_ptr<SessionRecord> session;
+      if (flags & kSessionCreateHost) {
+        LanAddress address{LanDiscoveryService::DetermineLanIpv4(), 3074};
+        session = manager.registry().Create(profile->xuid(), profile->name(), address, flags,
+                                            num_slots_public, num_slots_private);
+        StoreSessionInfo(guest_info, session->info);
+        if (!manager.discovery().Advertise(session)) {
+          REXKRNL_ERROR("XGISessionCreateImpl: failed to advertise LAN session");
+          manager.registry().Delete(session->info.id);
+          return X_E_FAIL;
+        }
+      } else {
+        auto info = LoadSessionInfo(guest_info);
+        REXKRNL_INFO("XGISessionCreateImpl: client session id={:02X}{:02X} host={:08X}:{}",
+                     info.id[0], info.id[1], info.host_address.ipv4, info.host_address.port);
+        session = manager.registry().Find(info.id);
+        if (!session) {
+          REXKRNL_ERROR("XGISessionCreateImpl: join-by-info session was not found");
+          return X_E_NOTFOUND;
+        }
+      }
+      object->set_record(session);
+      memory::store_and_swap<uint64_t>(memory_->TranslateVirtual(nonce_ptr), session->nonce);
       return X_E_SUCCESS;
     }
     case 0x000B0011: {
@@ -124,6 +285,14 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
 
       REXKRNL_DEBUG("XGISessionDelete({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
 
+      auto* object = LookupSession(kernel_state_, obj_ptr);
+      if (!object || !object->record())
+        return X_E_INVALIDARG;
+      auto id = object->record()->info.id;
+      if (object->record()->host_xuid == kernel_state_->user_profile()->xuid())
+        kernel_state_->session_manager()->discovery().StopAdvertising();
+      kernel_state_->session_manager()->registry().Delete(id);
+      object->set_record(nullptr);
       return X_E_SUCCESS;
     }
     case 0x000B0012: {
@@ -135,9 +304,78 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t private_slots_array = memory::load_and_swap<uint32_t>(buffer + 16);
       bool is_local = xuid_array_ptr == 0;
 
-      REXKRNL_DEBUG("{}({:08X}, {}, {}, {:08X}, {:08X})",
+      REXKRNL_DEBUG("{}({:08X}, count={}, xuids={:08X}, users={:08X}, private={:08X})",
                     is_local ? "XGISessionJoinLocal" : "XGISessionJoinRemote", session_ptr,
                     user_count, xuid_array_ptr, user_index_array, private_slots_array);
+      auto* object = LookupSession(kernel_state_, session_ptr);
+      if (!object || !object->record() || !user_count)
+        return X_E_INVALIDARG;
+      auto session = object->record();
+      for (uint32_t i = 0; i < user_count; ++i) {
+        uint64_t xuid = is_local ? kernel_state_->user_profile()->xuid()
+                                 : memory::load_and_swap<uint64_t>(
+                                       memory_->TranslateVirtual(xuid_array_ptr + i * 8));
+        uint32_t user_index = is_local && user_index_array
+                                  ? memory::load_and_swap<uint32_t>(
+                                        memory_->TranslateVirtual(user_index_array + i * 4))
+                                  : kInvalidUserIndex;
+        bool private_slot =
+            private_slots_array && *memory_->TranslateVirtual(private_slots_array + i) != 0;
+        SessionMember member{
+            xuid,         is_local ? kernel_state_->user_profile()->name() : std::string{},
+            user_index,   is_local,
+            private_slot, false};
+        if (is_local && session->host_xuid != xuid) {
+          REXKRNL_INFO("XGISessionJoinLocal: requesting LAN join xuid={:016X} host={:016X}", xuid,
+                       session->host_xuid);
+          auto updated = kernel_state_->session_manager()->discovery().Join(*session, member, 500);
+          if (!updated)
+            return X_E_FAIL;
+          for (auto& updated_member : updated->members) {
+            if (updated_member.xuid == xuid) {
+              updated_member.local = true;
+              updated_member.user_index = user_index;
+              updated_member.name = kernel_state_->user_profile()->name();
+            }
+          }
+          kernel_state_->session_manager()->registry().UpsertDiscovered(std::move(*updated));
+          session = kernel_state_->session_manager()->registry().Find(session->info.id);
+          object->set_record(session);
+          REXKRNL_INFO("XGISessionJoinLocal: joined session with {} members",
+                       session ? session->members.size() : 0);
+        } else if (!kernel_state_->session_manager()->registry().Join(session->info.id,
+                                                                      std::move(member))) {
+          return X_E_FAIL;
+        }
+      }
+      return X_E_SUCCESS;
+    }
+    case 0x000B0013: {
+      assert_true(!buffer_length || buffer_length == 16);
+      uint32_t session_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
+      uint32_t user_count = memory::load_and_swap<uint32_t>(buffer + 4);
+      uint32_t xuid_array_ptr = memory::load_and_swap<uint32_t>(buffer + 8);
+      uint32_t user_index_array = memory::load_and_swap<uint32_t>(buffer + 12);
+      bool is_local = xuid_array_ptr == 0;
+      auto* object = LookupSession(kernel_state_, session_ptr);
+      if (!object || !object->record())
+        return X_E_INVALIDARG;
+      auto session = object->record();
+      for (uint32_t i = 0; i < user_count; ++i) {
+        (void)user_index_array;
+        uint64_t xuid = is_local ? kernel_state_->user_profile()->xuid()
+                                 : memory::load_and_swap<uint64_t>(
+                                       memory_->TranslateVirtual(xuid_array_ptr + i * 8));
+        if (is_local && session->host_xuid != xuid) {
+          auto updated = kernel_state_->session_manager()->discovery().Leave(*session, xuid, 500);
+          if (updated) {
+            kernel_state_->session_manager()->registry().UpsertDiscovered(std::move(*updated));
+            session = kernel_state_->session_manager()->registry().Find(session->info.id);
+            object->set_record(session);
+          }
+        }
+        kernel_state_->session_manager()->registry().Leave(session->info.id, xuid);
+      }
       return X_E_SUCCESS;
     }
     case 0x000B0014: {
@@ -149,7 +387,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
 
       REXKRNL_DEBUG("XSessionStart({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
 
-      return X_STATUS_SUCCESS;
+      auto* object = LookupSession(kernel_state_, obj_ptr);
+      return object && object->record() &&
+                     kernel_state_->session_manager()->registry().Start(object->record()->info.id)
+                 ? X_STATUS_SUCCESS
+                 : X_E_INVALIDARG;
     }
     case 0x000B0015: {
       // send high scores?
@@ -161,7 +403,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
 
       REXKRNL_DEBUG("XSessionEnd({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
 
-      return X_E_SUCCESS;
+      auto* object = LookupSession(kernel_state_, obj_ptr);
+      return object && object->record() &&
+                     kernel_state_->session_manager()->registry().End(object->record()->info.id)
+                 ? X_E_SUCCESS
+                 : X_E_INVALIDARG;
     }
     case 0x000B0016: {
       assert_true(!buffer_length || buffer_length == 32);
@@ -179,7 +425,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       REXKRNL_DEBUG("XSessionSearch({}, {}, {}, {}, {}, {:08X}, {:08X}, {}, {:08X})", proc_index,
                     user_index, num_results, num_props, num_ctx, props_ptr, ctx_ptr,
                     results_buffer_size, search_results_ptr);
-      return X_E_SUCCESS;
+      return WriteSearchResults(kernel_state_, search_results_ptr, results_buffer_size, num_results,
+                                true);
     }
     case 0x000B0018: {
       assert_true(!buffer_length || buffer_length == 16);
@@ -192,7 +439,12 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       REXKRNL_DEBUG("XSessionModify({:08X}, {:08X}, {:08X}, {:08X})", obj_ptr, flags,
                     maxPublicSlots, maxPrivateSlots);
 
-      return X_E_SUCCESS;
+      auto* object = LookupSession(kernel_state_, obj_ptr);
+      return object && object->record() &&
+                     kernel_state_->session_manager()->registry().Modify(
+                         object->record()->info.id, flags, maxPublicSlots, maxPrivateSlots)
+                 ? X_E_SUCCESS
+                 : X_E_INVALIDARG;
     }
     case 0x000B001C: {
       assert_true(!buffer_length || buffer_length == 36);
@@ -214,7 +466,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                     proc_index, user_index, num_results, num_props, num_ctx, props_ptr, ctx_ptr,
                     results_buffer_size, search_results_ptr, num_users);
 
-      return X_E_SUCCESS;
+      return WriteSearchResults(kernel_state_, search_results_ptr, results_buffer_size, num_results,
+                                true);
     }
     case 0x000B001D: {
       assert_true(!buffer_length || buffer_length == 24);
@@ -229,6 +482,44 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       REXKRNL_DEBUG("XSessionGetDetails({:08X}, {}, {:08X}, {}, {}, {})", obj_ptr,
                     details_buffer_size, session_details_ptr, reserved1, reserved2, reserved3);
 
+      auto* object = LookupSession(kernel_state_, obj_ptr);
+      if (!object || !object->record() || !session_details_ptr)
+        return X_E_INVALIDARG;
+      auto session = object->record();
+      if (details_buffer_size < sizeof(GuestSessionDetails))
+        return X_ERROR_INSUFFICIENT_BUFFER;
+      std::lock_guard session_lock(*session->mutex);
+      size_t member_capacity =
+          (details_buffer_size - sizeof(GuestSessionDetails)) / sizeof(GuestSessionMember);
+      size_t returned_members = std::min(member_capacity, session->members.size());
+      size_t written_size =
+          sizeof(GuestSessionDetails) + returned_members * sizeof(GuestSessionMember);
+      auto* details = memory_->TranslateVirtual<GuestSessionDetails*>(session_details_ptr);
+      std::memset(details, 0, written_size);
+      details->host_user_index =
+          session->host_xuid == kernel_state_->user_profile()->xuid() ? 0 : kInvalidUserIndex;
+      details->flags = session->flags;
+      details->max_public_slots = session->max_public_slots;
+      details->max_private_slots = session->max_private_slots;
+      details->available_public_slots = session->OpenPublicSlots();
+      details->available_private_slots = session->OpenPrivateSlots();
+      details->actual_member_count = uint32_t(session->members.size());
+      details->returned_member_count = uint32_t(returned_members);
+      details->state = uint32_t(session->state);
+      details->nonce = session->nonce;
+      StoreSessionInfo(&details->info, session->info);
+      uint32_t members_ptr =
+          returned_members ? session_details_ptr + sizeof(GuestSessionDetails) : 0;
+      details->members_ptr = members_ptr;
+      if (returned_members) {
+        auto* members = memory_->TranslateVirtual<GuestSessionMember*>(members_ptr);
+        for (size_t i = 0; i < returned_members; ++i) {
+          members[i].xuid = session->members[i].xuid;
+          members[i].user_index =
+              session->members[i].local ? session->members[i].user_index : kInvalidUserIndex;
+          members[i].flags = session->members[i].private_slot ? 1 : 0;
+        }
+      }
       return X_E_SUCCESS;
     }
     case 0x000B001E: {
@@ -289,7 +580,15 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                     user_index, num_session_ids, session_ids_ptr, results_buffer_size,
                     search_results_ptr, reserved1, reserved2, reserved3);
 
-      return X_E_SUCCESS;
+      if (!num_session_ids || !session_ids_ptr)
+        return X_E_INVALIDARG;
+      std::vector<std::array<uint8_t, 8>> requested_ids(num_session_ids);
+      auto* source = memory_->TranslateVirtual(session_ids_ptr);
+      for (uint32_t i = 0; i < num_session_ids; ++i) {
+        std::memcpy(requested_ids[i].data(), source + i * 8, 8);
+      }
+      return WriteSearchResults(kernel_state_, search_results_ptr, results_buffer_size,
+                                num_session_ids, true, &requested_ids);
     }
     case 0x000B001F: {
       assert_true(!buffer_length || buffer_length == 24);

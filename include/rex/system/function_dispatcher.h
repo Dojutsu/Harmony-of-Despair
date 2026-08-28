@@ -77,11 +77,12 @@ class FunctionDispatcher : public IModuleRegistrar {
   // Shared thunk region size per module.
   static constexpr uint32_t kThunkReserveSize = 0x10000;  // 64KB
 
-  // rexglue function table management (per-module table at IMAGE_BASE + IMAGE_SIZE)
+  // rexglue function table management (per-image explicit dispatch table base)
   // Set is_entrypoint=true exactly once for the host-loaded entrypoint so
   // AllocateThunk(caller_address=0) can route to its pool.
   bool InitializeFunctionTable(uint32_t code_base, uint32_t code_size, uint32_t image_base,
-                               uint32_t image_size, bool is_entrypoint = false);
+                               uint32_t image_size, uint32_t function_table_base,
+                               bool is_entrypoint = false);
   bool SetFunction(uint32_t guest_address, ::PPCFunc* func) override;
   ::PPCFunc* GetFunction(uint32_t guest_address);
   bool HasAnyFunctionTable() const { return !module_tables_.empty(); }
@@ -120,6 +121,7 @@ class FunctionDispatcher : public IModuleRegistrar {
     uint32_t code_size;
     uint32_t image_base;
     uint32_t image_size;
+    uint32_t function_table_base;
     uint32_t next_thunk_address;
     uint32_t thunk_limit;
   };

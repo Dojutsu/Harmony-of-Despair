@@ -129,6 +129,9 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
     uint32_t addr = static_cast<uint32_t>(*v);
     MergeScalar(cfg.setJmpAddress, addr, "setjmp_address");
   }
+  if (auto v = toml["function_table_base"].value<int64_t>()) {
+    cfg.functionTableBase = static_cast<uint32_t>(*v);
+  }
 
   // --- [analysis] section scalars ---
   if (auto* analysisTable = toml["analysis"].as_table()) {

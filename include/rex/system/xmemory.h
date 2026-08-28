@@ -550,8 +550,8 @@ class Memory {
   // Per-module function dispatch table at IMAGE_BASE + IMAGE_SIZE, indexed by
   // (guest_addr - code_base) * 2. Internally locked: callers may invoke from
   // any thread.
-  bool InitializeFunctionTable(uint32_t code_base, uint32_t code_size, uint32_t image_base,
-                               uint32_t image_size);
+  bool InitializeFunctionTable(uint32_t code_base, uint32_t code_size,
+                               uint32_t function_table_base);
   bool DestroyFunctionTable(uint32_t code_base);
   // Returns false if guest_address is outside every registered module range.
   bool SetFunction(uint32_t guest_address, PPCFunc* host_function);

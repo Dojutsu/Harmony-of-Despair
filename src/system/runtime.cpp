@@ -207,6 +207,7 @@ X_STATUS Runtime::Setup(const rex::PPCImageInfo& image_info, RuntimeConfig confi
 
   if (!function_dispatcher_->InitializeFunctionTable(image_info.code_base, image_info.code_size,
                                                      image_info.image_base, image_info.image_size,
+                                                     image_info.function_table_base,
                                                      /*is_entrypoint=*/true)) {
     REXSYS_ERROR("Failed to initialize function table");
     Shutdown();

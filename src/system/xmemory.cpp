@@ -784,34 +784,28 @@ bool Memory::Restore(stream::ByteStream* stream) {
 // Recompiled Code Function Table
 //=============================================================================
 
-bool Memory::InitializeFunctionTable(uint32_t code_base, uint32_t code_size, uint32_t image_base,
-                                     uint32_t image_size) {
+bool Memory::InitializeFunctionTable(uint32_t code_base, uint32_t code_size,
+                                     uint32_t function_table_base) {
   constexpr uint32_t kThunkReserveSize = runtime::FunctionDispatcher::kThunkReserveSize;
   uint32_t table_size = (code_size + kThunkReserveSize) * 2;
-  // Large entrypoint images may have loadable DLLs immediately above them.
-  // Harmony of Despair's default table would otherwise cover 0x83000000,
-  // where its player modules are loaded. Keep its table in unused title space;
-  // the matching generated entrypoint dispatch uses the same address.
-  uint32_t table_base = image_base == 0x82000000 ? 0x88000000 : image_base + image_size;
-
   REXSYS_DEBUG(
       "Initializing function table at {:08X}, size {:08X} for code {:08X}-{:08X} "
       "(+{:08X} thunk reserve)",
-      table_base, table_size, code_base, code_base + code_size, kThunkReserveSize);
+      function_table_base, table_size, code_base, code_base + code_size, kThunkReserveSize);
 
   if (!heaps_.v80000000.AllocFixed(
-          table_base, table_size, 0x10000,
+          function_table_base, table_size, 0x10000,
           memory::kMemoryAllocationReserve | memory::kMemoryAllocationCommit,
           memory::kMemoryProtectRead | memory::kMemoryProtectWrite)) {
-    REXSYS_ERROR("Failed to allocate function table at {:08X}", table_base);
+    REXSYS_ERROR("Failed to allocate function table at {:08X}", function_table_base);
     return false;
   }
 
-  Zero(table_base, table_size);
+  Zero(function_table_base, table_size);
 
   std::lock_guard lock(function_tables_mutex_);
   function_tables_.push_back({
-      .table_base = table_base,
+      .table_base = function_table_base,
       .code_base = code_base,
       .code_size = code_size,
       .thunk_reserve = kThunkReserveSize,

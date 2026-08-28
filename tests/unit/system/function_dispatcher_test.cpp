@@ -39,10 +39,12 @@ TEST_CASE("FunctionDispatcher: caller_address routes thunk to caller's module po
   constexpr uint32_t kCodeSize = 0x10000u;
   constexpr uint32_t kImageSize = 0x100000u;
 
-  REQUIRE(dispatcher.InitializeFunctionTable(kModA, kCodeSize, kModA, kImageSize));
+  REQUIRE(dispatcher.InitializeFunctionTable(kModA, kCodeSize, kModA, kImageSize,
+                                             kModA + kImageSize));
 
   constexpr uint32_t kModB = 0x83000000u;
-  REQUIRE(dispatcher.InitializeFunctionTable(kModB, kCodeSize, kModB, kImageSize));
+  REQUIRE(dispatcher.InitializeFunctionTable(kModB, kCodeSize, kModB, kImageSize,
+                                             kModB + kImageSize));
 
   uint32_t thunk_a = dispatcher.AllocateThunk(&DummyFn, kModA + 0x100);
   uint32_t thunk_b = dispatcher.AllocateThunk(&DummyFn, kModB + 0x100);
@@ -70,6 +72,7 @@ TEST_CASE("FunctionDispatcher: AllocateThunk(0) uses the entrypoint pool only wh
   constexpr uint32_t kImageSize = 0x100000u;
 
   REQUIRE(dispatcher.InitializeFunctionTable(kModA, kCodeSize, kModA, kImageSize,
+                                             kModA + kImageSize,
                                              /*is_entrypoint=*/true));
 
   uint32_t thunk = dispatcher.AllocateThunk(&DummyFn, 0);
@@ -87,7 +90,8 @@ TEST_CASE("FunctionDispatcher: AllocateThunk(0) rejects when no entrypoint regis
   constexpr uint32_t kCodeSize = 0x10000u;
   constexpr uint32_t kImageSize = 0x100000u;
 
-  REQUIRE(dispatcher.InitializeFunctionTable(kModA, kCodeSize, kModA, kImageSize));
+  REQUIRE(dispatcher.InitializeFunctionTable(kModA, kCodeSize, kModA, kImageSize,
+                                             kModA + kImageSize));
 
   CHECK(dispatcher.AllocateThunk(&DummyFn, 0) == 0);
 }
@@ -102,7 +106,8 @@ TEST_CASE("FunctionDispatcher: AllocateThunk rejects caller_address outside any 
   constexpr uint32_t kCodeSize = 0x10000u;
   constexpr uint32_t kImageSize = 0x100000u;
 
-  REQUIRE(dispatcher.InitializeFunctionTable(kModA, kCodeSize, kModA, kImageSize));
+  REQUIRE(dispatcher.InitializeFunctionTable(kModA, kCodeSize, kModA, kImageSize,
+                                             kModA + kImageSize));
 
   // A non-zero caller_address that doesn't fall inside any module is a bug
   // in the caller: the right answer is to refuse, not to silently route the
@@ -122,9 +127,31 @@ TEST_CASE("FunctionDispatcher: SetFunction rejects image data below code_base",
   constexpr uint32_t kCodeSize = 0x10000u;
   constexpr uint32_t kImageSize = 0x100000u;
 
-  REQUIRE(dispatcher.InitializeFunctionTable(kCodeBase, kCodeSize, kImageBase, kImageSize));
+  REQUIRE(dispatcher.InitializeFunctionTable(kCodeBase, kCodeSize, kImageBase, kImageSize,
+                                             kImageBase + kImageSize));
   CHECK_FALSE(dispatcher.SetFunction(kImageBase + 0x10, &DummyFn));
   CHECK(dispatcher.GetFunction(kImageBase + 0x10) == nullptr);
+}
+
+TEST_CASE("FunctionDispatcher: explicit relocated table base stores dispatch slots there",
+          "[runtime][dispatcher]") {
+  auto& memory = GetTestMemory();
+  rex::runtime::ExportResolver resolver;
+  rex::runtime::FunctionDispatcher dispatcher(&memory, &resolver);
+
+  constexpr uint32_t kImageBase = 0x82000000u;
+  constexpr uint32_t kImageSize = 0x00960000u;
+  constexpr uint32_t kCodeBase = 0x82210000u;
+  constexpr uint32_t kCodeSize = 0x0069F4C8u;
+  constexpr uint32_t kTableBase = 0x88000000u;
+  constexpr uint32_t kTarget = 0x82738680u;
+  constexpr uint32_t kExpectedSlot = 0x88A50D00u;
+
+  REQUIRE(dispatcher.InitializeFunctionTable(kCodeBase, kCodeSize, kImageBase, kImageSize,
+                                             kTableBase));
+  REQUIRE(dispatcher.SetFunction(kTarget, &DummyFn));
+  CHECK(kTableBase + (kTarget - kCodeBase) * 2 == kExpectedSlot);
+  CHECK(*memory.TranslateVirtual<PPCFunc**>(kExpectedSlot) == &DummyFn);
 }
 
 namespace {
@@ -143,7 +170,7 @@ TEST_CASE("FunctionDispatcher: UnregisterModule clears pool and slots", "[runtim
   constexpr uint32_t kImageSize = 0x100000u;
 
   REQUIRE(dispatcher.InitializeFunctionTable(kRegisterModBase, kCodeSize, kRegisterModBase,
-                                             kImageSize));
+                                             kImageSize, kRegisterModBase + kImageSize));
 
   dispatcher.RegisterModule("modA", kRegisterModBase, &RegisterOne);
 
@@ -162,7 +189,7 @@ TEST_CASE("FunctionDispatcher: UnregisterModule clears pool and slots", "[runtim
   // Re-init must succeed: UnregisterModule destroys the per-module table so the
   // same code range can be reloaded without tripping the overlap check.
   REQUIRE(dispatcher.InitializeFunctionTable(kRegisterModBase, kCodeSize, kRegisterModBase,
-                                             kImageSize));
+                                             kImageSize, kRegisterModBase + kImageSize));
   uint32_t thunk_after = dispatcher.AllocateThunk(&DummyFn, kRegisterModBase + 0x100);
   CHECK(thunk_after == thunk);
 }
@@ -200,7 +227,8 @@ TEST_CASE("FunctionDispatcher: ExecuteTrap restores the interrupted register sta
   constexpr uint32_t kTrapModBase = 0x89000000u;
   constexpr uint32_t kCodeSize = 0x10000u;
   constexpr uint32_t kImageSize = 0x100000u;
-  REQUIRE(dispatcher.InitializeFunctionTable(kTrapModBase, kCodeSize, kTrapModBase, kImageSize));
+  REQUIRE(dispatcher.InitializeFunctionTable(kTrapModBase, kCodeSize, kTrapModBase, kImageSize,
+                                             kTrapModBase + kImageSize));
 
   constexpr uint32_t kAddr = kTrapModBase + 0x40;
   REQUIRE(dispatcher.SetFunction(kAddr, &ScribbleFn));

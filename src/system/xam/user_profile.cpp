@@ -13,6 +13,7 @@
 
 #include <fmt/format.h>
 
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xam/user_profile.h>
@@ -21,12 +22,29 @@ namespace rex {
 namespace system {
 namespace xam {
 
-UserProfile::UserProfile() {
+constexpr uint64_t kDefaultUserXuid = 0xB13EBABEBABEBABEull;
+
+REXCVAR_DEFINE_UINT64(user_xuid, kDefaultUserXuid, "Network", "Local user's 64-bit Xbox user ID")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(user_name, "User", "Network", "Local user's display name")
+    .validator([](std::string_view value) { return !value.empty() && value.size() <= 15; })
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(lan_online, false, "Network",
+                    "Advertise the local profile as online-capable for LAN sessions")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+UserProfile::UserProfile()
+    : UserProfile(REXCVAR_GET(user_xuid), REXCVAR_GET(user_name), REXCVAR_GET(lan_online)) {}
+
+UserProfile::UserProfile(uint64_t xuid, std::string name, bool lan_online) {
   // 58410A1F checks the user XUID against a mask of 0x00C0000000000000 (3<<54),
   // if non-zero, it prevents the user from playing the game.
   // "You do not have permissions to perform this operation."
-  xuid_ = 0xB13EBABEBABEBABE;
-  name_ = "User";
+  xuid_ = xuid;
+  name_ = std::move(name);
+  lan_online_ = lan_online;
+  REXSYS_INFO("Local user identity: xuid={:016X}, name='{}', sign-in={}", xuid_, name_,
+              signin_state());
 
   // https://cs.rin.ru/forum/viewtopic.php?f=38&t=60668&hilit=gfwl+live&start=195
   // https://github.com/arkem/py360/blob/master/py360/constants.py
@@ -91,6 +109,16 @@ UserProfile::UserProfile() {
   AddSetting(std::make_unique<BinarySetting>(0x63E83FFE));
   // XPROFILE_TITLE_SPECIFIC3
   AddSetting(std::make_unique<BinarySetting>(0x63E83FFD));
+}
+
+bool UserProfile::HasPrivilege(uint32_t privilege) const {
+  // Harmony of Despair treats a nonzero result for 251 or 252 as a restriction:
+  // 252 sets its 0x20000 "not authorized" state and 251 sets 0x10000. LAN mode
+  // advertises online capability through sign-in state 2, while these outputs
+  // must remain clear to permit the game's multiplayer menu.
+  // The mode-selection path separately checks 254 as a positive multiplayer
+  // authorization. Grant only that capability for ReXGlue's opt-in LAN mode.
+  return lan_online_ && privilege == 254;
 }
 
 void UserProfile::AddSetting(std::unique_ptr<Setting> setting) {

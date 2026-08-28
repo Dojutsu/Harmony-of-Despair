@@ -34,6 +34,7 @@
 #include <rex/system/util/xdbf_utils.h>
 #include <rex/system/xam/app_manager.h>
 #include <rex/system/xam/content_manager.h>
+#include <rex/system/xam/session.h>
 #include <rex/system/xam/user_profile.h>
 #include <rex/platform/dynlib.h>
 #include <rex/system/function_dispatcher.h>
@@ -199,6 +200,7 @@ class KernelState {
 
   xam::AppManager* app_manager() const { return app_manager_.get(); }
   xam::ContentManager* content_manager() const { return content_manager_.get(); }
+  xam::SessionManager* session_manager() const { return session_manager_.get(); }
   xam::UserProfile* user_profile() const { return user_profile_.get(); }
 
   // Access must be guarded by the global critical region.
@@ -353,6 +355,7 @@ class KernelState {
 
   std::unique_ptr<xam::AppManager> app_manager_;
   std::unique_ptr<xam::ContentManager> content_manager_;
+  std::unique_ptr<xam::SessionManager> session_manager_;
   std::unique_ptr<xam::UserProfile> user_profile_;
 
   rex::thread::global_critical_region global_critical_region_;

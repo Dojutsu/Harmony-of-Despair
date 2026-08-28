@@ -39,6 +39,9 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
                                  const std::vector<const rex::codegen::FunctionNode*>& functions,
                                  const std::unordered_map<uint32_t, std::string>& rexcrtByAddr) {
   const auto& cfg = ctx.Config();
+  const uint32_t imageBase = ctx.binary().baseAddress();
+  const uint32_t imageSize = ctx.binary().imageSize();
+  const uint32_t functionTableBase = cfg.functionTableBase.value_or(imageBase + imageSize);
 
   // Compute code_base and code_size from binary sections
   size_t codeMin = ~size_t(0);
@@ -93,8 +96,9 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
 
   return {
       {"project", cfg.projectName},
-      {"image_base", fmt::format("0x{:X}", ctx.binary().baseAddress())},
-      {"image_size", fmt::format("0x{:X}", ctx.binary().imageSize())},
+      {"image_base", fmt::format("0x{:X}", imageBase)},
+      {"image_size", fmt::format("0x{:X}", imageSize)},
+      {"function_table_base", fmt::format("0x{:X}", functionTableBase)},
       {"code_base", fmt::format("0x{:X}", codeMin)},
       {"code_size", fmt::format("0x{:X}", codeMax - codeMin)},
       {"rexcrt_heap", cfg.rexcrtFunctions.contains("RtlAllocateHeap") ? 1 : 0},

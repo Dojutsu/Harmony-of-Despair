@@ -181,6 +181,7 @@ uint64_t FunctionDispatcher::ExecuteInterrupt(ThreadState* thread_state, uint32_
 
 bool FunctionDispatcher::InitializeFunctionTable(uint32_t code_base, uint32_t code_size,
                                                  uint32_t image_base, uint32_t image_size,
+                                                 uint32_t function_table_base,
                                                  bool is_entrypoint) {
   std::lock_guard<std::recursive_mutex> lock(dispatch_mutex_);
 
@@ -207,7 +208,7 @@ bool FunctionDispatcher::InitializeFunctionTable(uint32_t code_base, uint32_t co
     }
   }
 
-  if (!memory_->InitializeFunctionTable(code_base, code_size, image_base, image_size)) {
+  if (!memory_->InitializeFunctionTable(code_base, code_size, function_table_base)) {
     REXLOG_ERROR("Failed to initialize guest memory function table");
     return false;
   }
@@ -217,6 +218,7 @@ bool FunctionDispatcher::InitializeFunctionTable(uint32_t code_base, uint32_t co
       .code_size = code_size,
       .image_base = image_base,
       .image_size = image_size,
+      .function_table_base = function_table_base,
       .next_thunk_address = code_base + code_size,
       .thunk_limit = code_base + code_size + kThunkReserveSize,
   });
@@ -225,8 +227,11 @@ bool FunctionDispatcher::InitializeFunctionTable(uint32_t code_base, uint32_t co
     entrypoint_code_base_ = code_base;
   }
 
-  REXLOG_INFO("Function table initialized for module: code={:08X}-{:08X}, image={:08X}-{:08X}",
-              code_base, code_base + code_size, image_base, image_base + image_size);
+  REXLOG_INFO(
+      "Function table initialized for module: code={:08X}-{:08X}, image={:08X}-{:08X}, "
+      "table={:08X}",
+      code_base, code_base + code_size, image_base, image_base + image_size,
+      function_table_base);
   return true;
 }
 

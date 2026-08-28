@@ -23,6 +23,7 @@
 #include <rex/string.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xam/user_profile.h>
+#include <rex/system/xam/session.h>
 #include <rex/system/xenumerator.h>
 #include <rex/system/xio.h>
 #include <rex/system/xthread.h>
@@ -371,6 +372,10 @@ u32 XamUserWriteProfileSettings_entry(u32 title_id, u32 user_index, u32 setting_
 }
 
 u32 XamUserCheckPrivilege_entry(u32 user_index, u32 mask, mapped_u32 out_value) {
+  if (!out_value) {
+    return X_ERROR_INVALID_PARAMETER;
+  }
+
   // checking all users?
   if (user_index != 0xFF) {
     if (user_index >= 4) {
@@ -382,8 +387,8 @@ u32 XamUserCheckPrivilege_entry(u32 user_index, u32 mask, mapped_u32 out_value) 
     }
   }
 
-  // If we deny everything, games should hopefully not try to do stuff.
-  *out_value = 0;
+  const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+  *out_value = user_profile->HasPrivilege(mask) ? 1 : 0;
   return X_ERROR_SUCCESS;
 }
 
@@ -713,15 +718,29 @@ u32 XamWriteGamerTile_entry(u32 arg1, u32 arg2, u32 arg3, u32 arg4, u32 arg5, u3
 }
 
 u32 XamSessionCreateHandle_entry(mapped_u32 handle_ptr) {
-  *handle_ptr = 0xCAFEDEAD;
+  if (!handle_ptr) {
+    REXKRNL_ERROR("XamSessionCreateHandle: null output pointer");
+    return X_ERROR_INVALID_PARAMETER;
+  }
+  auto session = new XSession(REX_KERNEL_STATE());
+  if (!session->Initialize()) {
+    REXKRNL_ERROR("XamSessionCreateHandle: failed to initialize session object");
+    session->Release();
+    return X_STATUS_NO_MEMORY;
+  }
+  *handle_ptr = session->handle();
   return X_ERROR_SUCCESS;
 }
 
 u32 XamSessionRefObjByHandle_entry(u32 handle, mapped_u32 obj_ptr) {
-  assert_true(handle == 0xCAFEDEAD);
-  // TODO(PermaNull): Implement this properly,
-  // For the time being returning 0xDEADF00D will prevent crashing.
-  *obj_ptr = 0xDEADF00D;
+  if (!obj_ptr)
+    return X_ERROR_INVALID_PARAMETER;
+  auto session = REX_KERNEL_OBJECTS()->LookupObject<XSession>(handle);
+  if (!session)
+    return X_ERROR_INVALID_HANDLE;
+  // The guest keeps the referenced native object after closing the handle.
+  session->Retain();
+  *obj_ptr = session->guest_object();
   return X_ERROR_SUCCESS;
 }
 

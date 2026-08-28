@@ -16,6 +16,7 @@
 
 #include <fmt/format.h>
 #include <rex/assert.h>
+#include <rex/cvar.h>
 #include <rex/image_info.h>
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -45,6 +46,11 @@
 
 namespace rex::system {
 
+REXCVAR_DEFINE_UINT32(lan_discovery_port, 30741, "Network",
+                      "UDP port used for local multiplayer session discovery")
+    .range(1024, 65535)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 constexpr uint32_t kDeferredOverlappedDelayMillis = 100;
 
 // This is a global object initialized with the XboxkrnlModule.
@@ -67,6 +73,9 @@ KernelState::KernelState(Runtime* emulator)
   app_manager_ = std::make_unique<xam::AppManager>();
   user_profile_ = std::make_unique<xam::UserProfile>();
   user_profile_->set_kernel_state(this);
+  session_manager_ = std::make_unique<xam::SessionManager>(
+      this, static_cast<uint16_t>(REXCVAR_GET(lan_discovery_port)));
+  REXSYS_INFO("LAN session discovery port: {}", REXCVAR_GET(lan_discovery_port));
 
   auto user_data_root = emulator_->user_data_root();
   if (!user_data_root.empty()) {
@@ -806,7 +815,7 @@ object_ref<UserModule> KernelState::LoadUserModule(const std::string_view raw_na
               xex->base_address() + xex->image_size());
         } else if (!function_dispatcher_->InitializeFunctionTable(
                        image_info->code_base, image_info->code_size, image_info->image_base,
-                       image_info->image_size)) {
+                       image_info->image_size, image_info->function_table_base)) {
           REXSYS_ERROR("InitializeFunctionTable failed for module '{}'", recomp->pe_name);
         } else {
           function_dispatcher_->RegisterModule(lib_key, image_info->code_base, register_func);
@@ -881,9 +890,9 @@ void KernelState::UnloadUserModule(const object_ref<UserModule>& module, bool ca
   {
     auto global_lock = global_critical_region_.Acquire();
 
-    auto loaded_recomp_it = std::find_if(
-        loaded_recompiled_modules_.begin(), loaded_recompiled_modules_.end(),
-        [&module](const auto& entry) { return entry.second.get() == module.get(); });
+    auto loaded_recomp_it =
+        std::find_if(loaded_recompiled_modules_.begin(), loaded_recompiled_modules_.end(),
+                     [&module](const auto& entry) { return entry.second.get() == module.get(); });
     if (loaded_recomp_it != loaded_recompiled_modules_.end()) {
       const std::string key = loaded_recomp_it->first;
       auto cleared_range = function_dispatcher_->UnregisterModule(key);
@@ -894,9 +903,9 @@ void KernelState::UnloadUserModule(const object_ref<UserModule>& module, bool ca
       }
 
       auto lib_it = module_libraries_.find(key);
-      auto registration_it = std::find_if(
-          recompiled_modules_.begin(), recompiled_modules_.end(),
-          [&key](const auto& info) { return info.guest_path == key; });
+      auto registration_it =
+          std::find_if(recompiled_modules_.begin(), recompiled_modules_.end(),
+                       [&key](const auto& info) { return info.guest_path == key; });
       assert_true(registration_it != recompiled_modules_.end());
       if (registration_it != recompiled_modules_.end() &&
           !registration_it->shared_lib_name.empty()) {

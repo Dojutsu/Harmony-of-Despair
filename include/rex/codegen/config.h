@@ -107,6 +107,10 @@ struct RecompilerConfig {
   // from the module's position in the manifest (entrypoint = false, modules = true).
   std::optional<bool> isDll;
 
+  /// Guest base of this image's generated function dispatch table. Codegen
+  /// defaults this to image_base + image_size when it is not configured.
+  std::optional<uint32_t> functionTableBase;
+
   // === Manual overrides ===
   std::unordered_map<uint32_t, FunctionConfig> functions;  ///< Function/chunk configuration
   std::unordered_map<uint32_t, JumpTable> switchTables;
