@@ -31,10 +31,22 @@ jobs:
         run: |
           build=/srv/ai/workspaces/codex/HarmonyRecomp/out/build/linux-amd64-relwithdebinfo
           runtime=/srv/ai/build-cache/HarmonyRecomp/rexglue-out/linux-amd64
+          rm -rf dist
           mkdir -p dist/HarmonyRecomp-linux-amd64
-          cp "$build/harmonyrecomp" "$build/librexgpu-xenosrd.so" \
+          cp "$build/harmonyrecomp" \
+            "$build/libharmonyrecomp_dllAlucard.so" \
+            "$build/libharmonyrecomp_dllAxeArmor.so" \
+            "$build/libharmonyrecomp_dllCharlotte.so" \
+            "$build/libharmonyrecomp_dllJonathan.so" \
+            "$build/libharmonyrecomp_dllShanoa.so" \
+            "$build/libharmonyrecomp_dllSoma.so" \
+            "$build/librexgpu-xenosrd.so" \
             "$runtime/librexruntimerd.so" "$runtime/libTracyClientrd.so" \
             dist/HarmonyRecomp-linux-amd64/
+          if find dist -type f \( -iname '*.xex' -o -iname '*.dll' \) -print -quit | grep -q .; then
+            echo "Refusing to package private game inputs" >&2
+            exit 1
+          fi
           tar -C dist -czf dist/HarmonyRecomp-linux-amd64.tar.gz HarmonyRecomp-linux-amd64
 
       - name: Upload build
