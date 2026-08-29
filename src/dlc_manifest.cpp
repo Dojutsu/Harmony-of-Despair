@@ -567,7 +567,9 @@ void DlcManager::classify_package(DlcManifest& manifest) {
   for (const auto& file : manifest.files) {
     std::string path = normalize_for_classification(file.relative_path.generic_string());
 
-    if (path.find("data/data/player/dll") != std::string::npos && path.ends_with(".dll")) {
+    // STFS paths use backslashes; normalized path uses forward slashes.
+    // Player DLLs: data/player/dll*.dll
+    if (path.find("data/player/dll") != std::string::npos && path.ends_with(".dll")) {
       has_player_dll = true;
       size_t pos = path.rfind('/');
       if (pos != std::string::npos) {
@@ -578,17 +580,20 @@ void DlcManager::classify_package(DlcManifest& manifest) {
       }
     }
 
-    if (path.find("dll/dll/enemy/DLL_") != std::string::npos && path.ends_with(".dll")) {
+    // Enemy DLLs: dll/enemy/DLL_*.dll
+    if (path.find("dll/enemy/DLL_") != std::string::npos && path.ends_with(".dll")) {
       has_enemy_dll = true;
     }
 
-    if (path.find("data/data/sound/BGM_") != std::string::npos &&
+    // Music: data/sound/BGM_*.xsb or .xwb
+    if (path.find("data/sound/BGM_") != std::string::npos &&
         (path.ends_with(".xsb") || path.ends_with(".xwb"))) {
       has_music = true;
     }
 
-    if (path.find("data/data/arc/stage") != std::string::npos ||
-        path.find("data/data/stage/stage") != std::string::npos) {
+    // Stage assets: data/arc/stage* or data/stage/stage*
+    if (path.find("data/arc/stage") != std::string::npos ||
+        path.find("data/stage/stage") != std::string::npos) {
       has_stage_assets = true;
     }
   }
