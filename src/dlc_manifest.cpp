@@ -14,7 +14,7 @@
 #include <rex/filesystem/devices/stfs_container_device.h>
 #include <rex/filesystem/file.h>
 
-#include "thirdparty/crypto/sha256.h"
+#include "sha256.h"
 
 namespace fs = std::filesystem;
 using rex::filesystem::Entry;
