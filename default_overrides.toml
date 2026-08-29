@@ -23,6 +23,7 @@ function_table_base = 0x88000000
 
 # Other independently recovered indirect targets that were previously kept
 # alive only by manual edits to generated C++.
+0x822B8408 = { end = 0x822B8450 }
 0x8259FF48 = { end = 0x8259FF58 }
 0x825B9BC0 = { end = 0x825B9BD8 }
 0x825F3398 = { end = 0x825F3400 }
