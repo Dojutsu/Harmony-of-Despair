@@ -1303,6 +1303,7 @@ void harmonyrecomp_RegisterFunctions(rex::runtime::IModuleRegistrar* registrar) 
   registrar->SetFunction(0x822B6D70, sub_822B6D70);
   registrar->SetFunction(0x822B6DE8, sub_822B6DE8);
   registrar->SetFunction(0x822B8228, sub_822B8228);
+  registrar->SetFunction(0x822B8408, sub_822B8408);
   registrar->SetFunction(0x822B8450, sub_822B8450);
   registrar->SetFunction(0x822B8560, sub_822B8560);
   registrar->SetFunction(0x822B8788, sub_822B8788);
