@@ -26,6 +26,13 @@ jobs:
       - name: Build
         run: /home/owner/test-harmony-codex-build.sh
 
+      - name: Restore generated build outputs
+        shell: bash
+        run: |
+          repo=/srv/ai/workspaces/codex/HarmonyRecomp
+          git -C "$repo" restore --worktree -- generated
+          test -z "$(git -C "$repo" status --porcelain)"
+
       - name: Package
         shell: bash
         run: |
