@@ -70,17 +70,24 @@ target_include_directories(game_data_tests PRIVATE src)
 target_link_libraries(game_data_tests PRIVATE rex::runtime)
 add_test(NAME game-data COMMAND game_data_tests)
 
-# SHA-256 known-vector tests (uses ReXGlue's bundled thirdparty/crypto/sha256)
-# Use the local copy in HarmonyRecomp/thirdparty/crypto/
+# Portable SHA-256 known-vector tests + reusable library target.
+# harmonyrecomp-dlc-import consumes the same library so dlc_manifest.cpp
+# can include "thirdparty/crypto/sha256.h" without a broad global include.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/crypto/sha256.cpp")
-    add_executable(sha256_tests
-        tests/sha256_test.cpp
+    add_library(sha256_lib STATIC
         "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/crypto/sha256.cpp"
     )
-    target_include_directories(sha256_tests PRIVATE
+    target_include_directories(sha256_lib PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/crypto"
     )
+
+    add_executable(sha256_tests
+        tests/sha256_test.cpp
+    )
+    target_link_libraries(sha256_tests PRIVATE sha256_lib)
     add_test(NAME sha256-known-vectors COMMAND sha256_tests)
+
+    target_link_libraries(harmonyrecomp-dlc-import PRIVATE sha256_lib)
 else()
     message(WARNING "SHA-256 test source not found")
 endif()
