@@ -102,7 +102,10 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: cmake --build --preset win-amd64-relwithdebinfo --target harmonyrecomp --parallel
+        run: |
+          cmake --build --preset win-amd64-relwithdebinfo --target harmonyrecomp --parallel
+          cmake --build --preset win-amd64-relwithdebinfo --target harmonyrecomp-import --parallel
+          cmake --build --preset win-amd64-relwithdebinfo --target harmonyrecomp-dlc-import --parallel
 
       - name: Test importer validation
         shell: pwsh
@@ -132,6 +135,7 @@ jobs:
           $required = @(
             'harmonyrecomp.exe',
             'harmonyrecomp-import.exe',
+            'harmonyrecomp-dlc-import.exe',
             'harmonyrecomp_dllAlucard.dll',
             'harmonyrecomp_dllAxeArmor.dll',
             'harmonyrecomp_dllCharlotte.dll',
