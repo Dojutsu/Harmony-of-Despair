@@ -54,8 +54,18 @@ class HarmonyrecompApp : public rex::ReXApp {
   }
 
   // Override virtual hooks for customization:
+  void OnPreSetup(rex::RuntimeConfig& config) override {
+    // Default to the Xenos GPU emulation plugin when no explicit
+    // gpu_plugin was provided via command line / cvar.
+    // An explicit --gpu_plugin overrides this default; an empty value
+    // keeps GPU emulation disabled. When Xenos cannot be loaded the
+    // ReXGlue runtime fails loudly (dialog + non-zero exit), which is
+    // the intended behavior — there is no silent fallback to "no GPU".
+    if (config.gpu_plugin.empty()) {
+      config.gpu_plugin = "xenos";
+    }
+  }
   // void OnPostInitLogging() override {}
-  // void OnPreSetup(rex::RuntimeConfig& config) override {}
   // void OnLoadXexImage(std::string& xex_image) override {}
   // void OnPostLoadXexImage() override {}
   // void OnPostSetup() override {}
@@ -64,7 +74,6 @@ class HarmonyrecompApp : public rex::ReXApp {
   // std::unique_ptr<rex::ui::AchievementNotificationDialog>
   // CreateAchievementNotificationDialog() override;
   // void OnShutdown() override {}
-  // void OnConfigurePaths(rex::PathConfig& paths) override {}
 
  private:
   bool using_imported_game_data_ = false;
