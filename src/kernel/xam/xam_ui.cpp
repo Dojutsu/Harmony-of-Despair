@@ -17,6 +17,8 @@
 
 #include <imgui.h>
 
+#include <algorithm>
+
 REXCVAR_DEFINE_BOOL(headless, false, "Kernel",
                     "Don't display any UI, using defaults for prompts as needed");
 #include <rex/kernel/xam/private.h>
@@ -53,6 +55,36 @@ using namespace rex::system;
 // to create a listener (if they're insane enough do this).
 
 extern std::atomic<int> xam_dialogs_shown_;
+
+namespace {
+
+constexpr float kXamDialogReferenceHeight = 600.0f;
+constexpr float kXamDialogMaximumScale = 2.0f;
+
+float GetXamDialogScale(const ImGuiIO& io) {
+  return std::clamp(io.DisplaySize.y / kXamDialogReferenceHeight, 1.0f,
+                    kXamDialogMaximumScale);
+}
+
+ImVec2 Scale(const ImVec2& value, float scale) {
+  return ImVec2(value.x * scale, value.y * scale);
+}
+
+void PushXamDialogStyle(float scale) {
+  const ImGuiStyle& style = ImGui::GetStyle();
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, Scale(style.WindowPadding, scale));
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, Scale(style.FramePadding, scale));
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, Scale(style.ItemSpacing, scale));
+}
+
+void SetXamDialogSizeConstraints(const ImGuiIO& io, float minimum_width, float scale) {
+  const float maximum_width = io.DisplaySize.x * 0.9f;
+  ImGui::SetNextWindowSizeConstraints(
+      ImVec2(std::min(minimum_width * scale, maximum_width), 0.0f),
+      ImVec2(maximum_width, io.DisplaySize.y * 0.9f));
+}
+
+}  // namespace
 
 class XamDialog : public rex::ui::ImGuiDialog {
  public:
@@ -232,20 +264,26 @@ class MessageBoxDialog : public XamDialog {
       has_opened_ = true;
       first_draw = true;
     }
+    const float scale = GetXamDialogScale(io);
+    PushXamDialogStyle(scale);
+    SetXamDialogSizeConstraints(io, 360.0f, scale);
     if (ImGui::BeginPopupModal(title_.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+      ImGui::SetWindowFontScale(scale);
       if (description_.size()) {
-        ImGui::Text("%s", description_.c_str());
+        ImGui::TextWrapped("%s", description_.c_str());
       }
       if (first_draw) {
         ImGui::SetKeyboardFocusHere();
       }
       for (size_t i = 0; i < buttons_.size(); ++i) {
-        if (ImGui::Button(buttons_[i].c_str())) {
+        if (ImGui::Button(buttons_[i].c_str(), ImVec2(96.0f * scale, 32.0f * scale))) {
           chosen_button_ = static_cast<uint32_t>(i);
           ImGui::CloseCurrentPopup();
           Close();
         }
-        ImGui::SameLine();
+        if (i + 1 < buttons_.size()) {
+          ImGui::SameLine();
+        }
       }
       ImGui::Spacing();
       ImGui::Spacing();
@@ -253,6 +291,7 @@ class MessageBoxDialog : public XamDialog {
     } else {
       Close();
     }
+    ImGui::PopStyleVar(3);
   }
 
  private:
@@ -372,7 +411,11 @@ class KeyboardInputDialog : public XamDialog {
       has_opened_ = true;
       first_draw = true;
     }
+    const float scale = GetXamDialogScale(io);
+    PushXamDialogStyle(scale);
+    SetXamDialogSizeConstraints(io, 420.0f, scale);
     if (ImGui::BeginPopupModal(title_.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+      ImGui::SetWindowFontScale(scale);
       if (description_.size()) {
         ImGui::TextWrapped("%s", description_.c_str());
       }
@@ -386,14 +429,14 @@ class KeyboardInputDialog : public XamDialog {
         ImGui::CloseCurrentPopup();
         Close();
       }
-      if (ImGui::Button("OK")) {
+      if (ImGui::Button("OK", ImVec2(96.0f * scale, 32.0f * scale))) {
         text_ = std::string(text_buffer_.data(), text_buffer_.size());
         cancelled_ = false;
         ImGui::CloseCurrentPopup();
         Close();
       }
       ImGui::SameLine();
-      if (ImGui::Button("Cancel")) {
+      if (ImGui::Button("Cancel", ImVec2(96.0f * scale, 32.0f * scale))) {
         text_ = "";
         cancelled_ = true;
         ImGui::CloseCurrentPopup();
@@ -404,6 +447,7 @@ class KeyboardInputDialog : public XamDialog {
     } else {
       Close();
     }
+    ImGui::PopStyleVar(3);
   }
 
  private:
