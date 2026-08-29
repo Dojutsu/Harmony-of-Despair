@@ -1,5 +1,5 @@
 diff --git a/include/rex/codegen/config.h b/include/rex/codegen/config.h
-index 8200139a..77c06c06 100644
+index 8200139..77c06c0 100644
 --- a/include/rex/codegen/config.h
 +++ b/include/rex/codegen/config.h
 @@ -107,6 +107,10 @@ struct RecompilerConfig {
@@ -14,7 +14,7 @@ index 8200139a..77c06c06 100644
    std::unordered_map<uint32_t, FunctionConfig> functions;  ///< Function/chunk configuration
    std::unordered_map<uint32_t, JumpTable> switchTables;
 diff --git a/include/rex/image_info.h b/include/rex/image_info.h
-index e511437b..da1dac16 100644
+index e511437..da1dac1 100644
 --- a/include/rex/image_info.h
 +++ b/include/rex/image_info.h
 @@ -43,6 +43,7 @@ struct PPCImageInfo {
@@ -26,7 +26,7 @@ index e511437b..da1dac16 100644
    bool rexcrt_heap = false;  ///< Set by codegen when [rexcrt] has heap functions
    RegisterModulesFunc register_modules = nullptr;  ///< Set by codegen for multi-binary projects
 diff --git a/include/rex/input/mnk/mnk_input_driver.h b/include/rex/input/mnk/mnk_input_driver.h
-index c8751b7b..fa0fec75 100644
+index c8751b7..fa0fec7 100644
 --- a/include/rex/input/mnk/mnk_input_driver.h
 +++ b/include/rex/input/mnk/mnk_input_driver.h
 @@ -75,6 +75,8 @@ class MnkInputDriver final : public InputDriver,
@@ -39,7 +39,7 @@ index c8751b7b..fa0fec75 100644
    // Mouse delta tracking. Fractional because relative motion arrives in
    // fractions of a pixel, and truncating each event drops slow movement.
 diff --git a/include/rex/system/function_dispatcher.h b/include/rex/system/function_dispatcher.h
-index 916f3d6b..e2a2b894 100644
+index 916f3d6..e2a2b89 100644
 --- a/include/rex/system/function_dispatcher.h
 +++ b/include/rex/system/function_dispatcher.h
 @@ -77,11 +77,12 @@ class FunctionDispatcher : public IModuleRegistrar {
@@ -66,7 +66,7 @@ index 916f3d6b..e2a2b894 100644
      uint32_t thunk_limit;
    };
 diff --git a/include/rex/system/kernel_state.h b/include/rex/system/kernel_state.h
-index 9b9cf9eb..657352a2 100644
+index 9b9cf9e..657352a 100644
 --- a/include/rex/system/kernel_state.h
 +++ b/include/rex/system/kernel_state.h
 @@ -34,6 +34,7 @@
@@ -105,7 +105,7 @@ index 9b9cf9eb..657352a2 100644
    // don't return into freed pages. Drained at the end of ~KernelState.
 diff --git a/include/rex/system/xam/session.h b/include/rex/system/xam/session.h
 new file mode 100644
-index 00000000..501a3181
+index 0000000..501a318
 --- /dev/null
 +++ b/include/rex/system/xam/session.h
 @@ -0,0 +1,155 @@
@@ -265,7 +265,7 @@ index 00000000..501a3181
 +}  // namespace xam
 +}  // namespace rex::system
 diff --git a/include/rex/system/xam/user_profile.h b/include/rex/system/xam/user_profile.h
-index ec370171..556038bd 100644
+index ec37017..556038b 100644
 --- a/include/rex/system/xam/user_profile.h
 +++ b/include/rex/system/xam/user_profile.h
 @@ -215,11 +215,13 @@ class UserProfile {
@@ -292,7 +292,7 @@ index ec370171..556038bd 100644
    std::unordered_map<uint32_t, Setting*> settings_;
    KernelState* kernel_state_ = nullptr;
 diff --git a/include/rex/system/xmemory.h b/include/rex/system/xmemory.h
-index 0c39a420..e3a0f494 100644
+index 0c39a42..e3a0f49 100644
 --- a/include/rex/system/xmemory.h
 +++ b/include/rex/system/xmemory.h
 @@ -550,8 +550,8 @@ class Memory {
@@ -307,7 +307,7 @@ index 0c39a420..e3a0f494 100644
    // Returns false if guest_address is outside every registered module range.
    bool SetFunction(uint32_t guest_address, PPCFunc* host_function);
 diff --git a/include/rex/system/xsocket.h b/include/rex/system/xsocket.h
-index a1b44437..2a9309f8 100644
+index a1b4443..2a9309f 100644
 --- a/include/rex/system/xsocket.h
 +++ b/include/rex/system/xsocket.h
 @@ -95,12 +95,17 @@ class XSocket : public XObject {
@@ -346,7 +346,7 @@ index a1b44437..2a9309f8 100644
    bool broadcast_socket_ = false;
  
 diff --git a/resources/templates/codegen/_indirect_call.inja b/resources/templates/codegen/_indirect_call.inja
-index d4b1830b..49ecb932 100644
+index d4b1830..49ecb93 100644
 --- a/resources/templates/codegen/_indirect_call.inja
 +++ b/resources/templates/codegen/_indirect_call.inja
 @@ -2,7 +2,7 @@
@@ -368,7 +368,7 @@ index d4b1830b..49ecb932 100644
  #define REX_CALL_INDIRECT_FUNC(x)                                                          \
    do {                                                                                     \
 diff --git a/resources/templates/codegen/init_cpp.inja b/resources/templates/codegen/init_cpp.inja
-index 1be4759f..eca2ea9f 100644
+index 1be4759..eca2ea9 100644
 --- a/resources/templates/codegen/init_cpp.inja
 +++ b/resources/templates/codegen/init_cpp.inja
 @@ -12,6 +12,7 @@ const rex::PPCImageInfo PPCImageConfig = {
@@ -380,7 +380,7 @@ index 1be4759f..eca2ea9f 100644
      .rexcrt_heap = REXCRT_HEAP,
  {% if has_dll_modules and not is_dll %}
 diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
-index 68274d27..e783d6f2 100644
+index 68274d2..e783d6f 100644
 --- a/resources/templates/codegen/pch_h.inja
 +++ b/resources/templates/codegen/pch_h.inja
 @@ -19,6 +19,7 @@
@@ -392,7 +392,7 @@ index 68274d27..e783d6f2 100644
  #define REX_CODE_SIZE {{ code_size }}ull
  #define REX_THUNK_RESERVE_SIZE {{ thunk_reserve_size }}ull
 diff --git a/resources/templates/test/ppc_config_h.inja b/resources/templates/test/ppc_config_h.inja
-index 0c334f89..3b5ce7bd 100644
+index 0c334f8..3b5ce7b 100644
 --- a/resources/templates/test/ppc_config_h.inja
 +++ b/resources/templates/test/ppc_config_h.inja
 @@ -25,6 +25,7 @@
@@ -409,7 +409,7 @@ index 0c334f89..3b5ce7bd 100644
    } while (0)
 -
 diff --git a/src/codegen/codegen_writer.cpp b/src/codegen/codegen_writer.cpp
-index a0484fb4..7a7d11c1 100644
+index a0484fb..7a7d11c 100644
 --- a/src/codegen/codegen_writer.cpp
 +++ b/src/codegen/codegen_writer.cpp
 @@ -39,6 +39,9 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
@@ -435,7 +435,7 @@ index a0484fb4..7a7d11c1 100644
        {"code_size", fmt::format("0x{:X}", codeMax - codeMin)},
        {"rexcrt_heap", cfg.rexcrtFunctions.contains("RtlAllocateHeap") ? 1 : 0},
 diff --git a/src/codegen/config.cpp b/src/codegen/config.cpp
-index 5da54a0d..ef63d63f 100644
+index 5da54a0..ef63d63 100644
 --- a/src/codegen/config.cpp
 +++ b/src/codegen/config.cpp
 @@ -129,6 +129,9 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
@@ -449,7 +449,7 @@ index 5da54a0d..ef63d63f 100644
    // --- [analysis] section scalars ---
    if (auto* analysisTable = toml["analysis"].as_table()) {
 diff --git a/src/input/mnk/mnk_input_driver.cpp b/src/input/mnk/mnk_input_driver.cpp
-index 3f9422dd..e0dbf415 100644
+index 3f9422d..e0dbf41 100644
 --- a/src/input/mnk/mnk_input_driver.cpp
 +++ b/src/input/mnk/mnk_input_driver.cpp
 @@ -359,6 +359,19 @@ X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
@@ -510,7 +510,7 @@ index 3f9422dd..e0dbf415 100644
      mouse_dy_ = 0.0f;
    }
 diff --git a/src/kernel/xam/apps/xgi_app.cpp b/src/kernel/xam/apps/xgi_app.cpp
-index 2b222da5..b9b7b720 100644
+index 2b222da..b9b7b72 100644
 --- a/src/kernel/xam/apps/xgi_app.cpp
 +++ b/src/kernel/xam/apps/xgi_app.cpp
 @@ -11,6 +11,7 @@
@@ -924,7 +924,7 @@ index 2b222da5..b9b7b720 100644
      case 0x000B001F: {
        assert_true(!buffer_length || buffer_length == 24);
 diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
-index 58e36a4b..802e7678 100644
+index 58e36a4..802e767 100644
 --- a/src/kernel/xam/xam_net.cpp
 +++ b/src/kernel/xam/xam_net.cpp
 @@ -12,7 +12,13 @@
@@ -1653,8 +1653,133 @@ index 58e36a4b..802e7678 100644
  REX_EXPORT_STUB(__imp__NetDll_XNetUnregisterKey);
  REX_EXPORT_STUB(__imp__NetDll_XmlDownloadContinue);
  REX_EXPORT_STUB(__imp__NetDll_XmlDownloadGetParseTime);
+diff --git a/src/kernel/xam/xam_ui.cpp b/src/kernel/xam/xam_ui.cpp
+index 5a572ce..59903c1 100644
+--- a/src/kernel/xam/xam_ui.cpp
++++ b/src/kernel/xam/xam_ui.cpp
+@@ -17,6 +17,8 @@
+ 
+ #include <imgui.h>
+ 
++#include <algorithm>
++
+ REXCVAR_DEFINE_BOOL(headless, false, "Kernel",
+                     "Don't display any UI, using defaults for prompts as needed");
+ #include <rex/kernel/xam/private.h>
+@@ -54,6 +56,36 @@ using namespace rex::system;
+ 
+ extern std::atomic<int> xam_dialogs_shown_;
+ 
++namespace {
++
++constexpr float kXamDialogReferenceHeight = 600.0f;
++constexpr float kXamDialogMaximumScale = 2.0f;
++
++float GetXamDialogScale(const ImGuiIO& io) {
++  return std::clamp(io.DisplaySize.y / kXamDialogReferenceHeight, 1.0f,
++                    kXamDialogMaximumScale);
++}
++
++ImVec2 Scale(const ImVec2& value, float scale) {
++  return ImVec2(value.x * scale, value.y * scale);
++}
++
++void PushXamDialogStyle(float scale) {
++  const ImGuiStyle& style = ImGui::GetStyle();
++  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, Scale(style.WindowPadding, scale));
++  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, Scale(style.FramePadding, scale));
++  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, Scale(style.ItemSpacing, scale));
++}
++
++void SetXamDialogSizeConstraints(const ImGuiIO& io, float minimum_width, float scale) {
++  const float maximum_width = io.DisplaySize.x * 0.9f;
++  ImGui::SetNextWindowSizeConstraints(
++      ImVec2(std::min(minimum_width * scale, maximum_width), 0.0f),
++      ImVec2(maximum_width, io.DisplaySize.y * 0.9f));
++}
++
++}  // namespace
++
+ class XamDialog : public rex::ui::ImGuiDialog {
+  public:
+   void set_close_callback(std::function<void()> close_callback) {
+@@ -232,20 +264,26 @@ class MessageBoxDialog : public XamDialog {
+       has_opened_ = true;
+       first_draw = true;
+     }
++    const float scale = GetXamDialogScale(io);
++    PushXamDialogStyle(scale);
++    SetXamDialogSizeConstraints(io, 360.0f, scale);
+     if (ImGui::BeginPopupModal(title_.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
++      ImGui::SetWindowFontScale(scale);
+       if (description_.size()) {
+-        ImGui::Text("%s", description_.c_str());
++        ImGui::TextWrapped("%s", description_.c_str());
+       }
+       if (first_draw) {
+         ImGui::SetKeyboardFocusHere();
+       }
+       for (size_t i = 0; i < buttons_.size(); ++i) {
+-        if (ImGui::Button(buttons_[i].c_str())) {
++        if (ImGui::Button(buttons_[i].c_str(), ImVec2(96.0f * scale, 32.0f * scale))) {
+           chosen_button_ = static_cast<uint32_t>(i);
+           ImGui::CloseCurrentPopup();
+           Close();
+         }
+-        ImGui::SameLine();
++        if (i + 1 < buttons_.size()) {
++          ImGui::SameLine();
++        }
+       }
+       ImGui::Spacing();
+       ImGui::Spacing();
+@@ -253,6 +291,7 @@ class MessageBoxDialog : public XamDialog {
+     } else {
+       Close();
+     }
++    ImGui::PopStyleVar(3);
+   }
+ 
+  private:
+@@ -372,7 +411,11 @@ class KeyboardInputDialog : public XamDialog {
+       has_opened_ = true;
+       first_draw = true;
+     }
++    const float scale = GetXamDialogScale(io);
++    PushXamDialogStyle(scale);
++    SetXamDialogSizeConstraints(io, 420.0f, scale);
+     if (ImGui::BeginPopupModal(title_.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
++      ImGui::SetWindowFontScale(scale);
+       if (description_.size()) {
+         ImGui::TextWrapped("%s", description_.c_str());
+       }
+@@ -386,14 +429,14 @@ class KeyboardInputDialog : public XamDialog {
+         ImGui::CloseCurrentPopup();
+         Close();
+       }
+-      if (ImGui::Button("OK")) {
++      if (ImGui::Button("OK", ImVec2(96.0f * scale, 32.0f * scale))) {
+         text_ = std::string(text_buffer_.data(), text_buffer_.size());
+         cancelled_ = false;
+         ImGui::CloseCurrentPopup();
+         Close();
+       }
+       ImGui::SameLine();
+-      if (ImGui::Button("Cancel")) {
++      if (ImGui::Button("Cancel", ImVec2(96.0f * scale, 32.0f * scale))) {
+         text_ = "";
+         cancelled_ = true;
+         ImGui::CloseCurrentPopup();
+@@ -404,6 +447,7 @@ class KeyboardInputDialog : public XamDialog {
+     } else {
+       Close();
+     }
++    ImGui::PopStyleVar(3);
+   }
+ 
+  private:
 diff --git a/src/kernel/xam/xam_user.cpp b/src/kernel/xam/xam_user.cpp
-index 8778066e..b7ee89ea 100644
+index 8778066..b7ee89e 100644
 --- a/src/kernel/xam/xam_user.cpp
 +++ b/src/kernel/xam/xam_user.cpp
 @@ -23,6 +23,7 @@
@@ -1723,7 +1848,7 @@ index 8778066e..b7ee89ea 100644
  }
  
 diff --git a/src/rexglue/commands/test_recompiler.cpp b/src/rexglue/commands/test_recompiler.cpp
-index 179b2df5..d79cc0a7 100644
+index 179b2df..d79cc0a 100644
 --- a/src/rexglue/commands/test_recompiler.cpp
 +++ b/src/rexglue/commands/test_recompiler.cpp
 @@ -414,6 +414,7 @@ bool RecompileTests(std::string_view binDir, std::string_view asmDir, std::strin
@@ -1735,7 +1860,7 @@ index 179b2df5..d79cc0a7 100644
    templateData["code_size"] = "100000";
  
 diff --git a/src/system/CMakeLists.txt b/src/system/CMakeLists.txt
-index fc46d869..28c6f15a 100644
+index fc46d86..28c6f15 100644
 --- a/src/system/CMakeLists.txt
 +++ b/src/system/CMakeLists.txt
 @@ -31,6 +31,7 @@ set(REXSYSTEM_SOURCES
@@ -1747,7 +1872,7 @@ index fc46d869..28c6f15a 100644
  
      ppc_types.cpp
 diff --git a/src/system/function_dispatcher.cpp b/src/system/function_dispatcher.cpp
-index bd431095..4fad5e70 100644
+index bd43109..4fad5e7 100644
 --- a/src/system/function_dispatcher.cpp
 +++ b/src/system/function_dispatcher.cpp
 @@ -181,6 +181,7 @@ uint64_t FunctionDispatcher::ExecuteInterrupt(ThreadState* thread_state, uint32_
@@ -1810,7 +1935,7 @@ index bd431095..4fad5e70 100644
  }
  
 diff --git a/src/system/kernel_state.cpp b/src/system/kernel_state.cpp
-index 697399cd..460b4c98 100644
+index 697399c..460b4c9 100644
 --- a/src/system/kernel_state.cpp
 +++ b/src/system/kernel_state.cpp
 @@ -16,6 +16,7 @@
@@ -1974,7 +2099,7 @@ index 697399cd..460b4c98 100644
  
      auto iter = std::find_if(user_modules_.begin(), user_modules_.end(),
 diff --git a/src/system/runtime.cpp b/src/system/runtime.cpp
-index c10694c8..ceffd4f2 100644
+index c10694c..ceffd4f 100644
 --- a/src/system/runtime.cpp
 +++ b/src/system/runtime.cpp
 @@ -207,6 +207,7 @@ X_STATUS Runtime::Setup(const rex::PPCImageInfo& image_info, RuntimeConfig confi
@@ -1987,7 +2112,7 @@ index c10694c8..ceffd4f2 100644
      Shutdown();
 diff --git a/src/system/xam/session.cpp b/src/system/xam/session.cpp
 new file mode 100644
-index 00000000..43ed90e6
+index 0000000..43ed90e
 --- /dev/null
 +++ b/src/system/xam/session.cpp
 @@ -0,0 +1,720 @@
@@ -2712,7 +2837,7 @@ index 00000000..43ed90e6
 +}
 +}  // namespace rex::system::xam
 diff --git a/src/system/xam/user_profile.cpp b/src/system/xam/user_profile.cpp
-index a77f5e6e..0472625b 100644
+index a77f5e6..0472625 100644
 --- a/src/system/xam/user_profile.cpp
 +++ b/src/system/xam/user_profile.cpp
 @@ -13,6 +13,7 @@
@@ -2774,7 +2899,7 @@ index a77f5e6e..0472625b 100644
    Setting* previous_setting = setting.get();
    std::swap(settings_[setting->setting_id], previous_setting);
 diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
-index 76cc8776..3d72f988 100644
+index 76cc877..3d72f98 100644
 --- a/src/system/xmemory.cpp
 +++ b/src/system/xmemory.cpp
 @@ -784,30 +784,28 @@ bool Memory::Restore(stream::ByteStream* stream) {
@@ -2816,7 +2941,7 @@ index 76cc8776..3d72f988 100644
        .code_size = code_size,
        .thunk_reserve = kThunkReserveSize,
 diff --git a/src/system/xsocket.cpp b/src/system/xsocket.cpp
-index 2d13ac89..60c43348 100644
+index 2d13ac8..60c4334 100644
 --- a/src/system/xsocket.cpp
 +++ b/src/system/xsocket.cpp
 @@ -12,6 +12,7 @@
@@ -2997,7 +3122,7 @@ index 2d13ac89..60c43348 100644
  
    return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
 diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
-index 7bd264bc..cc659c7a 100644
+index 7bd264b..cc659c7 100644
 --- a/tests/unit/CMakeLists.txt
 +++ b/tests/unit/CMakeLists.txt
 @@ -15,6 +15,8 @@ add_executable(unit_tests
@@ -3018,7 +3143,7 @@ index 7bd264bc..cc659c7a 100644
  )
  
 diff --git a/tests/unit/system/function_dispatcher_test.cpp b/tests/unit/system/function_dispatcher_test.cpp
-index 88617f2b..04acdd63 100644
+index 88617f2..04acdd6 100644
 --- a/tests/unit/system/function_dispatcher_test.cpp
 +++ b/tests/unit/system/function_dispatcher_test.cpp
 @@ -39,10 +39,12 @@ TEST_CASE("FunctionDispatcher: caller_address routes thunk to caller's module po
@@ -3129,7 +3254,7 @@ index 88617f2b..04acdd63 100644
    REQUIRE(dispatcher.SetFunction(kAddr, &ScribbleFn));
 diff --git a/tests/unit/system/session_test.cpp b/tests/unit/system/session_test.cpp
 new file mode 100644
-index 00000000..5579627c
+index 0000000..5579627
 --- /dev/null
 +++ b/tests/unit/system/session_test.cpp
 @@ -0,0 +1,205 @@
@@ -3340,7 +3465,7 @@ index 00000000..5579627c
 +}  // namespace rex::system::xam
 diff --git a/tests/unit/system/socket_test.cpp b/tests/unit/system/socket_test.cpp
 new file mode 100644
-index 00000000..1a482710
+index 0000000..1a48271
 --- /dev/null
 +++ b/tests/unit/system/socket_test.cpp
 @@ -0,0 +1,241 @@

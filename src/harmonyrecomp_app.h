@@ -64,6 +64,12 @@ class HarmonyrecompApp : public rex::ReXApp {
     if (config.gpu_plugin.empty()) {
       config.gpu_plugin = "xenos";
     }
+
+    // Harmony of Despair checks bit 0 to expose the licensed full game. Match
+    // --license_mask=1 only when no config, environment, or CLI value won.
+    if (rex::cvar::GetFlagSource("license_mask") == rex::cvar::Source::kDefault) {
+      rex::cvar::SetFlagByName("license_mask", "1");
+    }
   }
   // void OnPostInitLogging() override {}
   // void OnLoadXexImage(std::string& xex_image) override {}
