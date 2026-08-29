@@ -106,6 +106,7 @@ jobs:
           cmake --build --preset win-amd64-relwithdebinfo --target harmonyrecomp --parallel
           cmake --build --preset win-amd64-relwithdebinfo --target harmonyrecomp-import --parallel
           cmake --build --preset win-amd64-relwithdebinfo --target harmonyrecomp-dlc-import --parallel
+          cmake --build --preset win-amd64-relwithdebinfo --target sha256_tests --parallel
 
       - name: Test importer validation
         shell: pwsh
