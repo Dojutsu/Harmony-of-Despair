@@ -44,6 +44,18 @@ target_include_directories(harmonyrecomp-import PRIVATE src)
 target_link_libraries(harmonyrecomp-import PRIVATE rex::runtime)
 add_dependencies(harmonyrecomp harmonyrecomp-import)
 
+# Bring your own DLC (BYO-DLC) import tool.
+# Installs owned Harmony of Despair DLC packages into the ReXGlue
+# marketplace-content layout without touching the verified base
+# game_data_root.
+add_executable(harmonyrecomp-dlc-import
+    tools/dlc_import_main.cpp
+    src/dlc_manifest.cpp
+)
+target_include_directories(harmonyrecomp-dlc-import PRIVATE src)
+target_link_libraries(harmonyrecomp-dlc-import PRIVATE rex::runtime)
+add_dependencies(harmonyrecomp harmonyrecomp-dlc-import)
+
 # Read-only validation/extraction utility used to audit the source STFS package.
 add_executable(stfs_inspect tools/stfs_inspect.cpp)
 target_link_libraries(stfs_inspect PRIVATE rex::runtime)
@@ -57,3 +69,18 @@ add_executable(game_data_tests
 target_include_directories(game_data_tests PRIVATE src)
 target_link_libraries(game_data_tests PRIVATE rex::runtime)
 add_test(NAME game-data COMMAND game_data_tests)
+
+# SHA-256 known-vector tests (uses ReXGlue's bundled thirdparty/crypto/sha256)
+# Use the local copy in HarmonyRecomp/thirdparty/crypto/
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/crypto/sha256.cpp")
+    add_executable(sha256_tests
+        tests/sha256_test.cpp
+        "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/crypto/sha256.cpp"
+    )
+    target_include_directories(sha256_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/crypto"
+    )
+    add_test(NAME sha256-known-vectors COMMAND sha256_tests)
+else()
+    message(WARNING "SHA-256 test source not found")
+endif()
