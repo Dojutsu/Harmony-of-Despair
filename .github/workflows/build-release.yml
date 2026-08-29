@@ -18,10 +18,10 @@ jobs:
         run: |
           repo=/srv/ai/workspaces/codex/HarmonyRecomp
           test -z "$(git -C "$repo" status --porcelain)"
-          git -C "$repo" fetch github master
-          test "$(git -C "$repo" rev-parse github/master)" = "$GITHUB_SHA"
+          git -C "$repo" fetch origin master
+          test "$(git -C "$repo" rev-parse origin/master)" = "$GITHUB_SHA"
           git -C "$repo" checkout master
-          git -C "$repo" merge --ff-only github/master
+          git -C "$repo" merge --ff-only origin/master
 
       - name: Build
         run: /home/owner/test-harmony-codex-build.sh
