@@ -53,7 +53,8 @@ void PrintDlcEntry(const DlcEntry& entry) {
     std::cout << "  Installed: " << (entry.is_installed ? "Yes" : "No") << '\n';
     if (entry.is_installed) {
         std::cout << "  Path: " << entry.installed_path.string() << '\n';
-        std::cout << "  Installed: " << std::ctime(static_cast<const std::time_t*>(&entry.install_timestamp));
+        std::time_t ts = static_cast<std::time_t>(entry.install_timestamp);
+        std::cout << "  Installed: " << std::ctime(&ts);
     }
 }
 

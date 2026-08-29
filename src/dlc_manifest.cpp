@@ -95,12 +95,12 @@ std::string DlcManifest::to_json() const {
   out << "  \"version\": \"" << std::hex << std::uppercase << version << "\",\n";
   out << "  \"base_version\": \"" << std::hex << std::uppercase << base_version << "\",\n";
   out << "  \"content_type_name\": \"" << json_escape(content_type_name) << "\",\n";
-  out << "  \"install_timestamp\": " << install_timestamp << ",\n";
+  out << "  \"install_timestamp\": " << std::dec << install_timestamp << ",\n";
   out << "  \"installed_path\": \"" << json_escape(installed_path.string()) << "\",\n";
   out << "  \"display_name\": \"" << json_escape(display_name) << "\",\n";
-  out << "  \"file_count\": " << file_count << ",\n";
-  out << "  \"directory_count\": " << directory_count << ",\n";
-  out << "  \"total_logical_bytes\": " << total_logical_bytes << ",\n";
+  out << "  \"file_count\": " << std::dec << file_count << ",\n";
+  out << "  \"directory_count\": " << std::dec << directory_count << ",\n";
+  out << "  \"total_logical_bytes\": " << std::dec << total_logical_bytes << ",\n";
   out << "  \"package_type\": \"" << json_escape(package_type) << "\",\n";
   out << "  \"inferred_name\": \"" << json_escape(inferred_name) << "\",\n";
   out << "  \"executable_modules\": [";
@@ -551,6 +551,12 @@ bool DlcManager::extract_to_staging(const fs::path& container_path,
   return true;
 }
 
+// Helper: normalize path separators for classification (STFS uses backslashes)
+static std::string normalize_for_classification(std::string path) {
+  std::replace(path.begin(), path.end(), '\\', '/');
+  return path;
+}
+
 void DlcManager::classify_package(DlcManifest& manifest) {
   bool has_player_dll = false;
   bool has_enemy_dll = false;
@@ -559,7 +565,7 @@ void DlcManager::classify_package(DlcManifest& manifest) {
   std::string player_name;
 
   for (const auto& file : manifest.files) {
-    const std::string& path = file.relative_path.generic_string();
+    std::string path = normalize_for_classification(file.relative_path.generic_string());
 
     if (path.find("data/data/player/dll") != std::string::npos && path.ends_with(".dll")) {
       has_player_dll = true;
@@ -702,6 +708,12 @@ DlcImportResult DlcManager::install(const fs::path& container_path,
   std::vector<uint8_t> header_data(0x14C, 0);
   header_file.write(reinterpret_cast<const char*>(header_data.data()), header_data.size());
   header_file.close();
+
+  // Copy manifest to installed path so listing can read it
+  fs::path installed_manifest_path = result.installed_path / "dlc_manifest.json";
+  if (!manifest.write_to_file(installed_manifest_path)) {
+    result.warnings.push_back("cannot write manifest to installed path");
+  }
 
   result.success = true;
   return result;
