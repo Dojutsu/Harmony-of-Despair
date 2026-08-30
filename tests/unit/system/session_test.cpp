@@ -185,6 +185,44 @@ TEST_CASE("LAN discovery advertises and returns a created session", "[session][n
   CHECK(results[0].info.host_address.port == 3074);
 }
 
+TEST_CASE("direct connect discovers and joins a host without LAN broadcast",
+          "[session][network]") {
+  constexpr uint32_t title_id = 0x58410A7A;
+  constexpr uint16_t discovery_port = 39043;
+  auto previous_bind = REXCVAR_GET(lan_bind_address);
+  auto previous_direct = REXCVAR_GET(direct_connect_address);
+  struct CvarRestore {
+    std::string bind;
+    std::string direct;
+    ~CvarRestore() {
+      REXCVAR_SET(direct_connect_address, direct);
+      REXCVAR_SET(lan_bind_address, bind);
+    }
+  } restore{previous_bind, previous_direct};
+  REXCVAR_SET(lan_bind_address, "127.0.0.1");
+  REXCVAR_SET(direct_connect_address, "127.0.0.1");
+
+  SessionRegistry host_registry;
+  auto hosted = host_registry.Create(0x1001, "DesktopHost",
+                                     {htonl(0xC0A8320Au), 30742}, 1, 6, 0);
+  LanDiscoveryService host(title_id, discovery_port);
+  REQUIRE(host.Advertise(hosted));
+
+  LanDiscoveryService client(title_id, discovery_port);
+  auto results = client.Search(500, 4);
+  REQUIRE(results.size() == 1);
+  CHECK(results[0].info.id == hosted->info.id);
+  CHECK(results[0].info.host_address.ipv4 == htonl(INADDR_LOOPBACK));
+  CHECK(results[0].info.host_address.port == 30742);
+
+  SessionMember client_member{0x1002, "ROGAlly", 0, true, false, false};
+  auto joined = client.Join(results[0], client_member, 500);
+  REQUIRE(joined);
+  CHECK(joined->info.host_address.ipv4 == htonl(INADDR_LOOPBACK));
+  CHECK(joined->members.size() == 2);
+  CHECK(joined->members[1].xuid == client_member.xuid);
+}
+
 TEST_CASE("stopping a LAN advertisement removes the hosted session", "[session][network]") {
   constexpr uint32_t title_id = 0x58410A7A;
   constexpr uint16_t discovery_port = 39042;

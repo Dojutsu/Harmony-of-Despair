@@ -50,6 +50,20 @@ REXCVAR_DEFINE_UINT32(
     .range(0, 65535)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_STRING(
+    direct_connect_address, "", "Network",
+    "Optional IPv4 host address for direct session discovery (empty uses LAN broadcast)")
+    .validator([](std::string_view value) {
+      if (value.empty())
+        return true;
+      in_addr address{};
+      std::string text(value);
+      return inet_pton(AF_INET, text.c_str(), &address) == 1 &&
+             address.s_addr != htonl(INADDR_ANY) &&
+             address.s_addr != htonl(INADDR_BROADCAST);
+    })
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 namespace {
 constexpr uint32_t kDiscoveryMagic = 0x5245584Cu;
 constexpr uint16_t kDiscoveryVersion = 1;
@@ -245,6 +259,12 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
                          reinterpret_cast<sockaddr*>(&source), &length);
     if (count == sizeof(response)) {
       result = Decode(response, title_id, source.sin_addr.s_addr);
+      if (result) {
+        // Preserve the endpoint that successfully reached this session. A
+        // direct-connect search may have intentionally replaced the address
+        // embedded by a multi-homed host.
+        result->info.host_address.ipv4 = session.info.host_address.ipv4;
+      }
       if (result && result->info.id == session.info.id) {
         REXSYS_INFO("LAN discovery: {} response from {:08X}:{} members={}",
                     type == kJoin ? "join" : "leave", source.sin_addr.s_addr,
@@ -573,8 +593,18 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
   SOCKET socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (socket == kInvalidSocket)
     return results;
-  int yes = 1;
-  setsockopt(socket, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&yes), sizeof(yes));
+  const auto& direct_address = REXCVAR_GET(direct_connect_address);
+  const bool direct = !direct_address.empty();
+  if (direct) {
+    if (!BindLanSocket(socket, 0)) {
+      REXSYS_ERROR("Direct connect: failed to bind search socket to configured interface");
+      CloseSocket(socket);
+      return results;
+    }
+  } else {
+    int yes = 1;
+    setsockopt(socket, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&yes), sizeof(yes));
+  }
   // Keep limited-broadcast search wildcard-bound. Windows doesn't loop back a
   // 255.255.255.255 datagram from a socket bound to a unicast address, and the
   // listener has the same requirement. Advertisements, XNADDR, join exchange,
@@ -582,23 +612,38 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
   SetNonBlocking(socket);
   sockaddr_in target{};
   target.sin_family = AF_INET;
-  target.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+  if (direct) {
+    if (inet_pton(AF_INET, direct_address.c_str(), &target.sin_addr) != 1) {
+      REXSYS_ERROR("Invalid direct-connect IPv4 address '{}'", direct_address);
+      CloseSocket(socket);
+      return results;
+    }
+  } else {
+    target.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+  }
   target.sin_port = htons(impl_->port);
   DiscoveryPacket query{};
   query.magic = htonl(kDiscoveryMagic);
   query.version = htons(kDiscoveryVersion);
   query.type = kQuery;
   query.title_id = htonl(impl_->title_id);
-  int broadcast_sent = sendto(socket, reinterpret_cast<const char*>(&query), sizeof(query), 0,
-                              reinterpret_cast<sockaddr*>(&target), sizeof(target));
-  REXSYS_INFO("LAN discovery: search broadcast bytes={} UDP {} title={:08X}", broadcast_sent,
-              impl_->port, impl_->title_id);
+  int query_sent = sendto(socket, reinterpret_cast<const char*>(&query), sizeof(query), 0,
+                          reinterpret_cast<sockaddr*>(&target), sizeof(target));
+  if (direct) {
+    REXSYS_INFO("Direct connect: search query bytes={} to {:08X}:{} title={:08X}", query_sent,
+                target.sin_addr.s_addr, impl_->port, impl_->title_id);
+  } else {
+    REXSYS_INFO("LAN discovery: search broadcast bytes={} UDP {} title={:08X}", query_sent,
+                impl_->port, impl_->title_id);
+  }
   // Also probe the local listener for deterministic same-host tests/tools.
   // Stable XUID/session-ID filtering prevents this from surfacing as a remote
   // result in the title.
-  target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  sendto(socket, reinterpret_cast<const char*>(&query), sizeof(query), 0,
-         reinterpret_cast<sockaddr*>(&target), sizeof(target));
+  if (!direct) {
+    target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sendto(socket, reinterpret_cast<const char*>(&query), sizeof(query), 0,
+           reinterpret_cast<sockaddr*>(&target), sizeof(target));
+  }
   auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   while (std::chrono::steady_clock::now() < deadline && results.size() < max_results) {
     sockaddr_in source{};
@@ -608,6 +653,12 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
                          reinterpret_cast<sockaddr*>(&source), &length);
     if (count == sizeof(response)) {
       auto decoded = Decode(response, impl_->title_id, source.sin_addr.s_addr);
+      if (decoded && direct) {
+        // The manually supplied endpoint is authoritative. This preserves the
+        // complete host-provided session identity while avoiding a private or
+        // otherwise unreachable address embedded by a multi-homed host.
+        decoded->info.host_address.ipv4 = target.sin_addr.s_addr;
+      }
       if (decoded && std::none_of(results.begin(), results.end(), [&](const auto& existing) {
             return existing.info.id == decoded->info.id;
           })) {

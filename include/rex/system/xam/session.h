@@ -20,6 +20,7 @@ namespace xam {
 
 REXCVAR_DECLARE(std::string, lan_bind_address);
 REXCVAR_DECLARE(uint32_t, lan_gameplay_port);
+REXCVAR_DECLARE(std::string, direct_connect_address);
 
 struct LanAddress {
   uint32_t ipv4 = 0;  // Network byte order.
