@@ -1,3 +1,121 @@
+diff --git a/HARMONY_RECOMP_NOTES.md b/HARMONY_RECOMP_NOTES.md
+new file mode 100644
+index 0000000..ef63dc8
+--- /dev/null
++++ b/HARMONY_RECOMP_NOTES.md
+@@ -0,0 +1,112 @@
++# HarmonyRecomp Notes for ReXGlue Development
++
++Last updated: 2026-08-27
++
++HarmonyRecomp is a multi-image Xbox 360 static recompilation target consisting
++of `default.xex` plus six dynamically loaded player DLLs. Keep reusable ReXGlue
++fixes here separate from Harmony-specific function overrides.
++
++## Runtime-verified behavior
++
++- All six current modules—Alucard, Soma, Charlotte, Jonathan, Shanoa, and Axe
++  Armor—have completed at least one normal gameplay chapter.
++- Soma has also completed multi-chapter testing and real unload/reload cycles.
++- Shanoa's former `0x83269E18` failure was a discovery omission, not a module
++  lifecycle failure. It is now represented by a Harmony module override and is
++  manually retested through chapter completion.
++
++## Function discovery
++
++Valid executable targets referenced only through vtables, function-pointer
++tables, initializer arrays, or small tail-thunk families may be omitted.
++Harmony currently uses source-level per-image overrides after recovering exact
++PPC and function bounds. A general upstream improvement should discover and
++validate these data-referenced executable targets without treating arbitrary
++data as code.
++
++## Dispatch isolation and explicit table bases
++
++Each recompiled image must use one explicit `function_table_base` contract for
++both generated indirect lookup code and runtime table initialization.
++
++- Harmony default image: `0x88000000`
++- Player DLLs: their existing non-overlapping `image_base + image_size` bases
++
++Generated code uses `REX_FUNCTION_TABLE_BASE`; runtime initialization consumes
++the same generated module metadata. Do not restore an independent runtime-only
++Harmony conditional or recompute the base separately in the indirect-call
++template. The former contract mismatch produced a read at `0x833B0D00` for a
++valid target and is fixed.
++
++Repository state note: the explicit-base implementation, LAN session groundwork,
++socket/overlapped support, and focused tests were checkpointed in
++`d4a15c86f215ffff88f29bbbb69fa971f0f7b39e`. The separately dirty
++`thirdparty/libmspack` submodule and untracked `C:/` path are unrelated and
++should remain excluded from Harmony commits.
++
++## LAN multiplayer checkpoint
++
++ReXGlue now has configurable LAN identity, an opt-in online-capable profile,
++runtime-backed XSession records, UDP discovery/join/leave, basic XNet address
++and key mappings, explicit LAN bind/gameplay ports, and a polled Winsock
++overlapped receive path. Harmony can discover the other machine, form a
++two-member session, complete the gameplay handshake, and sustain bidirectional
++lobby traffic.
++
++The gameplay receive blocker is fixed by snapshotting the guest flags value at
++overlapped submission time; asynchronous completion no longer rereads a reused
++guest stack pointer. A later `XGISessionJoinRemote` failure was traced to an
++unbalanced object reference: `XamSessionRefObjByHandle` retained the pointer,
++while `ObDereferenceObject` released the handle. Retaining the handle instead
++prevents the session slot from being reused by the gameplay socket. Both fixes
++are paired-runtime verified through a successful join and sustained
++bidirectional UDP 30742 lobby traffic in DesktopHost log
++`harmonyrecomp_052.log` and Ally log `harmonyrecomp_055.log`.
++
++Focused receive-boundary diagnostics remain in `src/kernel/xam/xam_net.cpp`
++and `src/system/xsocket.cpp`. Search-result properties/contexts remain
++incomplete and may explain suspect lobby presentation, but are separate from
++the working transport and join path.
++
++The first internet-capable candidate adds an init-only
++`--direct_connect_address=<IPv4>` option. When empty, the existing limited-
++broadcast LAN search is unchanged. When set, XSession search sends the same
++discovery query by unicast through the configured local interface, keeps the
++manual endpoint authoritative across the advertisement and join response, and
++then reuses the existing XGI join, XNet mapping, and UDP gameplay path. UDP
++30741 remains the session query/join control port and UDP 30742 remains the
++translated gameplay port. Focused tests cover direct unicast discovery, full
++session identity preservation, membership join, and an advertised private
++address that differs from the explicit endpoint. Paired Tailscale runtime
++validation is still required; do not describe Direct Connect as runtime-
++verified until that succeeds.
++
++## Recompiled module lifecycle
++
++Commit `e8053e0` repairs the stale `module_libraries_` versus `user_modules_`
++lifecycle and dispatch isolation. Module identity is the stable registered guest
++path, not a later-mutated VFS/host path spelling. Duplicate requests for the same
++live guest module reuse the existing `UserModule`; unload removes all associated
++registries and its function mappings. Collision protection remains for genuinely
++different modules.
++
++The fix is runtime-verified: Soma completed two real unload/reload cycles without
++duplicate-load rejection, null guest reads, assertions, or fatal errors.
++
++## Input
++
++Commit `4909758` adds the MnK one-poll latch so short host keyboard presses are
++not lost between guest XInput polls. This is required for reliable keyboard
++START/menu input and is runtime-verified.
++
++## Harmony-specific constraints
++
++- Six guest modules occupy separate image and dispatch-table ranges; do not use
++  one global per-address mapping that lets default and DLL functions collide.
++- Full-game runtime testing uses `--license_mask=1` and Xenos.
++- Long interactive gameplay belongs to the user. ReXGlue changes should be
++  built and handed off with a focused test procedure.
++- Optional missing OPD sidecar probes are not evidence of a ReXGlue failure.
++- Do not solve Harmony discovery gaps with permanent generated-C++ edits; keep
++  them in Harmony override configuration until an upstream discovery solution
++  supersedes them with evidence.
 diff --git a/include/rex/codegen/config.h b/include/rex/codegen/config.h
 index 8200139..77c06c0 100644
 --- a/include/rex/codegen/config.h
@@ -105,10 +223,10 @@ index 9b9cf9e..657352a 100644
    // don't return into freed pages. Drained at the end of ~KernelState.
 diff --git a/include/rex/system/xam/session.h b/include/rex/system/xam/session.h
 new file mode 100644
-index 0000000..80f04fc
+index 0000000..2495c11
 --- /dev/null
 +++ b/include/rex/system/xam/session.h
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,158 @@
 +#pragma once
 +
 +#include <array>
@@ -122,6 +240,7 @@ index 0000000..80f04fc
 +#include <vector>
 +
 +#include <rex/cvar.h>
++#include <rex/system/xam/session_directory.h>
 +#include <rex/system/xobject.h>
 +
 +namespace rex::system {
@@ -229,6 +348,7 @@ index 0000000..80f04fc
 + private:
 +  class Impl;
 +  std::unique_ptr<Impl> impl_;
++  SessionDirectoryClient directory_;
 +};
 +
 +class XSession final : public XObject {
@@ -265,6 +385,67 @@ index 0000000..80f04fc
 +
 +}  // namespace xam
 +}  // namespace rex::system
+diff --git a/include/rex/system/xam/session_directory.h b/include/rex/system/xam/session_directory.h
+new file mode 100644
+index 0000000..0b761cf
+--- /dev/null
++++ b/include/rex/system/xam/session_directory.h
+@@ -0,0 +1,55 @@
++#pragma once
++
++#include <cstdint>
++#include <memory>
++#include <string>
++#include <vector>
++
++#include <rex/cvar.h>
++
++namespace rex::system::xam {
++
++struct SessionRecord;
++
++REXCVAR_DECLARE(std::string, session_directory_url);
++REXCVAR_DECLARE(std::string, session_directory_build_id);
++REXCVAR_DECLARE(std::string, session_directory_publish_address);
++REXCVAR_DECLARE(std::string, session_directory_candidate_type);
++REXCVAR_DECLARE(uint32_t, session_directory_session_index);
++
++struct DirectoryCandidate {
++  std::string type;
++  std::string address;
++  uint16_t discovery_port = 0;
++  uint16_t gameplay_port = 0;
++};
++
++struct DirectorySession {
++  std::string session_id;
++  std::string server_name;
++  uint32_t player_count = 0;
++  uint32_t max_players = 0;
++  uint32_t title_id = 0;
++  uint32_t protocol_version = 0;
++  std::string build_id;
++  std::vector<DirectoryCandidate> connectivity_candidates;
++};
++
++class SessionDirectoryClient {
++ public:
++  SessionDirectoryClient();
++  ~SessionDirectoryClient();
++  SessionDirectoryClient(const SessionDirectoryClient&) = delete;
++  SessionDirectoryClient& operator=(const SessionDirectoryClient&) = delete;
++
++  void StartHosting(const std::shared_ptr<SessionRecord>& session, uint32_t title_id,
++                    uint16_t discovery_port);
++  void StopHosting();
++  std::vector<DirectorySession> List(uint32_t title_id) const;
++
++ private:
++  class Impl;
++  std::unique_ptr<Impl> impl_;
++};
++
++}  // namespace rex::system::xam
 diff --git a/include/rex/system/xam/user_profile.h b/include/rex/system/xam/user_profile.h
 index ec37017..556038b 100644
 --- a/include/rex/system/xam/user_profile.h
@@ -1872,17 +2053,27 @@ index 179b2df..d79cc0a 100644
    templateData["code_size"] = "100000";
  
 diff --git a/src/system/CMakeLists.txt b/src/system/CMakeLists.txt
-index fc46d86..28c6f15 100644
+index fc46d86..a046f8d 100644
 --- a/src/system/CMakeLists.txt
 +++ b/src/system/CMakeLists.txt
-@@ -31,6 +31,7 @@ set(REXSYSTEM_SOURCES
+@@ -31,6 +31,8 @@ set(REXSYSTEM_SOURCES
      # XAM services
      xam/app_manager.cpp
      xam/content_manager.cpp
 +    xam/session.cpp
++    xam/session_directory.cpp
      xam/user_profile.cpp
  
      ppc_types.cpp
+@@ -106,7 +108,7 @@ if(REXGLUE_ENABLE_PERF_COUNTERS)
+ endif()
+ 
+ if(WIN32)
+-    target_link_libraries(rexruntime PRIVATE ws2_32)
++    target_link_libraries(rexruntime PRIVATE ws2_32 winhttp)
+     target_link_libraries(rexruntime PUBLIC dxgi dxguid)
+     target_compile_definitions(rexruntime PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+ endif()
 diff --git a/src/system/function_dispatcher.cpp b/src/system/function_dispatcher.cpp
 index bd43109..4fad5e7 100644
 --- a/src/system/function_dispatcher.cpp
@@ -2124,10 +2315,10 @@ index c10694c..ceffd4f 100644
      Shutdown();
 diff --git a/src/system/xam/session.cpp b/src/system/xam/session.cpp
 new file mode 100644
-index 0000000..11fc255
+index 0000000..ac6ed98
 --- /dev/null
 +++ b/src/system/xam/session.cpp
-@@ -0,0 +1,771 @@
+@@ -0,0 +1,803 @@
 +#include <rex/system/xam/session.h>
 +
 +#include <algorithm>
@@ -2708,9 +2899,13 @@ index 0000000..11fc255
 +  impl_->title_id = title_id;
 +}
 +bool LanDiscoveryService::Advertise(const std::shared_ptr<SessionRecord>& session) {
-+  return impl_->Start(session);
++  if (!impl_->Start(session))
++    return false;
++  directory_.StartHosting(session, impl_->title_id, impl_->port);
++  return true;
 +}
 +void LanDiscoveryService::StopAdvertising() {
++  directory_.StopHosting();
 +  impl_->Stop();
 +}
 +bool LanDiscoveryService::IsAdvertising() const {
@@ -2723,8 +2918,34 @@ index 0000000..11fc255
 +  SOCKET socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 +  if (socket == kInvalidSocket)
 +    return results;
-+  const auto& direct_address = REXCVAR_GET(direct_connect_address);
-+  const bool direct = !direct_address.empty();
++  std::string selected_address = REXCVAR_GET(direct_connect_address);
++  uint16_t selected_discovery_port = impl_->port;
++  uint16_t selected_gameplay_port = 0;
++  bool directory_selected = false;
++  if (selected_address.empty() && !REXCVAR_GET(session_directory_url).empty()) {
++    auto sessions = directory_.List(impl_->title_id);
++    for (size_t i = 0; i < sessions.size(); ++i) {
++      const auto& candidate = sessions[i].connectivity_candidates.front();
++      REXSYS_INFO("Session directory: [{}] '{}' players={}/{} candidate={} {}:{}", i,
++                  sessions[i].server_name, sessions[i].player_count, sessions[i].max_players,
++                  candidate.type, candidate.address, candidate.discovery_port);
++    }
++    uint32_t index = REXCVAR_GET(session_directory_session_index);
++    if (index != 0xFFFFFFFFu) {
++      if (index < sessions.size()) {
++        const auto& candidate = sessions[index].connectivity_candidates.front();
++        selected_address = candidate.address;
++        selected_discovery_port = candidate.discovery_port;
++        selected_gameplay_port = candidate.gameplay_port;
++        directory_selected = true;
++        REXSYS_INFO("Session directory: selected [{}] '{}' via {}", index,
++                    sessions[index].server_name, selected_address);
++      } else {
++        REXSYS_WARN("Session directory: selected index {} is unavailable", index);
++      }
++    }
++  }
++  const bool direct = !selected_address.empty();
 +  if (direct) {
 +    if (!BindLanSocket(socket, 0)) {
 +      REXSYS_ERROR("Direct connect: failed to bind search socket to configured interface");
@@ -2743,15 +2964,15 @@ index 0000000..11fc255
 +  sockaddr_in target{};
 +  target.sin_family = AF_INET;
 +  if (direct) {
-+    if (inet_pton(AF_INET, direct_address.c_str(), &target.sin_addr) != 1) {
-+      REXSYS_ERROR("Invalid direct-connect IPv4 address '{}'", direct_address);
++    if (inet_pton(AF_INET, selected_address.c_str(), &target.sin_addr) != 1) {
++      REXSYS_ERROR("Invalid direct-connect IPv4 address '{}'", selected_address);
 +      CloseSocket(socket);
 +      return results;
 +    }
 +  } else {
 +    target.sin_addr.s_addr = htonl(INADDR_BROADCAST);
 +  }
-+  target.sin_port = htons(impl_->port);
++  target.sin_port = htons(selected_discovery_port);
 +  DiscoveryPacket query{};
 +  query.magic = htonl(kDiscoveryMagic);
 +  query.version = htons(kDiscoveryVersion);
@@ -2761,7 +2982,7 @@ index 0000000..11fc255
 +                          reinterpret_cast<sockaddr*>(&target), sizeof(target));
 +  if (direct) {
 +    REXSYS_INFO("Direct connect: search query bytes={} to {:08X}:{} title={:08X}", query_sent,
-+                target.sin_addr.s_addr, impl_->port, impl_->title_id);
++                target.sin_addr.s_addr, selected_discovery_port, impl_->title_id);
 +  } else {
 +    REXSYS_INFO("LAN discovery: search broadcast bytes={} UDP {} title={:08X}", query_sent,
 +                impl_->port, impl_->title_id);
@@ -2788,6 +3009,8 @@ index 0000000..11fc255
 +        // complete host-provided session identity while avoiding a private or
 +        // otherwise unreachable address embedded by a multi-homed host.
 +        decoded->info.host_address.ipv4 = target.sin_addr.s_addr;
++        if (directory_selected && selected_gameplay_port)
++          decoded->info.host_address.port = selected_gameplay_port;
 +      }
 +      if (decoded && std::none_of(results.begin(), results.end(), [&](const auto& existing) {
 +            return existing.info.id == decoded->info.id;
@@ -2898,6 +3121,422 @@ index 0000000..11fc255
 +  auto it = objects_.find(guest_object);
 +  return it == objects_.end() ? nullptr : it->second;
 +}
++}  // namespace rex::system::xam
+diff --git a/src/system/xam/session_directory.cpp b/src/system/xam/session_directory.cpp
+new file mode 100644
+index 0000000..d910798
+--- /dev/null
++++ b/src/system/xam/session_directory.cpp
+@@ -0,0 +1,410 @@
++#include <rex/system/xam/session_directory.h>
++
++#include <algorithm>
++#include <cctype>
++#include <chrono>
++#include <condition_variable>
++#include <iomanip>
++#include <mutex>
++#include <optional>
++#include <sstream>
++#include <thread>
++
++#include <inja/third_party/include/nlohmann/json.hpp>
++
++#include <rex/logging.h>
++#include <rex/system/xam/session.h>
++
++#if REX_PLATFORM_WIN32
++#include <windows.h>
++#include <winhttp.h>
++#include <ws2tcpip.h>
++#endif
++
++namespace rex::system::xam {
++
++namespace {
++constexpr uint32_t kDirectoryProtocolVersion = 1;
++constexpr uint32_t kNoSessionIndex = 0xFFFFFFFFu;
++constexpr size_t kMaxResponseBytes = 64 * 1024;
++constexpr auto kHeartbeatInterval = std::chrono::seconds(15);
++
++bool IsSafeDirectoryUrl(std::string_view value) {
++  if (value.empty())
++    return true;
++  if (value.size() > 512)
++    return false;
++  if (value.starts_with("https://"))
++    return true;
++  for (std::string_view prefix : {"http://127.0.0.1", "http://localhost"}) {
++    if (!value.starts_with(prefix))
++      continue;
++    auto suffix = value.substr(prefix.size());
++    return suffix.empty() || suffix.front() == ':' || suffix.front() == '/';
++  }
++  return false;
++}
++
++bool IsIpv4(std::string_view value) {
++  if (value.empty())
++    return true;
++#if REX_PLATFORM_WIN32
++  in_addr address{};
++  std::string text(value);
++  return inet_pton(AF_INET, text.c_str(), &address) == 1 && address.s_addr != htonl(INADDR_ANY) &&
++         address.s_addr != htonl(INADDR_BROADCAST) && address.s_addr != htonl(INADDR_LOOPBACK);
++#else
++  return value.size() <= 45;
++#endif
++}
++
++std::string TitleIdString(uint32_t title_id) {
++  std::ostringstream stream;
++  stream << std::uppercase << std::hex << std::setw(8) << std::setfill('0') << title_id;
++  return stream.str();
++}
++
++bool IsUrlToken(std::string_view value, size_t max_length) {
++  return !value.empty() && value.size() <= max_length &&
++         std::all_of(value.begin(), value.end(),
++                     [](unsigned char ch) { return std::isalnum(ch) || ch == '-' || ch == '_'; });
++}
++
++bool IsPrintableName(std::string_view value) {
++  return !value.empty() && value.size() <= 48 &&
++         std::all_of(value.begin(), value.end(),
++                     [](unsigned char ch) { return ch >= 0x20 && ch != 0x7F; });
++}
++
++struct HttpResult {
++  uint32_t status = 0;
++  std::string body;
++};
++
++#if REX_PLATFORM_WIN32
++std::wstring WidenAscii(std::string_view value) {
++  return std::wstring(value.begin(), value.end());
++}
++
++std::optional<HttpResult> Request(std::string_view base_url, std::wstring_view method,
++                                  std::string_view relative_path, std::string_view body,
++                                  std::string_view bearer = {}) {
++  auto full_url = std::string(base_url);
++  while (full_url.ends_with('/'))
++    full_url.pop_back();
++  if (!relative_path.starts_with('/'))
++    full_url.push_back('/');
++  full_url.append(relative_path);
++  auto wide_url = WidenAscii(full_url);
++  URL_COMPONENTS parts{};
++  parts.dwStructSize = sizeof(parts);
++  parts.dwSchemeLength = DWORD(-1);
++  parts.dwHostNameLength = DWORD(-1);
++  parts.dwUrlPathLength = DWORD(-1);
++  parts.dwExtraInfoLength = DWORD(-1);
++  if (!WinHttpCrackUrl(wide_url.c_str(), DWORD(wide_url.size()), 0, &parts))
++    return std::nullopt;
++  std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
++  std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength);
++  if (parts.dwExtraInfoLength)
++    path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
++  HINTERNET session = WinHttpOpen(L"HarmonyRecomp/1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
++                                  WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
++  if (!session)
++    return std::nullopt;
++  // Directory failure must not stall the guest's existing LAN search or
++  // session teardown. These are per-stage bounds; gameplay never uses HTTP.
++  WinHttpSetTimeouts(session, 500, 500, 500, 1000);
++  DWORD connect_retries = 0;
++  WinHttpSetOption(session, WINHTTP_OPTION_CONNECT_RETRIES, &connect_retries,
++                   sizeof(connect_retries));
++  HINTERNET connection = WinHttpConnect(session, host.c_str(), parts.nPort, 0);
++  if (!connection) {
++    WinHttpCloseHandle(session);
++    return std::nullopt;
++  }
++  DWORD flags = parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
++  HINTERNET request = WinHttpOpenRequest(connection, method.data(), path.c_str(), nullptr,
++                                         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
++  if (!request) {
++    WinHttpCloseHandle(connection);
++    WinHttpCloseHandle(session);
++    return std::nullopt;
++  }
++  std::wstring headers = L"Accept: application/json\r\nContent-Type: application/json\r\n";
++  if (!bearer.empty()) {
++    headers += L"Authorization: Bearer ";
++    headers += WidenAscii(bearer);
++    headers += L"\r\n";
++  }
++  BOOL sent =
++      WinHttpSendRequest(request, headers.c_str(), DWORD(headers.size()),
++                         body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(body.data()),
++                         DWORD(body.size()), DWORD(body.size()), 0);
++  BOOL received = sent && WinHttpReceiveResponse(request, nullptr);
++  HttpResult result;
++  DWORD status_size = sizeof(result.status);
++  if (received)
++    WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
++                        WINHTTP_HEADER_NAME_BY_INDEX, &result.status, &status_size,
++                        WINHTTP_NO_HEADER_INDEX);
++  while (received && result.body.size() < kMaxResponseBytes) {
++    DWORD available = 0;
++    if (!WinHttpQueryDataAvailable(request, &available) || !available)
++      break;
++    available = std::min<DWORD>(available, DWORD(kMaxResponseBytes - result.body.size()));
++    size_t offset = result.body.size();
++    result.body.resize(offset + available);
++    DWORD read = 0;
++    if (!WinHttpReadData(request, result.body.data() + offset, available, &read)) {
++      received = false;
++      break;
++    }
++    result.body.resize(offset + read);
++  }
++  WinHttpCloseHandle(request);
++  WinHttpCloseHandle(connection);
++  WinHttpCloseHandle(session);
++  return received ? std::optional<HttpResult>(std::move(result)) : std::nullopt;
++}
++#else
++std::optional<HttpResult> Request(std::string_view, std::wstring_view, std::string_view,
++                                  std::string_view, std::string_view = {}) {
++  return std::nullopt;
++}
++#endif
++
++nlohmann::json RegistrationPayload(const SessionRecord& session, uint32_t title_id,
++                                   uint16_t discovery_port) {
++  std::lock_guard lock(*session.mutex);
++  uint32_t max_players = session.max_public_slots + session.max_private_slots;
++  uint32_t gameplay_port = REXCVAR_GET(lan_gameplay_port);
++  if (!gameplay_port)
++    gameplay_port = session.info.host_address.port;
++  return {
++      {"server_name", session.host_name.substr(0, 48)},
++      {"player_count", session.members.size()},
++      {"max_players", max_players},
++      {"title_id", TitleIdString(title_id)},
++      {"protocol_version", kDirectoryProtocolVersion},
++      {"build_id", REXCVAR_GET(session_directory_build_id)},
++      {"connectivity_candidates",
++       nlohmann::json::array({{{"type", REXCVAR_GET(session_directory_candidate_type)},
++                               {"address", REXCVAR_GET(session_directory_publish_address)},
++                               {"discovery_port", discovery_port},
++                               {"gameplay_port", gameplay_port}}})},
++  };
++}
++}  // namespace
++
++REXCVAR_DEFINE_STRING(session_directory_url, "", "Network",
++                      "HTTPS Harmony session-directory URL (empty disables directory access)")
++    .validator(IsSafeDirectoryUrl)
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_STRING(session_directory_build_id, "", "Network",
++                      "Session-directory compatibility identifier")
++    .validator([](std::string_view value) {
++      return value.size() <= 64 && std::all_of(value.begin(), value.end(), [](unsigned char ch) {
++               return std::isalnum(ch) || ch == '.' || ch == '_' || ch == '-';
++             });
++    })
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_STRING(session_directory_publish_address, "", "Network",
++                      "Explicit IPv4 address published by a directory host")
++    .validator(IsIpv4)
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_STRING(session_directory_candidate_type, "tailscale", "Network",
++                      "Published directory candidate type: direct or tailscale")
++    .validator([](std::string_view value) { return value == "direct" || value == "tailscale"; })
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_UINT32(session_directory_session_index, kNoSessionIndex, "Network",
++                      "Directory result index to resolve through Direct Connect")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++
++class SessionDirectoryClient::Impl {
++ public:
++  ~Impl() { StopHosting(); }
++
++  void StartHosting(std::shared_ptr<SessionRecord> value, uint32_t value_title_id,
++                    uint16_t value_discovery_port) {
++    StopHosting();
++    if (REXCVAR_GET(session_directory_url).empty())
++      return;
++    if (REXCVAR_GET(session_directory_build_id).empty() ||
++        REXCVAR_GET(session_directory_publish_address).empty()) {
++      REXSYS_WARN(
++          "Session directory: hosting disabled; build ID and explicit publish address are "
++          "required");
++      return;
++    }
++#if !REX_PLATFORM_WIN32
++    REXSYS_WARN("Session directory: HTTPS client is not available on this platform");
++    return;
++#endif
++    hosted = std::move(value);
++    title_id = value_title_id;
++    discovery_port = value_discovery_port;
++    worker = std::jthread([this](std::stop_token stop) { HostLoop(stop); });
++  }
++
++  void StopHosting() {
++    if (worker.joinable()) {
++      worker.request_stop();
++      wake.notify_all();
++      worker.join();
++    }
++    hosted.reset();
++  }
++
++  std::vector<DirectorySession> List(uint32_t value_title_id) const {
++    std::vector<DirectorySession> result;
++    const auto& url = REXCVAR_GET(session_directory_url);
++    const auto& build_id = REXCVAR_GET(session_directory_build_id);
++    if (url.empty() || build_id.empty())
++      return result;
++    std::string path = "/sessions?title_id=" + TitleIdString(value_title_id) +
++                       "&protocol_version=1&build_id=" + build_id;
++    auto response = Request(url, L"GET", path, "");
++    if (!response || response->status != 200) {
++      REXSYS_WARN("Session directory: list request unavailable");
++      return result;
++    }
++    auto document = nlohmann::json::parse(response->body, nullptr, false);
++    if (document.is_discarded() || !document.is_object() || !document.contains("sessions") ||
++        !document["sessions"].is_array()) {
++      REXSYS_WARN("Session directory: invalid list response");
++      return result;
++    }
++    for (const auto& item : document["sessions"]) {
++      try {
++        if (!item.is_object())
++          continue;
++        auto session_id = item.find("session_id");
++        auto server_name = item.find("server_name");
++        auto title_id = item.find("title_id");
++        auto protocol = item.find("protocol_version");
++        auto item_build = item.find("build_id");
++        auto player_count = item.find("player_count");
++        auto max_players = item.find("max_players");
++        if (session_id == item.end() || !session_id->is_string() ||
++            !IsUrlToken(session_id->get_ref<const std::string&>(), 64) ||
++            server_name == item.end() || !server_name->is_string() ||
++            !IsPrintableName(server_name->get_ref<const std::string&>()) ||
++            title_id == item.end() || !title_id->is_string() ||
++            title_id->get<std::string>() != TitleIdString(value_title_id) ||
++            protocol == item.end() || !protocol->is_number_unsigned() ||
++            protocol->get<uint64_t>() != kDirectoryProtocolVersion || item_build == item.end() ||
++            !item_build->is_string() || item_build->get<std::string>() != build_id ||
++            player_count == item.end() || !player_count->is_number_unsigned() ||
++            max_players == item.end() || !max_players->is_number_unsigned())
++          continue;
++        uint64_t players = player_count->get<uint64_t>();
++        uint64_t capacity = max_players->get<uint64_t>();
++        if (!capacity || capacity > 64 || players > capacity)
++          continue;
++        DirectorySession session;
++        session.session_id = session_id->get<std::string>();
++        session.server_name = server_name->get<std::string>().substr(0, 48);
++        session.player_count = uint32_t(players);
++        session.max_players = uint32_t(capacity);
++        session.title_id = value_title_id;
++        session.protocol_version = kDirectoryProtocolVersion;
++        session.build_id = build_id;
++        auto candidates = item.find("connectivity_candidates");
++        if (candidates != item.end() && candidates->is_array()) {
++          for (const auto& candidate : *candidates) {
++            if (!candidate.is_object())
++              continue;
++            DirectoryCandidate parsed;
++            auto type = candidate.find("type");
++            auto address = candidate.find("address");
++            auto discovery = candidate.find("discovery_port");
++            auto gameplay = candidate.find("gameplay_port");
++            if (type == candidate.end() || !type->is_string() || address == candidate.end() ||
++                !address->is_string() || discovery == candidate.end() ||
++                !discovery->is_number_unsigned() || gameplay == candidate.end() ||
++                !gameplay->is_number_unsigned())
++              continue;
++            uint64_t discovery_value = discovery->get<uint64_t>();
++            uint64_t gameplay_value = gameplay->get<uint64_t>();
++            if (!discovery_value || discovery_value > 65535 || !gameplay_value ||
++                gameplay_value > 65535)
++              continue;
++            parsed.type = type->get<std::string>();
++            parsed.address = address->get<std::string>();
++            parsed.discovery_port = uint16_t(discovery_value);
++            parsed.gameplay_port = uint16_t(gameplay_value);
++            if ((parsed.type == "direct" || parsed.type == "tailscale") &&
++                !parsed.address.empty() && IsIpv4(parsed.address) && parsed.discovery_port &&
++                parsed.gameplay_port)
++              session.connectivity_candidates.push_back(std::move(parsed));
++          }
++        }
++        if (!session.connectivity_candidates.empty())
++          result.push_back(std::move(session));
++      } catch (const nlohmann::json::exception&) {
++        // Directory responses are untrusted. Ignore only the malformed record.
++      }
++    }
++    return result;
++  }
++
++ private:
++  void HostLoop(std::stop_token stop) {
++    std::string session_id;
++    std::string token;
++    while (!stop.stop_requested()) {
++      auto body = RegistrationPayload(*hosted, title_id, discovery_port).dump();
++      std::optional<HttpResult> response;
++      if (session_id.empty()) {
++        response = Request(REXCVAR_GET(session_directory_url), L"POST", "/sessions", body);
++        if (response && response->status == 201) {
++          auto document = nlohmann::json::parse(response->body, nullptr, false);
++          if (document.is_object()) {
++            auto candidate_session_id = document.value("session_id", "");
++            auto candidate_token = document.value("registration_token", "");
++            if (IsUrlToken(candidate_session_id, 64) && IsUrlToken(candidate_token, 128)) {
++              session_id = std::move(candidate_session_id);
++              token = std::move(candidate_token);
++            }
++          }
++          if (!session_id.empty() && !token.empty())
++            REXSYS_INFO("Session directory: registered '{}' as {}", hosted->host_name, session_id);
++        }
++      } else {
++        response = Request(REXCVAR_GET(session_directory_url), L"POST",
++                           "/sessions/" + session_id + "/heartbeat", body, token);
++        if (!response || response->status == 404) {
++          session_id.clear();
++          token.clear();
++        }
++      }
++      std::unique_lock lock(wait_mutex);
++      wake.wait_for(lock, kHeartbeatInterval, [&] { return stop.stop_requested(); });
++    }
++    if (!session_id.empty())
++      Request(REXCVAR_GET(session_directory_url), L"DELETE", "/sessions/" + session_id, "", token);
++  }
++
++  std::shared_ptr<SessionRecord> hosted;
++  uint32_t title_id = 0;
++  uint16_t discovery_port = 0;
++  std::jthread worker;
++  std::condition_variable wake;
++  std::mutex wait_mutex;
++};
++
++SessionDirectoryClient::SessionDirectoryClient() : impl_(std::make_unique<Impl>()) {}
++SessionDirectoryClient::~SessionDirectoryClient() = default;
++void SessionDirectoryClient::StartHosting(const std::shared_ptr<SessionRecord>& session,
++                                          uint32_t title_id, uint16_t discovery_port) {
++  impl_->StartHosting(session, title_id, discovery_port);
++}
++void SessionDirectoryClient::StopHosting() {
++  impl_->StopHosting();
++}
++std::vector<DirectorySession> SessionDirectoryClient::List(uint32_t title_id) const {
++  return impl_->List(title_id);
++}
++
 +}  // namespace rex::system::xam
 diff --git a/src/system/xam/user_profile.cpp b/src/system/xam/user_profile.cpp
 index a77f5e6..0472625 100644
@@ -3317,10 +3956,10 @@ index 88617f2..04acdd6 100644
    REQUIRE(dispatcher.SetFunction(kAddr, &ScribbleFn));
 diff --git a/tests/unit/system/session_test.cpp b/tests/unit/system/session_test.cpp
 new file mode 100644
-index 0000000..ed96fe6
+index 0000000..2c8cf0b
 --- /dev/null
 +++ b/tests/unit/system/session_test.cpp
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,290 @@
 +#include <catch2/catch_test_macros.hpp>
 +
 +#include <rex/platform.h>
@@ -3514,16 +4153,26 @@ index 0000000..ed96fe6
 +  constexpr uint16_t discovery_port = 39043;
 +  auto previous_bind = REXCVAR_GET(lan_bind_address);
 +  auto previous_direct = REXCVAR_GET(direct_connect_address);
++  auto previous_directory_url = REXCVAR_GET(session_directory_url);
++  auto previous_build_id = REXCVAR_GET(session_directory_build_id);
 +  struct CvarRestore {
 +    std::string bind;
 +    std::string direct;
++    std::string directory_url;
++    std::string build_id;
 +    ~CvarRestore() {
++      REXCVAR_SET(session_directory_build_id, build_id);
++      REXCVAR_SET(session_directory_url, directory_url);
 +      REXCVAR_SET(direct_connect_address, direct);
 +      REXCVAR_SET(lan_bind_address, bind);
 +    }
-+  } restore{previous_bind, previous_direct};
++  } restore{previous_bind, previous_direct, previous_directory_url, previous_build_id};
 +  REXCVAR_SET(lan_bind_address, "127.0.0.1");
 +  REXCVAR_SET(direct_connect_address, "127.0.0.1");
++  // Manual Direct Connect remains authoritative even when a directory is
++  // configured but unavailable.
++  REXCVAR_SET(session_directory_url, "http://127.0.0.1:1");
++  REXCVAR_SET(session_directory_build_id, "test-build");
 +
 +  SessionRegistry host_registry;
 +  auto hosted = host_registry.Create(0x1001, "DesktopHost",
@@ -3544,6 +4193,43 @@ index 0000000..ed96fe6
 +  CHECK(joined->info.host_address.ipv4 == htonl(INADDR_LOOPBACK));
 +  CHECK(joined->members.size() == 2);
 +  CHECK(joined->members[1].xuid == client_member.xuid);
++}
++
++TEST_CASE("unreachable session directory preserves LAN discovery", "[session][network]") {
++  constexpr uint32_t title_id = 0x58410A7A;
++  constexpr uint16_t discovery_port = 39044;
++  auto previous_url = REXCVAR_GET(session_directory_url);
++  auto previous_build_id = REXCVAR_GET(session_directory_build_id);
++  auto previous_publish = REXCVAR_GET(session_directory_publish_address);
++  auto previous_direct = REXCVAR_GET(direct_connect_address);
++  struct CvarRestore {
++    std::string url;
++    std::string build_id;
++    std::string publish;
++    std::string direct;
++    ~CvarRestore() {
++      REXCVAR_SET(direct_connect_address, direct);
++      REXCVAR_SET(session_directory_publish_address, publish);
++      REXCVAR_SET(session_directory_build_id, build_id);
++      REXCVAR_SET(session_directory_url, url);
++    }
++  } restore{previous_url, previous_build_id, previous_publish, previous_direct};
++  REXCVAR_SET(direct_connect_address, "");
++  REXCVAR_SET(session_directory_url, "http://127.0.0.1:1");
++  REXCVAR_SET(session_directory_build_id, "test-build");
++  REXCVAR_SET(session_directory_publish_address, "");
++
++  SessionRegistry registry;
++  auto hosted = registry.Create(0x1001, "DesktopHost",
++                                {LanDiscoveryService::DetermineLanIpv4(), 30742}, 1, 6, 0);
++  LanDiscoveryService host(title_id, discovery_port);
++  REQUIRE(host.Advertise(hosted));
++
++  LanDiscoveryService client(title_id, discovery_port);
++  auto results = client.Search(500, 4);
++  REQUIRE(results.size() == 1);
++  CHECK(results[0].info.id == hosted->info.id);
++  CHECK(results[0].host_xuid == hosted->host_xuid);
 +}
 +
 +TEST_CASE("stopping a LAN advertisement removes the hosted session", "[session][network]") {

@@ -6,6 +6,7 @@
 
 #include <rex/rex_app.h>
 #include <rex/system.h>
+#include <rex/system/xam/session_directory.h>
 
 #include <functional>
 #include <optional>
@@ -69,6 +70,15 @@ class HarmonyrecompApp : public rex::ReXApp {
     // --license_mask=1 only when no config, environment, or CLI value won.
     if (rex::cvar::GetFlagSource("license_mask") == rex::cvar::Source::kDefault) {
       rex::cvar::SetFlagByName("license_mask", "1");
+    }
+
+    // Directory compatibility is title-specific. ReXGlue owns the generic
+    // discovery client, while Harmony pins the guest/network contract it can
+    // safely join. Explicit configuration remains authoritative.
+    if (rex::cvar::GetFlagSource("session_directory_build_id") ==
+        rex::cvar::Source::kDefault) {
+      rex::cvar::SetFlagByName("session_directory_build_id",
+                              "harmony-0.0.1.4-p1");
     }
   }
   // void OnPostInitLogging() override {}

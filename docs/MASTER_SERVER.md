@@ -1,0 +1,211 @@
+# HarmonyRecomp session directory prototype
+
+## Scope
+
+The directory is discovery only. It stores short-lived lobby metadata and one
+or more connection candidates. It never receives or proxies Harmony's UDP
+30741 discovery/join packets or UDP 30742 gameplay packets.
+
+LAN and manual `--direct_connect_address=<IPv4>` remain independent. If the
+directory is unavailable, hosting and both existing connection paths must
+continue normally.
+
+## Run locally
+
+The service uses only the Python standard library and binds to loopback by
+default:
+
+```text
+python3 -m tools.master_server.server --host 127.0.0.1 --port 8080 --ttl 45
+```
+
+Run its tests from the repository root:
+
+```text
+python3 -m unittest tools.master_server.test_server -v
+```
+
+The registry is intentionally in memory. Restarting the process clears all
+sessions. A session expires 45 seconds after its last successful registration
+or heartbeat by default.
+
+## API
+
+### Register
+
+`POST /sessions`
+
+```json
+{
+  "server_name": "DesktopHost",
+  "player_count": 1,
+  "max_players": 6,
+  "title_id": "58410A7A",
+  "protocol_version": 1,
+  "build_id": "harmony-0.0.1.4-p1",
+  "connectivity_candidates": [
+    {
+      "type": "tailscale",
+      "address": "100.64.0.10",
+      "discovery_port": 30741,
+      "gameplay_port": 30742
+    }
+  ]
+}
+```
+
+The response contains a server-generated opaque `session_id` and a secret
+`registration_token`. The token is returned only once and is required for
+heartbeat and deletion. It is never returned by the public listing endpoint.
+
+### Heartbeat
+
+`POST /sessions/{session_id}/heartbeat`
+
+Send the same validated metadata with:
+
+```text
+Authorization: Bearer <registration_token>
+```
+
+The prototype heartbeat interval is 15 seconds. It refreshes mutable player
+counts and connectivity metadata as well as the expiry deadline.
+
+### List
+
+`GET /sessions?title_id=58410A7A&protocol_version=1&build_id=harmony-0.0.1.4-p1`
+
+The response is `{ "sessions": [...] }`. Clients must still validate and
+filter title ID, protocol version, build ID, candidate type, IPv4 literal, and
+ports. A selected candidate is not trusted as a complete XGI session: the
+client probes it using the existing Direct Connect UDP 30741 advertisement
+exchange before inserting the returned `SessionRecord` into the guest search
+results.
+
+### Unregister
+
+`DELETE /sessions/{session_id}` with the bearer token removes the record
+immediately. Missing deletes are harmless because stale records expire.
+
+## Validation and privacy
+
+- Request bodies are limited to 8 KiB.
+- Server names are limited to 48 printable characters.
+- Build IDs are limited to 64 characters.
+- Counts, ports, protocol versions, title IDs, and candidate types are checked.
+- At most four candidates are accepted.
+- Loopback, multicast, and unspecified addresses are rejected.
+- XUIDs, XGI session keys, player names, game data, packets, and private files
+  are not part of the public schema.
+- As with any HTTPS request, the directory operator and reverse proxy can
+  observe the connecting machine's source IP and request timing even though
+  neither is a JSON field. Avoid enabling access logs unless they are needed,
+  and set an appropriate retention policy when they are enabled.
+- Hosts must explicitly choose the address they publish. The runtime must not
+  silently infer and upload a local adapter address.
+- Registration tokens reduce casual overwrites but are not accounts or strong
+  host identity. Rate limiting and authenticated ownership are later work.
+
+## Caddy example
+
+Caddy terminates HTTPS and forwards only HTTP API traffic to the loopback-bound
+service:
+
+```caddyfile
+harmony-directory.example.com {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+Run the service as its own unprivileged account/process. Do not configure Caddy
+as a UDP 30741/30742 proxy or gameplay relay.
+
+## Runtime integration
+
+The opt-in Windows runtime client lives beside `SessionRecord` and
+`LanDiscoveryService` in ReXGlue:
+
+1. Host `XGISessionCreateImpl` creates and advertises the normal LAN session.
+2. A background directory client registers a copy of safe metadata and sends
+   heartbeats while the `SessionRecord` remains hosted.
+3. `XGISessionDelete`, abandoned-host teardown, and object destruction stop the
+   heartbeat and attempt authenticated deletion.
+4. Failure at every directory step is logged and ignored by LAN hosting.
+5. During client search, the directory list is logged. An explicitly selected
+   index supplies only the candidate IPv4 endpoint.
+6. ReXGlue sends the existing unicast UDP 30741 query to that endpoint and uses
+   the host's real advertisement/session identity. The existing join and UDP
+   30742 gameplay path are unchanged.
+
+Automatic registration and queries are disabled unless
+`--session_directory_url` is configured. Production URLs must use HTTPS;
+loopback HTTP is accepted only for local testing. The Harmony build pins the
+compatibility identifier to `harmony-0.0.1.4-p1` unless an explicit config or
+command-line value overrides it.
+
+Hosting additionally requires an explicit publish address. This is deliberate:
+the runtime never guesses which adapter address to disclose. While a session is
+advertised, the host registers once, refreshes the record every 15 seconds, and
+attempts deletion when hosting stops. Directory failures are warnings only and
+do not stop the existing LAN host.
+
+Windows HTTP operations use short per-stage timeouts with connection retries
+disabled. An unreachable directory may briefly delay an online search, but it
+cannot become the gameplay transport and it does not disable LAN or manual
+Direct Connect.
+
+Client search always gives manual `--direct_connect_address` priority. With a
+directory URL but no selected index, search logs compatible sessions and then
+continues with normal LAN broadcast. With
+`--session_directory_session_index=<zero-based-index>`, the selected candidate
+is probed through the existing unicast UDP 30741 Direct Connect exchange. The
+directory response is never treated as authoritative XGI session state.
+
+The WinHTTP client is currently built on Windows. Other platforms retain LAN
+and manual Direct Connect and log that directory HTTPS access is unavailable.
+
+## Manual paired Tailscale test
+
+Run the service locally or behind Caddy first. For a loopback-only API test,
+use `http://127.0.0.1:8080`; a two-machine test requires an HTTPS URL reachable
+by both PCs.
+
+1. Start the Desktop host with its existing verified LAN/Tailscale arguments,
+   plus:
+
+   ```text
+   --session_directory_url=https://<directory-host>
+   --session_directory_publish_address=<host-tailscale-ip>
+   --session_directory_candidate_type=tailscale
+   ```
+
+2. Create the normal multiplayer lobby. Confirm the host log contains
+   `Session directory: registered` and does not print a token or XUID.
+3. Start the Ally with its existing verified LAN/Tailscale arguments, plus:
+
+   ```text
+   --session_directory_url=https://<directory-host>
+   ```
+
+4. Open multiplayer search once. The log prints compatible directory entries
+   as `[0]`, `[1]`, and so on. No selection means the normal LAN search still
+   runs.
+5. Restart the Ally with the chosen zero-based entry:
+
+   ```text
+   --session_directory_url=https://<directory-host>
+   --session_directory_session_index=0
+   ```
+
+6. Search and join. Verify the log shows the selected entry, the existing
+   Direct Connect UDP 30741 advertisement/join exchange, and then the existing
+   UDP 30742 gameplay handshake. Play long enough to confirm sustained traffic.
+7. End the host lobby. Confirm it disappears immediately, or within the
+   service's 45-second expiry if shutdown prevented explicit deletion.
+8. Regression-check both old paths: remove all directory arguments for LAN;
+   separately use `--direct_connect_address=<host IPv4>` to confirm manual
+   Direct Connect still takes priority.
+
+Do not expose the service's loopback HTTP port directly to the internet. Caddy
+terminates HTTPS for directory metadata only; it is not a UDP proxy or relay.
