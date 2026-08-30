@@ -132,11 +132,13 @@ The opt-in Windows runtime client lives beside `SessionRecord` and
 3. `XGISessionDelete`, abandoned-host teardown, and object destruction stop the
    heartbeat and attempt authenticated deletion.
 4. Failure at every directory step is logged and ignored by LAN hosting.
-5. During client search, the directory list is logged. An explicitly selected
-   index supplies only the candidate IPv4 endpoint.
-6. ReXGlue sends the existing unicast UDP 30741 query to that endpoint and uses
-   the host's real advertisement/session identity. The existing join and UDP
-   30742 gameplay path are unchanged.
+5. A normal client search starts an asynchronous, short-lived directory query
+   and immediately continues the normal LAN broadcast path.
+6. Compatible directory candidates are probed with the existing unicast UDP
+   30741 discovery packet. Real host advertisements are normalized into the
+   same `SessionRecord` list as LAN results and deduplicated by session ID.
+7. Harmony's original guest result list and selection path feed the selected
+   session into the existing XGI join and UDP 30742 gameplay path unchanged.
 
 Automatic registration and queries are disabled unless
 `--session_directory_url` is configured. Production URLs must use HTTPS;
@@ -151,16 +153,19 @@ attempts deletion when hosting stops. Directory failures are warnings only and
 do not stop the existing LAN host.
 
 Windows HTTP operations use short per-stage timeouts with connection retries
-disabled. An unreachable directory may briefly delay an online search, but it
-cannot become the gameplay transport and it does not disable LAN or manual
-Direct Connect.
+disabled. Normal search never blocks on directory HTTPS: it uses the latest
+completed cached result while a background refresh runs. An unreachable
+directory cannot become the gameplay transport and does not disable LAN or
+manual Direct Connect. The explicit directory-index debug path remains
+synchronous with short timeouts.
 
 Client search always gives manual `--direct_connect_address` priority. With a
-directory URL but no selected index, search logs compatible sessions and then
-continues with normal LAN broadcast. With
+directory URL but no selected index, compatible sessions are merged into
+Harmony's original in-game search results beside LAN sessions. With
 `--session_directory_session_index=<zero-based-index>`, the selected candidate
-is probed through the existing unicast UDP 30741 Direct Connect exchange. The
-directory response is never treated as authoritative XGI session state.
+is instead probed through the existing unicast UDP 30741 exchange as a debug
+fallback. The directory response is never treated as authoritative XGI session
+state.
 
 The WinHTTP client is currently built on Windows. Other platforms retain LAN
 and manual Direct Connect and log that directory HTTPS access is unavailable.
@@ -188,19 +193,16 @@ by both PCs.
    --session_directory_url=https://<directory-host>
    ```
 
-4. Open multiplayer search once. The log prints compatible directory entries
-   as `[0]`, `[1]`, and so on. No selection means the normal LAN search still
-   runs.
-5. Restart the Ally with the chosen zero-based entry:
-
-   ```text
-   --session_directory_url=https://<directory-host>
-   --session_directory_session_index=0
-   ```
-
-6. Search and join. Verify the log shows the selected entry, the existing
-   Direct Connect UDP 30741 advertisement/join exchange, and then the existing
-   UDP 30742 gameplay handshake. Play long enough to confirm sustained traffic.
+4. Open multiplayer Search once and confirm the host appears in Harmony's
+   original in-game session list. LAN results remain available in the same
+   search.
+5. Select the host normally and join without restarting the client or supplying
+   a session index.
+6. Verify the log shows the directory query, candidate probe, normalized host
+   advertisement, `XGISessionCreateImpl`, the existing UDP 30741 join exchange,
+   and then the existing UDP 30742 gameplay handshake. Play long enough to
+   confirm sustained traffic. For diagnostics only, the old
+   `--session_directory_session_index=0` path remains available.
 7. End the host lobby. Confirm it disappears immediately, or within the
    service's 45-second expiry if shutdown prevented explicit deletion.
 8. Regression-check both old paths: remove all directory arguments for LAN;
