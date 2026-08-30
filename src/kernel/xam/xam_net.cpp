@@ -198,6 +198,7 @@ struct PendingRecvFrom {
   uint32_t buffer_length = 0;
   uint32_t bytes_ptr = 0;
   uint32_t flags_ptr = 0;
+  uint32_t flags = 0;
   uint32_t from_ptr = 0;
   uint32_t from_length_ptr = 0;
   uint32_t overlapped_ptr = 0;
@@ -206,6 +207,7 @@ struct PendingRecvFrom {
   uint32_t error = 0;
   bool complete = false;
   bool readiness_logged = false;
+  bool native_call_logged = false;
 };
 
 std::mutex pending_recv_mutex;
@@ -245,13 +247,18 @@ bool TryCompleteRecvFrom(PendingRecvFrom& pending, bool wait) {
 #endif
 
   auto* memory = REX_KERNEL_MEMORY();
-  uint32_t flags = pending.flags_ptr
-                       ? memory::load_and_swap<uint32_t>(memory->TranslateVirtual(pending.flags_ptr))
-                       : 0;
   N_XSOCKADDR_IN native_from{};
   uint32_t native_from_length = sizeof(XSOCKADDR_IN);
+  if (!pending.native_call_logged) {
+    pending.native_call_logged = true;
+    REXKRNL_INFO(
+        "NetDll_WSARecvFrom: native receive socket={:08X} native={} flags={:#x} "
+        "buffer_count=1 buffer_length={} from_length={} overlapped={:08X}",
+        pending.socket_handle, socket->native_handle(), pending.flags, pending.buffer_length,
+        pending.from_ptr ? native_from_length : 0, pending.overlapped_ptr);
+  }
   int result = socket->RecvFrom(memory->TranslateVirtual(pending.buffer_ptr), pending.buffer_length,
-                                flags, pending.from_ptr ? &native_from : nullptr,
+                                pending.flags, pending.from_ptr ? &native_from : nullptr,
                                 pending.from_ptr ? &native_from_length : nullptr);
   if (result < 0) {
     const uint32_t error = LastSocketError();
@@ -265,7 +272,8 @@ bool TryCompleteRecvFrom(PendingRecvFrom& pending, bool wait) {
     REXKRNL_ERROR(
         "NetDll_WSARecvFrom: native receive failed socket={:08X} native={} error={} "
         "flags={:#x} overlapped={:08X}",
-        pending.socket_handle, socket->native_handle(), error, flags, pending.overlapped_ptr);
+        pending.socket_handle, socket->native_handle(), error, pending.flags,
+        pending.overlapped_ptr);
     pending.error = error;
     pending.complete = true;
     return true;
@@ -506,6 +514,7 @@ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_
         buffers_ptr[0].len,
         num_bytes_recv.guest_address(),
         flags_ptr.guest_address(),
+        flags_ptr ? uint32_t(*flags_ptr) : 0,
         from_addr.guest_address(),
         from_length.guest_address(),
         overlapped_ptr.guest_address(),
@@ -518,10 +527,11 @@ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_
     EnsurePendingRecvPump();
     REXKRNL_INFO(
         "NetDll_WSARecvFrom: queued overlapped receive socket={:08X} overlapped={:08X} "
-        "buffer={:08X} length={} flags={:#x} from={:08X} from_length={:08X} "
+        "buffer={:08X} length={} flags_ptr={:08X} flags_initial={:#x} from={:08X} "
+        "from_length={:08X} "
         "event={:08X} completion={:08X}",
         socket, pending.overlapped_ptr, pending.buffer_ptr, pending.buffer_length,
-        flags_ptr ? uint32_t(*flags_ptr) : 0, pending.from_ptr, pending.from_length_ptr,
+        pending.flags_ptr, pending.flags, pending.from_ptr, pending.from_length_ptr,
         uint32_t(overlapped_ptr->event_handle), pending.completion_routine);
     XThread::SetLastError(kWsaIoPending);
     return -1;
