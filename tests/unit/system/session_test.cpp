@@ -191,16 +191,26 @@ TEST_CASE("direct connect discovers and joins a host without LAN broadcast",
   constexpr uint16_t discovery_port = 39043;
   auto previous_bind = REXCVAR_GET(lan_bind_address);
   auto previous_direct = REXCVAR_GET(direct_connect_address);
+  auto previous_directory_url = REXCVAR_GET(session_directory_url);
+  auto previous_build_id = REXCVAR_GET(session_directory_build_id);
   struct CvarRestore {
     std::string bind;
     std::string direct;
+    std::string directory_url;
+    std::string build_id;
     ~CvarRestore() {
+      REXCVAR_SET(session_directory_build_id, build_id);
+      REXCVAR_SET(session_directory_url, directory_url);
       REXCVAR_SET(direct_connect_address, direct);
       REXCVAR_SET(lan_bind_address, bind);
     }
-  } restore{previous_bind, previous_direct};
+  } restore{previous_bind, previous_direct, previous_directory_url, previous_build_id};
   REXCVAR_SET(lan_bind_address, "127.0.0.1");
   REXCVAR_SET(direct_connect_address, "127.0.0.1");
+  // Manual Direct Connect remains authoritative even when a directory is
+  // configured but unavailable.
+  REXCVAR_SET(session_directory_url, "http://127.0.0.1:1");
+  REXCVAR_SET(session_directory_build_id, "test-build");
 
   SessionRegistry host_registry;
   auto hosted = host_registry.Create(0x1001, "DesktopHost",
@@ -221,6 +231,43 @@ TEST_CASE("direct connect discovers and joins a host without LAN broadcast",
   CHECK(joined->info.host_address.ipv4 == htonl(INADDR_LOOPBACK));
   CHECK(joined->members.size() == 2);
   CHECK(joined->members[1].xuid == client_member.xuid);
+}
+
+TEST_CASE("unreachable session directory preserves LAN discovery", "[session][network]") {
+  constexpr uint32_t title_id = 0x58410A7A;
+  constexpr uint16_t discovery_port = 39044;
+  auto previous_url = REXCVAR_GET(session_directory_url);
+  auto previous_build_id = REXCVAR_GET(session_directory_build_id);
+  auto previous_publish = REXCVAR_GET(session_directory_publish_address);
+  auto previous_direct = REXCVAR_GET(direct_connect_address);
+  struct CvarRestore {
+    std::string url;
+    std::string build_id;
+    std::string publish;
+    std::string direct;
+    ~CvarRestore() {
+      REXCVAR_SET(direct_connect_address, direct);
+      REXCVAR_SET(session_directory_publish_address, publish);
+      REXCVAR_SET(session_directory_build_id, build_id);
+      REXCVAR_SET(session_directory_url, url);
+    }
+  } restore{previous_url, previous_build_id, previous_publish, previous_direct};
+  REXCVAR_SET(direct_connect_address, "");
+  REXCVAR_SET(session_directory_url, "http://127.0.0.1:1");
+  REXCVAR_SET(session_directory_build_id, "test-build");
+  REXCVAR_SET(session_directory_publish_address, "");
+
+  SessionRegistry registry;
+  auto hosted = registry.Create(0x1001, "DesktopHost",
+                                {LanDiscoveryService::DetermineLanIpv4(), 30742}, 1, 6, 0);
+  LanDiscoveryService host(title_id, discovery_port);
+  REQUIRE(host.Advertise(hosted));
+
+  LanDiscoveryService client(title_id, discovery_port);
+  auto results = client.Search(500, 4);
+  REQUIRE(results.size() == 1);
+  CHECK(results[0].info.id == hosted->info.id);
+  CHECK(results[0].host_xuid == hosted->host_xuid);
 }
 
 TEST_CASE("stopping a LAN advertisement removes the hosted session", "[session][network]") {

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <rex/cvar.h>
+#include <rex/system/xam/session_directory.h>
 #include <rex/system/xobject.h>
 
 namespace rex::system {
@@ -118,6 +119,7 @@ class LanDiscoveryService {
  private:
   class Impl;
   std::unique_ptr<Impl> impl_;
+  SessionDirectoryClient directory_;
 };
 
 class XSession final : public XObject {

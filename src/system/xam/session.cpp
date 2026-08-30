@@ -578,9 +578,13 @@ void LanDiscoveryService::SetTitleId(uint32_t title_id) {
   impl_->title_id = title_id;
 }
 bool LanDiscoveryService::Advertise(const std::shared_ptr<SessionRecord>& session) {
-  return impl_->Start(session);
+  if (!impl_->Start(session))
+    return false;
+  directory_.StartHosting(session, impl_->title_id, impl_->port);
+  return true;
 }
 void LanDiscoveryService::StopAdvertising() {
+  directory_.StopHosting();
   impl_->Stop();
 }
 bool LanDiscoveryService::IsAdvertising() const {
@@ -593,8 +597,34 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
   SOCKET socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (socket == kInvalidSocket)
     return results;
-  const auto& direct_address = REXCVAR_GET(direct_connect_address);
-  const bool direct = !direct_address.empty();
+  std::string selected_address = REXCVAR_GET(direct_connect_address);
+  uint16_t selected_discovery_port = impl_->port;
+  uint16_t selected_gameplay_port = 0;
+  bool directory_selected = false;
+  if (selected_address.empty() && !REXCVAR_GET(session_directory_url).empty()) {
+    auto sessions = directory_.List(impl_->title_id);
+    for (size_t i = 0; i < sessions.size(); ++i) {
+      const auto& candidate = sessions[i].connectivity_candidates.front();
+      REXSYS_INFO("Session directory: [{}] '{}' players={}/{} candidate={} {}:{}", i,
+                  sessions[i].server_name, sessions[i].player_count, sessions[i].max_players,
+                  candidate.type, candidate.address, candidate.discovery_port);
+    }
+    uint32_t index = REXCVAR_GET(session_directory_session_index);
+    if (index != 0xFFFFFFFFu) {
+      if (index < sessions.size()) {
+        const auto& candidate = sessions[index].connectivity_candidates.front();
+        selected_address = candidate.address;
+        selected_discovery_port = candidate.discovery_port;
+        selected_gameplay_port = candidate.gameplay_port;
+        directory_selected = true;
+        REXSYS_INFO("Session directory: selected [{}] '{}' via {}", index,
+                    sessions[index].server_name, selected_address);
+      } else {
+        REXSYS_WARN("Session directory: selected index {} is unavailable", index);
+      }
+    }
+  }
+  const bool direct = !selected_address.empty();
   if (direct) {
     if (!BindLanSocket(socket, 0)) {
       REXSYS_ERROR("Direct connect: failed to bind search socket to configured interface");
@@ -613,15 +643,15 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
   sockaddr_in target{};
   target.sin_family = AF_INET;
   if (direct) {
-    if (inet_pton(AF_INET, direct_address.c_str(), &target.sin_addr) != 1) {
-      REXSYS_ERROR("Invalid direct-connect IPv4 address '{}'", direct_address);
+    if (inet_pton(AF_INET, selected_address.c_str(), &target.sin_addr) != 1) {
+      REXSYS_ERROR("Invalid direct-connect IPv4 address '{}'", selected_address);
       CloseSocket(socket);
       return results;
     }
   } else {
     target.sin_addr.s_addr = htonl(INADDR_BROADCAST);
   }
-  target.sin_port = htons(impl_->port);
+  target.sin_port = htons(selected_discovery_port);
   DiscoveryPacket query{};
   query.magic = htonl(kDiscoveryMagic);
   query.version = htons(kDiscoveryVersion);
@@ -631,7 +661,7 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
                           reinterpret_cast<sockaddr*>(&target), sizeof(target));
   if (direct) {
     REXSYS_INFO("Direct connect: search query bytes={} to {:08X}:{} title={:08X}", query_sent,
-                target.sin_addr.s_addr, impl_->port, impl_->title_id);
+                target.sin_addr.s_addr, selected_discovery_port, impl_->title_id);
   } else {
     REXSYS_INFO("LAN discovery: search broadcast bytes={} UDP {} title={:08X}", query_sent,
                 impl_->port, impl_->title_id);
@@ -658,6 +688,8 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
         // complete host-provided session identity while avoiding a private or
         // otherwise unreachable address embedded by a multi-homed host.
         decoded->info.host_address.ipv4 = target.sin_addr.s_addr;
+        if (directory_selected && selected_gameplay_port)
+          decoded->info.host_address.port = selected_gameplay_port;
       }
       if (decoded && std::none_of(results.begin(), results.end(), [&](const auto& existing) {
             return existing.info.id == decoded->info.id;
