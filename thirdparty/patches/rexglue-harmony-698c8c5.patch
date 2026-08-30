@@ -924,7 +924,7 @@ index 2b222da..b9b7b72 100644
      case 0x000B001F: {
        assert_true(!buffer_length || buffer_length == 24);
 diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
-index 58e36a4..802e767 100644
+index 58e36a4..11eec79 100644
 --- a/src/kernel/xam/xam_net.cpp
 +++ b/src/kernel/xam/xam_net.cpp
 @@ -12,7 +12,13 @@
@@ -949,7 +949,7 @@ index 58e36a4..802e767 100644
  #include <rex/system/xsocket.h>
  #include <rex/system/xthread.h>
  #include <rex/system/xtypes.h>
-@@ -181,6 +188,170 @@ struct XNetStartupParams {
+@@ -181,6 +188,178 @@ struct XNetStartupParams {
  };
  
  XNetStartupParams xnet_startup_params = {};
@@ -963,6 +963,7 @@ index 58e36a4..802e767 100644
 +  uint32_t buffer_length = 0;
 +  uint32_t bytes_ptr = 0;
 +  uint32_t flags_ptr = 0;
++  uint32_t flags = 0;
 +  uint32_t from_ptr = 0;
 +  uint32_t from_length_ptr = 0;
 +  uint32_t overlapped_ptr = 0;
@@ -971,6 +972,7 @@ index 58e36a4..802e767 100644
 +  uint32_t error = 0;
 +  bool complete = false;
 +  bool readiness_logged = false;
++  bool native_call_logged = false;
 +};
 +
 +std::mutex pending_recv_mutex;
@@ -1010,13 +1012,18 @@ index 58e36a4..802e767 100644
 +#endif
 +
 +  auto* memory = REX_KERNEL_MEMORY();
-+  uint32_t flags = pending.flags_ptr
-+                       ? memory::load_and_swap<uint32_t>(memory->TranslateVirtual(pending.flags_ptr))
-+                       : 0;
 +  N_XSOCKADDR_IN native_from{};
 +  uint32_t native_from_length = sizeof(XSOCKADDR_IN);
++  if (!pending.native_call_logged) {
++    pending.native_call_logged = true;
++    REXKRNL_INFO(
++        "NetDll_WSARecvFrom: native receive socket={:08X} native={} flags={:#x} "
++        "buffer_count=1 buffer_length={} from_length={} overlapped={:08X}",
++        pending.socket_handle, socket->native_handle(), pending.flags, pending.buffer_length,
++        pending.from_ptr ? native_from_length : 0, pending.overlapped_ptr);
++  }
 +  int result = socket->RecvFrom(memory->TranslateVirtual(pending.buffer_ptr), pending.buffer_length,
-+                                flags, pending.from_ptr ? &native_from : nullptr,
++                                pending.flags, pending.from_ptr ? &native_from : nullptr,
 +                                pending.from_ptr ? &native_from_length : nullptr);
 +  if (result < 0) {
 +    const uint32_t error = LastSocketError();
@@ -1030,7 +1037,8 @@ index 58e36a4..802e767 100644
 +    REXKRNL_ERROR(
 +        "NetDll_WSARecvFrom: native receive failed socket={:08X} native={} error={} "
 +        "flags={:#x} overlapped={:08X}",
-+        pending.socket_handle, socket->native_handle(), error, flags, pending.overlapped_ptr);
++        pending.socket_handle, socket->native_handle(), error, pending.flags,
++        pending.overlapped_ptr);
 +    pending.error = error;
 +    pending.complete = true;
 +    return true;
@@ -1120,7 +1128,7 @@ index 58e36a4..802e767 100644
  
  u32 NetDll_XNetStartup_entry(u32 caller, ppc_ptr_t<XNetStartupParams> params) {
    if (params) {
-@@ -298,20 +469,131 @@ u32 NetDll_WSAGetLastError_entry() {
+@@ -298,20 +477,133 @@ u32 NetDll_WSAGetLastError_entry() {
  u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_ptr,
                               u32 buffer_count, mapped_u32 num_bytes_recv, mapped_u32 flags_ptr,
                               ppc_ptr_t<XSOCKADDR_IN> from_addr,
@@ -1163,6 +1171,7 @@ index 58e36a4..802e767 100644
 +        buffers_ptr[0].len,
 +        num_bytes_recv.guest_address(),
 +        flags_ptr.guest_address(),
++        flags_ptr ? uint32_t(*flags_ptr) : 0,
 +        from_addr.guest_address(),
 +        from_length.guest_address(),
 +        overlapped_ptr.guest_address(),
@@ -1175,10 +1184,11 @@ index 58e36a4..802e767 100644
 +    EnsurePendingRecvPump();
 +    REXKRNL_INFO(
 +        "NetDll_WSARecvFrom: queued overlapped receive socket={:08X} overlapped={:08X} "
-+        "buffer={:08X} length={} flags={:#x} from={:08X} from_length={:08X} "
++        "buffer={:08X} length={} flags_ptr={:08X} flags_initial={:#x} from={:08X} "
++        "from_length={:08X} "
 +        "event={:08X} completion={:08X}",
 +        socket, pending.overlapped_ptr, pending.buffer_ptr, pending.buffer_length,
-+        flags_ptr ? uint32_t(*flags_ptr) : 0, pending.from_ptr, pending.from_length_ptr,
++        pending.flags_ptr, pending.flags, pending.from_ptr, pending.from_length_ptr,
 +        uint32_t(overlapped_ptr->event_handle), pending.completion_routine);
 +    XThread::SetLastError(kWsaIoPending);
 +    return -1;
@@ -1200,7 +1210,7 @@ index 58e36a4..802e767 100644
 +    XThread::SetLastError(errno);
 +#endif
 +    return -1;
-   }
++  }
 +  if (num_bytes_recv)
 +    *num_bytes_recv = uint32_t(result);
 +  if (from_addr) {
@@ -1214,10 +1224,7 @@ index 58e36a4..802e767 100644
 +  XThread::SetLastError(0);
 +  return 0;
 +}
- 
--  // we're not going to be receiving packets any time soon
--  // return error so we don't wait on that - Cancerous
--  return -1;
++
 +u32 NetDll_WSAGetOverlappedResult_entry(u32 caller, u32 socket_handle,
 +                                        ppc_ptr_t<XWSAOVERLAPPED> overlapped_ptr,
 +                                        mapped_u32 bytes_transferred, u32 wait,
@@ -1227,8 +1234,11 @@ index 58e36a4..802e767 100644
 +  if (!overlapped_ptr || !bytes_transferred) {
 +    XThread::SetLastError(kWsaInvalidArgument);
 +    return 0;
-+  }
-+
+   }
+ 
+-  // we're not going to be receiving packets any time soon
+-  // return error so we don't wait on that - Cancerous
+-  return -1;
 +  std::lock_guard lock(pending_recv_mutex);
 +  auto it = pending_recvs.find(overlapped_ptr.guest_address());
 +  if (it == pending_recvs.end() || it->second.socket_handle != socket_handle) {
@@ -1260,7 +1270,7 @@ index 58e36a4..802e767 100644
  }
  
  // If the socket is a VDP socket, buffer 0 is the game data length, and buffer 1
-@@ -320,15 +602,21 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
+@@ -320,15 +612,21 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
                             u32 num_buffers, mapped_u32 num_bytes_sent, u32 flags,
                             ppc_ptr_t<XSOCKADDR_IN> to_ptr, u32 to_len,
                             ppc_ptr_t<XWSAOVERLAPPED> overlapped, mapped_void completion_routine) {
@@ -1285,7 +1295,7 @@ index 58e36a4..802e767 100644
  
    // Our sockets implementation doesn't support multiple buffers, so we need
    // to combine the buffers the game has given us!
-@@ -346,10 +634,48 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
+@@ -346,10 +644,48 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
    }
  
    N_XSOCKADDR_IN native_to(to_ptr);
@@ -1337,7 +1347,7 @@ index 58e36a4..802e767 100644
    return 0;
  }
  
-@@ -360,20 +686,33 @@ u32 NetDll_WSAWaitForMultipleEvents_entry(u32 num_events, mapped_u32 events, u32
+@@ -360,20 +696,33 @@ u32 NetDll_WSAWaitForMultipleEvents_entry(u32 num_events, mapped_u32 events, u32
      return ~0u;
    }
  
@@ -1384,7 +1394,7 @@ index 58e36a4..802e767 100644
  }
  
  u32 NetDll_WSACreateEvent_entry() {
-@@ -436,10 +775,12 @@ struct XnAddrStatus {
+@@ -436,10 +785,12 @@ struct XnAddrStatus {
  };
  
  u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
@@ -1401,7 +1411,7 @@ index 58e36a4..802e767 100644
  
    // TODO(gibbed): A proper mac address.
    // RakNet's 360 version appears to depend on abEnet to create "random" 64-bit
-@@ -452,11 +793,15 @@ u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
+@@ -452,11 +803,15 @@ u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
    // https://github.com/facebookarchive/RakNet/blob/master/Source/RakPeer.cpp#L4467
    // "Mac address is a poor solution because you can't have multiple connections
    // from the same system"
@@ -1420,7 +1430,7 @@ index 58e36a4..802e767 100644
  }
  
  u32 NetDll_XNetGetDebugXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
-@@ -471,23 +816,72 @@ u32 NetDll_XNetXnAddrToMachineId_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr, m
+@@ -471,23 +826,72 @@ u32 NetDll_XNetXnAddrToMachineId_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr, m
    return 1;
  }
  
@@ -1500,7 +1510,7 @@ index 58e36a4..802e767 100644
  }
  
  // https://www.google.com/patents/WO2008112448A1?cl=en
-@@ -506,7 +900,8 @@ struct XEthernetStatus {
+@@ -506,7 +910,8 @@ struct XEthernetStatus {
  };
  
  u32 NetDll_XNetGetEthernetLinkStatus_entry(u32 caller) {
@@ -1510,7 +1520,7 @@ index 58e36a4..802e767 100644
  }
  
  u32 NetDll_XNetDnsLookup_entry(u32 caller, mapped_string host, u32 event_handle, mapped_u32 pdns) {
-@@ -549,6 +944,44 @@ u32 NetDll_XNetQosServiceLookup_entry(u32 caller, u32 flags, u32 event_handle, m
+@@ -549,6 +954,44 @@ u32 NetDll_XNetQosServiceLookup_entry(u32 caller, u32 flags, u32 event_handle, m
    return 0;
  }
  
@@ -1555,7 +1565,7 @@ index 58e36a4..802e767 100644
  u32 NetDll_XNetQosRelease_entry(u32 caller, ppc_ptr_t<XNQOS> qos) {
    if (!qos) {
      return X_STATUS_INVALID_PARAMETER;
-@@ -559,7 +992,9 @@ u32 NetDll_XNetQosRelease_entry(u32 caller, ppc_ptr_t<XNQOS> qos) {
+@@ -559,7 +1002,9 @@ u32 NetDll_XNetQosRelease_entry(u32 caller, ppc_ptr_t<XNQOS> qos) {
  
  u32 NetDll_XNetQosListen_entry(u32 caller, mapped_void id, mapped_void data, u32 data_size, u32 r7,
                                 u32 flags) {
@@ -1566,7 +1576,7 @@ index 58e36a4..802e767 100644
  }
  
  u32 NetDll_inet_addr_entry(mapped_string addr_ptr) {
-@@ -591,7 +1026,6 @@ u32 NetDll_socket_entry(u32 caller, u32 af, u32 type, u32 protocol) {
+@@ -591,7 +1036,6 @@ u32 NetDll_socket_entry(u32 caller, u32 af, u32 type, u32 protocol) {
      XThread::SetLastError(error);
      return -1;
    }
@@ -1574,7 +1584,7 @@ index 58e36a4..802e767 100644
    return socket->handle();
  }
  
-@@ -670,12 +1104,29 @@ u32 NetDll_bind_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> nam
+@@ -670,12 +1114,29 @@ u32 NetDll_bind_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> nam
    }
  
    N_XSOCKADDR_IN native_name(name);
@@ -1605,7 +1615,7 @@ index 58e36a4..802e767 100644
    return 0;
  }
  
-@@ -944,6 +1395,8 @@ REX_EXPORT(__imp__NetDll_XNetRandom, rex::kernel::xam::NetDll_XNetRandom_entry)
+@@ -944,6 +1405,8 @@ REX_EXPORT(__imp__NetDll_XNetRandom, rex::kernel::xam::NetDll_XNetRandom_entry)
  REX_EXPORT(__imp__NetDll_WSAStartup, rex::kernel::xam::NetDll_WSAStartup_entry)
  REX_EXPORT(__imp__NetDll_WSACleanup, rex::kernel::xam::NetDll_WSACleanup_entry)
  REX_EXPORT(__imp__NetDll_WSAGetLastError, rex::kernel::xam::NetDll_WSAGetLastError_entry)
@@ -1614,7 +1624,7 @@ index 58e36a4..802e767 100644
  REX_EXPORT(__imp__NetDll_WSARecvFrom, rex::kernel::xam::NetDll_WSARecvFrom_entry)
  REX_EXPORT(__imp__NetDll_WSASendTo, rex::kernel::xam::NetDll_WSASendTo_entry)
  REX_EXPORT(__imp__NetDll_WSAWaitForMultipleEvents,
-@@ -1002,7 +1455,6 @@ REX_EXPORT_STUB(__imp__NetDll_UpnpSearchGetDevices);
+@@ -1002,7 +1465,6 @@ REX_EXPORT_STUB(__imp__NetDll_UpnpSearchGetDevices);
  REX_EXPORT_STUB(__imp__NetDll_UpnpStartup);
  REX_EXPORT_STUB(__imp__NetDll_WSACancelOverlappedIO);
  REX_EXPORT_STUB(__imp__NetDll_WSAEventSelect);
@@ -1622,7 +1632,7 @@ index 58e36a4..802e767 100644
  REX_EXPORT_STUB(__imp__NetDll_WSARecv);
  REX_EXPORT_STUB(__imp__NetDll_WSASend);
  REX_EXPORT_STUB(__imp__NetDll_WSAStartupEx);
-@@ -1030,24 +1482,24 @@ REX_EXPORT_STUB(__imp__NetDll_XHttpSetStatusCallback);
+@@ -1030,24 +1492,24 @@ REX_EXPORT_STUB(__imp__NetDll_XHttpSetStatusCallback);
  REX_EXPORT_STUB(__imp__NetDll_XHttpShutdown);
  REX_EXPORT_STUB(__imp__NetDll_XHttpStartup);
  REX_EXPORT_STUB(__imp__NetDll_XHttpWriteData);
@@ -1779,7 +1789,7 @@ index 5a572ce..59903c1 100644
  
   private:
 diff --git a/src/kernel/xam/xam_user.cpp b/src/kernel/xam/xam_user.cpp
-index 8778066..b7ee89e 100644
+index 8778066..89527ca 100644
 --- a/src/kernel/xam/xam_user.cpp
 +++ b/src/kernel/xam/xam_user.cpp
 @@ -23,6 +23,7 @@
@@ -1812,7 +1822,7 @@ index 8778066..b7ee89e 100644
    return X_ERROR_SUCCESS;
  }
  
-@@ -713,15 +718,29 @@ u32 XamWriteGamerTile_entry(u32 arg1, u32 arg2, u32 arg3, u32 arg4, u32 arg5, u3
+@@ -713,15 +718,30 @@ u32 XamWriteGamerTile_entry(u32 arg1, u32 arg2, u32 arg3, u32 arg4, u32 arg5, u3
  }
  
  u32 XamSessionCreateHandle_entry(mapped_u32 handle_ptr) {
@@ -1841,8 +1851,9 @@ index 8778066..b7ee89e 100644
 +  auto session = REX_KERNEL_OBJECTS()->LookupObject<XSession>(handle);
 +  if (!session)
 +    return X_ERROR_INVALID_HANDLE;
-+  // The guest keeps the referenced native object after closing the handle.
-+  session->Retain();
++  // ObDereferenceObject releases a handle reference for the returned guest
++  // object, so retain the handle here to keep the pair balanced.
++  session->RetainHandle();
 +  *obj_ptr = session->guest_object();
    return X_ERROR_SUCCESS;
  }

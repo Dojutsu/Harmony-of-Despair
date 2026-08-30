@@ -89,8 +89,8 @@ jobs:
         run: |
           git -C _deps/rexglue-sdk config core.autocrlf false
           git -C _deps/rexglue-sdk reset --hard HEAD
-          git -C _deps/rexglue-sdk apply --check ../../thirdparty/patches/rexglue-harmony-f2c8b14.patch
-          git -C _deps/rexglue-sdk apply ../../thirdparty/patches/rexglue-harmony-f2c8b14.patch
+          git -C _deps/rexglue-sdk apply --check ../../thirdparty/patches/rexglue-harmony-698c8c5.patch
+          git -C _deps/rexglue-sdk apply ../../thirdparty/patches/rexglue-harmony-698c8c5.patch
 
       - name: Install the established Windows toolchain
         shell: pwsh
