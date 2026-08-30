@@ -738,8 +738,9 @@ u32 XamSessionRefObjByHandle_entry(u32 handle, mapped_u32 obj_ptr) {
   auto session = REX_KERNEL_OBJECTS()->LookupObject<XSession>(handle);
   if (!session)
     return X_ERROR_INVALID_HANDLE;
-  // The guest keeps the referenced native object after closing the handle.
-  session->Retain();
+  // ObDereferenceObject releases a handle reference for the returned guest
+  // object, so retain the handle here to keep the pair balanced.
+  session->RetainHandle();
   *obj_ptr = session->guest_object();
   return X_ERROR_SUCCESS;
 }
