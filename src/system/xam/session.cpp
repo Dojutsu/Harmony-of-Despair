@@ -39,8 +39,7 @@ REXCVAR_DEFINE_STRING(lan_bind_address, "", "Network",
       in_addr address{};
       std::string text(value);
       return inet_pton(AF_INET, text.c_str(), &address) == 1 &&
-             address.s_addr != htonl(INADDR_ANY) &&
-             address.s_addr != htonl(INADDR_BROADCAST);
+             address.s_addr != htonl(INADDR_ANY) && address.s_addr != htonl(INADDR_BROADCAST);
     })
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
@@ -59,8 +58,7 @@ REXCVAR_DEFINE_STRING(
       in_addr address{};
       std::string text(value);
       return inet_pton(AF_INET, text.c_str(), &address) == 1 &&
-             address.s_addr != htonl(INADDR_ANY) &&
-             address.s_addr != htonl(INADDR_BROADCAST);
+             address.s_addr != htonl(INADDR_ANY) && address.s_addr != htonl(INADDR_BROADCAST);
     })
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
@@ -139,8 +137,7 @@ bool SetNonBlocking(SOCKET value) {
 }
 bool IsPrivateLanIpv4(uint32_t network_address) {
   uint32_t address = ntohl(network_address);
-  return (address & 0xFF000000u) == 0x0A000000u ||
-         (address & 0xFFF00000u) == 0xAC100000u ||
+  return (address & 0xFF000000u) == 0x0A000000u || (address & 0xFFF00000u) == 0xAC100000u ||
          (address & 0xFFFF0000u) == 0xC0A80000u;
 }
 bool BindLanSocket(SOCKET socket, uint16_t port) {
@@ -277,8 +274,7 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
   CloseSocket(socket);
   if (!result)
     REXSYS_WARN("LAN discovery: {} request timed out for {:08X}:{}",
-                type == kJoin ? "join" : "leave", session.info.host_address.ipv4,
-                discovery_port);
+                type == kJoin ? "join" : "leave", session.info.host_address.ipv4, discovery_port);
   return result;
 }
 }  // namespace
@@ -556,8 +552,7 @@ class LanDiscoveryService::Impl {
                       source.sin_addr.s_addr, ntohs(source.sin_port));
         } else if (query.type == kJoin) {
           REXSYS_INFO("LAN discovery: host join response bytes={} to {:08X}:{} members={}", sent,
-                      source.sin_addr.s_addr, ntohs(source.sin_port),
-                      ntohl(response.member_count));
+                      source.sin_addr.s_addr, ntohs(source.sin_port), ntohl(response.member_count));
         }
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -601,16 +596,17 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
   uint16_t selected_discovery_port = impl_->port;
   uint16_t selected_gameplay_port = 0;
   bool directory_selected = false;
+  bool directory_browse = false;
   if (selected_address.empty() && !REXCVAR_GET(session_directory_url).empty()) {
-    auto sessions = directory_.List(impl_->title_id);
-    for (size_t i = 0; i < sessions.size(); ++i) {
-      const auto& candidate = sessions[i].connectivity_candidates.front();
-      REXSYS_INFO("Session directory: [{}] '{}' players={}/{} candidate={} {}:{}", i,
-                  sessions[i].server_name, sessions[i].player_count, sessions[i].max_players,
-                  candidate.type, candidate.address, candidate.discovery_port);
-    }
     uint32_t index = REXCVAR_GET(session_directory_session_index);
     if (index != 0xFFFFFFFFu) {
+      auto sessions = directory_.List(impl_->title_id);
+      for (size_t i = 0; i < sessions.size(); ++i) {
+        const auto& candidate = sessions[i].connectivity_candidates.front();
+        REXSYS_INFO("Session directory: [{}] '{}' players={}/{} candidate={} {}:{}", i,
+                    sessions[i].server_name, sessions[i].player_count, sessions[i].max_players,
+                    candidate.type, candidate.address, candidate.discovery_port);
+      }
       if (index < sessions.size()) {
         const auto& candidate = sessions[index].connectivity_candidates.front();
         selected_address = candidate.address;
@@ -622,6 +618,12 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
       } else {
         REXSYS_WARN("Session directory: selected index {} is unavailable", index);
       }
+    } else {
+      // Normal guest searches never wait on HTTPS. A completed cache entry is
+      // converted into ordinary discovery probes below; a slow or unavailable
+      // directory leaves LAN broadcast unaffected.
+      directory_.RequestList(impl_->title_id);
+      directory_browse = true;
     }
   }
   const bool direct = !selected_address.empty();
@@ -674,8 +676,49 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
     sendto(socket, reinterpret_cast<const char*>(&query), sizeof(query), 0,
            reinterpret_cast<sockaddr*>(&target), sizeof(target));
   }
+  struct DirectoryProbe {
+    uint32_t ipv4;
+    uint16_t discovery_port;
+    uint16_t gameplay_port;
+    std::string server_name;
+    std::string candidate_type;
+  };
+  std::vector<DirectoryProbe> directory_probes;
+  bool directory_probes_sent = !directory_browse;
+  auto send_directory_probes = [&] {
+    if (directory_probes_sent)
+      return;
+    auto sessions = directory_.CachedList(impl_->title_id);
+    if (!sessions)
+      return;
+    directory_probes_sent = true;
+    for (size_t i = 0; i < sessions->size() && directory_probes.size() < max_results; ++i) {
+      const auto& session = (*sessions)[i];
+      const auto& candidate = session.connectivity_candidates.front();
+      sockaddr_in candidate_target{};
+      candidate_target.sin_family = AF_INET;
+      candidate_target.sin_port = htons(candidate.discovery_port);
+      if (inet_pton(AF_INET, candidate.address.c_str(), &candidate_target.sin_addr) != 1)
+        continue;
+      if (std::any_of(directory_probes.begin(), directory_probes.end(), [&](const auto& probe) {
+            return probe.ipv4 == candidate_target.sin_addr.s_addr &&
+                   probe.discovery_port == candidate.discovery_port;
+          }))
+        continue;
+      int sent = sendto(socket, reinterpret_cast<const char*>(&query), sizeof(query), 0,
+                        reinterpret_cast<sockaddr*>(&candidate_target), sizeof(candidate_target));
+      REXSYS_INFO("Session directory: probing [{}] '{}' players={}/{} via {} {}:{} bytes={}", i,
+                  session.server_name, session.player_count, session.max_players, candidate.type,
+                  candidate.address, candidate.discovery_port, sent);
+      if (sent == sizeof(query)) {
+        directory_probes.push_back({candidate_target.sin_addr.s_addr, candidate.discovery_port,
+                                    candidate.gameplay_port, session.server_name, candidate.type});
+      }
+    }
+  };
   auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   while (std::chrono::steady_clock::now() < deadline && results.size() < max_results) {
+    send_directory_probes();
     sockaddr_in source{};
     socket_len_t length = sizeof(source);
     DiscoveryPacket response{};
@@ -690,6 +733,21 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
         decoded->info.host_address.ipv4 = target.sin_addr.s_addr;
         if (directory_selected && selected_gameplay_port)
           decoded->info.host_address.port = selected_gameplay_port;
+      } else if (decoded) {
+        auto probe =
+            std::find_if(directory_probes.begin(), directory_probes.end(), [&](const auto& value) {
+              return value.ipv4 == source.sin_addr.s_addr &&
+                     value.discovery_port == ntohs(source.sin_port);
+            });
+        if (probe != directory_probes.end()) {
+          decoded->info.host_address.ipv4 = probe->ipv4;
+          decoded->info.host_address.port = probe->gameplay_port;
+          REXSYS_INFO(
+              "Session directory: normalized '{}' via {} to session {:02X}{:02X} endpoint "
+              "{:08X}:{}",
+              probe->server_name, probe->candidate_type, decoded->info.id[0], decoded->info.id[1],
+              decoded->info.host_address.ipv4, decoded->info.host_address.port);
+        }
       }
       if (decoded && std::none_of(results.begin(), results.end(), [&](const auto& existing) {
             return existing.info.id == decoded->info.id;

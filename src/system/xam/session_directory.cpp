@@ -4,6 +4,7 @@
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <future>
 #include <iomanip>
 #include <mutex>
 #include <optional>
@@ -28,6 +29,7 @@ constexpr uint32_t kDirectoryProtocolVersion = 1;
 constexpr uint32_t kNoSessionIndex = 0xFFFFFFFFu;
 constexpr size_t kMaxResponseBytes = 64 * 1024;
 constexpr auto kHeartbeatInterval = std::chrono::seconds(15);
+constexpr auto kListCacheLifetime = std::chrono::seconds(5);
 
 bool IsSafeDirectoryUrl(std::string_view value) {
   if (value.empty())
@@ -223,7 +225,16 @@ REXCVAR_DEFINE_UINT32(session_directory_session_index, kNoSessionIndex, "Network
 
 class SessionDirectoryClient::Impl {
  public:
-  ~Impl() { StopHosting(); }
+  ~Impl() {
+    StopHosting();
+    std::future<std::vector<DirectorySession>> pending;
+    {
+      std::lock_guard lock(list_mutex);
+      pending = std::move(list_future);
+    }
+    if (pending.valid())
+      pending.wait();
+  }
 
   void StartHosting(std::shared_ptr<SessionRecord> value, uint32_t value_title_id,
                     uint16_t value_discovery_port) {
@@ -346,10 +357,48 @@ class SessionDirectoryClient::Impl {
         // Directory responses are untrusted. Ignore only the malformed record.
       }
     }
+    REXSYS_INFO("Session directory: query returned {} compatible session(s)", result.size());
     return result;
   }
 
+  void RequestList(uint32_t value_title_id) const {
+    std::lock_guard lock(list_mutex);
+    HarvestListLocked();
+    auto now = std::chrono::steady_clock::now();
+    if (list_cache && list_cache_title_id == value_title_id &&
+        now - list_cache_time < kListCacheLifetime)
+      return;
+    if (list_future.valid())
+      return;
+    list_future_title_id = value_title_id;
+    list_future =
+        std::async(std::launch::async, [this, value_title_id] { return List(value_title_id); });
+  }
+
+  std::optional<std::vector<DirectorySession>> CachedList(uint32_t value_title_id) const {
+    std::lock_guard lock(list_mutex);
+    HarvestListLocked();
+    if (!list_cache || list_cache_title_id != value_title_id ||
+        std::chrono::steady_clock::now() - list_cache_time >= kListCacheLifetime)
+      return std::nullopt;
+    return list_cache;
+  }
+
  private:
+  void HarvestListLocked() const {
+    if (!list_future.valid() ||
+        list_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+      return;
+    try {
+      list_cache = list_future.get();
+    } catch (const std::exception& exception) {
+      REXSYS_WARN("Session directory: asynchronous list request failed: {}", exception.what());
+      list_cache = std::vector<DirectorySession>{};
+    }
+    list_cache_title_id = list_future_title_id;
+    list_cache_time = std::chrono::steady_clock::now();
+  }
+
   void HostLoop(std::stop_token stop) {
     std::string session_id;
     std::string token;
@@ -392,6 +441,12 @@ class SessionDirectoryClient::Impl {
   std::jthread worker;
   std::condition_variable wake;
   std::mutex wait_mutex;
+  mutable std::mutex list_mutex;
+  mutable std::future<std::vector<DirectorySession>> list_future;
+  mutable std::optional<std::vector<DirectorySession>> list_cache;
+  mutable uint32_t list_future_title_id = 0;
+  mutable uint32_t list_cache_title_id = 0;
+  mutable std::chrono::steady_clock::time_point list_cache_time{};
 };
 
 SessionDirectoryClient::SessionDirectoryClient() : impl_(std::make_unique<Impl>()) {}
@@ -405,6 +460,13 @@ void SessionDirectoryClient::StopHosting() {
 }
 std::vector<DirectorySession> SessionDirectoryClient::List(uint32_t title_id) const {
   return impl_->List(title_id);
+}
+void SessionDirectoryClient::RequestList(uint32_t title_id) const {
+  impl_->RequestList(title_id);
+}
+std::optional<std::vector<DirectorySession>> SessionDirectoryClient::CachedList(
+    uint32_t title_id) const {
+  return impl_->CachedList(title_id);
 }
 
 }  // namespace rex::system::xam

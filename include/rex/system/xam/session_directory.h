@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -46,6 +47,8 @@ class SessionDirectoryClient {
                     uint16_t discovery_port);
   void StopHosting();
   std::vector<DirectorySession> List(uint32_t title_id) const;
+  void RequestList(uint32_t title_id) const;
+  std::optional<std::vector<DirectorySession>> CachedList(uint32_t title_id) const;
 
  private:
   class Impl;
