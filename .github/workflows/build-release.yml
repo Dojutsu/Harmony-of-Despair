@@ -187,16 +187,30 @@ jobs:
           Remove-Item dist -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $root | Out-Null
 
+          $moduleAllowlistPath = 'generated/default/windows_runtime_modules.txt'
+          $moduleNames = @(Get-Content -LiteralPath $moduleAllowlistPath |
+            Where-Object { $_ -and !$_.StartsWith('#') })
+          $generatedModuleNames = @(Get-Content -LiteralPath 'generated/default/dll_targets.cmake' |
+            ForEach-Object {
+              if ($_ -match '^\s*add_library\((harmonyrecomp_\S+) SHARED') {
+                "$($Matches[1]).dll"
+              }
+            })
+          if ($moduleNames.Count -ne 116 -or
+              @($moduleNames | Sort-Object -Unique).Count -ne $moduleNames.Count) {
+            throw 'The explicit Windows recompiled-module allowlist must contain 116 unique entries.'
+          }
+          $missingModules = @($generatedModuleNames | Where-Object { $_ -notin $moduleNames })
+          $unexpectedModules = @($moduleNames | Where-Object { $_ -notin $generatedModuleNames })
+          if ($missingModules.Count -or $unexpectedModules.Count) {
+            throw "Generated module allowlist mismatch. Missing: $missingModules Unexpected: $unexpectedModules"
+          }
+
           $required = @(
             'harmonyrecomp.exe',
             'harmonyrecomp-import.exe',
-            'harmonyrecomp-dlc-import.exe',
-            'harmonyrecomp_dllAlucard.dll',
-            'harmonyrecomp_dllAxeArmor.dll',
-            'harmonyrecomp_dllCharlotte.dll',
-            'harmonyrecomp_dllJonathan.dll',
-            'harmonyrecomp_dllShanoa.dll',
-            'harmonyrecomp_dllSoma.dll',
+            'harmonyrecomp-dlc-import.exe'
+          ) + $moduleNames + @(
             'rexgpu-xenosrd.dll',
             'rexruntimerd.dll',
             'TracyClientrd.dll',
