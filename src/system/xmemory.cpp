@@ -1321,14 +1321,15 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignme
   //   committed.
   for (uint32_t page_number = start_page_number; page_number <= end_page_number; ++page_number) {
     uint32_t state = page_table_[page_number].state;
-    if ((allocation_type == memory::kMemoryAllocationReserve) && state) {
+    if ((allocation_type & memory::kMemoryAllocationReserve) && state) {
       // Already reserved.
       REXSYS_ERROR(
           "BaseHeap::AllocFixed attempting to reserve an already reserved "
           "range");
       return false;
     }
-    if ((allocation_type == memory::kMemoryAllocationCommit) &&
+    if ((allocation_type & memory::kMemoryAllocationCommit) &&
+        !(allocation_type & memory::kMemoryAllocationReserve) &&
         !(state & memory::kMemoryAllocationReserve)) {
       // Attempting a commit-only op on an unreserved page.
       // This may be OK.

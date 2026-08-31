@@ -234,6 +234,25 @@ TEST_CASE("AllocFixed reserve-only fails on already-reserved region", "[memory][
   heap->Release(target, nullptr);
 }
 
+TEST_CASE("AllocFixed reserve and commit fails on already-owned region", "[memory][heap]") {
+  auto& memory = GetTestMemory();
+  auto* heap = MutableHeap(memory.LookupHeap(0x10000000));
+  REQUIRE(heap != nullptr);
+
+  uint32_t target = 0x21010000;
+  uint32_t reserve_commit =
+      rex::memory::kMemoryAllocationReserve | rex::memory::kMemoryAllocationCommit;
+  REQUIRE(heap->AllocFixed(target, 4096, 4096, reserve_commit,
+                           rex::memory::kMemoryProtectRead |
+                               rex::memory::kMemoryProtectWrite));
+
+  CHECK_FALSE(heap->AllocFixed(target, 4096, 4096, reserve_commit,
+                               rex::memory::kMemoryProtectRead |
+                                   rex::memory::kMemoryProtectWrite));
+
+  heap->Release(target, nullptr);
+}
+
 TEST_CASE("AllocFixed commit on reserved region succeeds", "[memory][heap]") {
   auto& memory = GetTestMemory();
   auto* heap = MutableHeap(memory.LookupHeap(0x10000000));

@@ -154,6 +154,43 @@ TEST_CASE("FunctionDispatcher: explicit relocated table base stores dispatch slo
   CHECK(*memory.TranslateVirtual<PPCFunc**>(kExpectedSlot) == &DummyFn);
 }
 
+TEST_CASE("FunctionDispatcher: generated-style adjacent tables validate exact table spans",
+          "[runtime][dispatcher]") {
+  auto& memory = GetTestMemory();
+  rex::runtime::ExportResolver resolver;
+  rex::runtime::FunctionDispatcher dispatcher(&memory, &resolver);
+
+  // TU2 default: (code size + thunk reserve) * 2, rounded to 64 KiB,
+  // occupies 0x8C000000-0x8CD80000. A module table may begin immediately
+  // afterward without overlapping it.
+  constexpr uint32_t kBaseCode = 0x82220000u;
+  constexpr uint32_t kBaseCodeSize = 0x006AC8C8u;
+  constexpr uint32_t kBaseImage = 0x82000000u;
+  constexpr uint32_t kBaseImageSize = 0x00980000u;
+  constexpr uint32_t kBaseTable = 0x8C000000u;
+  constexpr uint32_t kAdjacentTable = 0x8CD80000u;
+  REQUIRE(dispatcher.InitializeFunctionTable(kBaseCode, kBaseCodeSize, kBaseImage,
+                                             kBaseImageSize, kBaseTable,
+                                             /*is_entrypoint=*/true));
+
+  constexpr uint32_t kModuleCode = 0x830A0000u;
+  constexpr uint32_t kModuleCodeSize = 0x00030000u;
+  constexpr uint32_t kModuleImage = 0x83090000u;
+  constexpr uint32_t kModuleImageSize = 0x00080000u;
+  REQUIRE(dispatcher.InitializeFunctionTable(kModuleCode, kModuleCodeSize, kModuleImage,
+                                             kModuleImageSize, kAdjacentTable));
+
+  // A genuinely overlapping, aligned table is still rejected.
+  CHECK_FALSE(dispatcher.InitializeFunctionTable(
+      0x84010000u, 0x00010000u, 0x84000000u, 0x00040000u, 0x8CDF0000u));
+
+  // Alignment and supported-address-range validation remain enforced.
+  CHECK_FALSE(dispatcher.InitializeFunctionTable(
+      0x85010000u, 0x00010000u, 0x85000000u, 0x00040000u, 0x8D000001u));
+  CHECK_FALSE(dispatcher.InitializeFunctionTable(
+      0x86010000u, 0x00010000u, 0x86000000u, 0x00040000u, 0x8FFF0000u));
+}
+
 namespace {
 constexpr uint32_t kRegisterModBase = 0x85000000u;
 void RegisterOne(rex::runtime::IModuleRegistrar* registrar) {

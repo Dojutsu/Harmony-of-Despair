@@ -122,6 +122,7 @@ class FunctionDispatcher : public IModuleRegistrar {
     uint32_t image_base;
     uint32_t image_size;
     uint32_t function_table_base;
+    uint32_t function_table_size;
     uint32_t next_thunk_address;
     uint32_t thunk_limit;
   };

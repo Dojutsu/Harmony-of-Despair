@@ -55,7 +55,13 @@ PPCFunc* ResolveIndirectFunction(uint32_t guest_address) {
 FunctionDispatcher::FunctionDispatcher(rex::memory::Memory* memory, ExportResolver* export_resolver)
     : memory_(memory), export_resolver_(export_resolver) {}
 
-FunctionDispatcher::~FunctionDispatcher() = default;
+FunctionDispatcher::~FunctionDispatcher() {
+  std::lock_guard<std::recursive_mutex> lock(dispatch_mutex_);
+  for (const auto& module : module_tables_) {
+    memory_->DestroyFunctionTable(module.code_base);
+  }
+  module_tables_.clear();
+}
 
 bool FunctionDispatcher::Execute(ThreadState* thread_state, uint32_t address) {
   SCOPE_profile_cpu_f("cpu");
@@ -191,11 +197,36 @@ bool FunctionDispatcher::InitializeFunctionTable(uint32_t code_base, uint32_t co
     return false;
   }
 
-  uint32_t new_image_end = image_base + image_size;
-  uint32_t new_code_end = code_base + code_size + kThunkReserveSize;
+  constexpr uint64_t kTableAlignment = 0x10000;
+  constexpr uint64_t kSupportedGuestEnd = 0x90000000;
+  // Function-table slots are indexed by (guest_address - code_base) * 2.
+  // Keep validation consistent with Memory::InitializeFunctionTable and the
+  // codegen dispatch-table allocator; this is not host pointer-size storage.
+  const uint64_t table_logical_size =
+      (uint64_t(code_size) + kThunkReserveSize) * 2;
+  const uint64_t table_allocation_size =
+      (table_logical_size + kTableAlignment - 1) & ~(kTableAlignment - 1);
+  const uint64_t new_table_end = uint64_t(function_table_base) + table_allocation_size;
+  const uint64_t new_image_end64 = uint64_t(image_base) + image_size;
+  const uint64_t new_code_end64 = uint64_t(code_base) + code_size + kThunkReserveSize;
+  if ((function_table_base & (kTableAlignment - 1)) != 0 ||
+      function_table_base < 0x80000000 || new_table_end > kSupportedGuestEnd ||
+      new_image_end64 > UINT32_MAX || new_code_end64 > UINT32_MAX) {
+    REXLOG_ERROR(
+        "Invalid module/table layout: image={:08X}+{:08X} code={:08X}+{:08X} "
+        "table={:08X}+{:X}",
+        image_base, image_size, code_base, code_size, function_table_base,
+        table_allocation_size);
+    return false;
+  }
+
+  uint32_t new_image_end = static_cast<uint32_t>(new_image_end64);
+  uint32_t new_code_end = static_cast<uint32_t>(new_code_end64);
   for (const auto& existing : module_tables_) {
     uint32_t existing_image_end = existing.image_base + existing.image_size;
     uint32_t existing_code_end = existing.code_base + existing.code_size + kThunkReserveSize;
+    uint64_t existing_table_end =
+        uint64_t(existing.function_table_base) + existing.function_table_size;
     if (image_base < existing_image_end && new_image_end > existing.image_base) {
       REXLOG_ERROR("Module image range [{:08X}, {:08X}) overlaps existing [{:08X}, {:08X})",
                    image_base, new_image_end, existing.image_base, existing_image_end);
@@ -204,6 +235,25 @@ bool FunctionDispatcher::InitializeFunctionTable(uint32_t code_base, uint32_t co
     if (code_base < existing_code_end && new_code_end > existing.code_base) {
       REXLOG_ERROR("Module code range [{:08X}, {:08X}) overlaps existing [{:08X}, {:08X})",
                    code_base, new_code_end, existing.code_base, existing_code_end);
+      return false;
+    }
+    if ((uint64_t(function_table_base) < existing_image_end &&
+         new_table_end > existing.image_base) ||
+        (uint64_t(existing.function_table_base) < new_image_end &&
+         existing_table_end > image_base)) {
+      REXLOG_ERROR(
+          "Module image/function-table overlap: new image={:08X}-{:08X} "
+          "table={:08X}-{:08X}, existing image={:08X}-{:08X} table={:08X}-{:08X}",
+          image_base, new_image_end, function_table_base, new_table_end,
+          existing.image_base, existing_image_end, existing.function_table_base,
+          existing_table_end);
+      return false;
+    }
+    if (uint64_t(function_table_base) < existing_table_end &&
+        new_table_end > existing.function_table_base) {
+      REXLOG_ERROR("Function table range [{:08X}, {:08X}) overlaps existing [{:08X}, {:08X})",
+                   function_table_base, new_table_end, existing.function_table_base,
+                   existing_table_end);
       return false;
     }
   }
@@ -219,6 +269,7 @@ bool FunctionDispatcher::InitializeFunctionTable(uint32_t code_base, uint32_t co
       .image_base = image_base,
       .image_size = image_size,
       .function_table_base = function_table_base,
+      .function_table_size = static_cast<uint32_t>(table_allocation_size),
       .next_thunk_address = code_base + code_size,
       .thunk_limit = code_base + code_size + kThunkReserveSize,
   });
