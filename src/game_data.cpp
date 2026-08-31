@@ -43,6 +43,16 @@ constexpr std::array<const char*, 7> kRequiredFiles = {{
     "data/player_dll/dllSoma.dll",
 }};
 
+constexpr std::array<const char*, 7> kRequiredTu2PatchFiles = {{
+    "default.xexp",
+    "data/player_dll/dllAlucard.dllp",
+    "data/player_dll/dllAxeArmor.dllp",
+    "data/player_dll/dllCharlotte.dllp",
+    "data/player_dll/dllJonathan.dllp",
+    "data/player_dll/dllShanoa.dllp",
+    "data/player_dll/dllSoma.dllp",
+}};
+
 uint32_t ReadBe32(const uint8_t* value) {
   return (uint32_t(value[0]) << 24) | (uint32_t(value[1]) << 16) |
          (uint32_t(value[2]) << 8) | uint32_t(value[3]);
@@ -174,6 +184,22 @@ ValidationResult ValidatePayload(const fs::path& root) {
     }
   }
 
+  result.valid = result.errors.empty();
+  return result;
+}
+
+ValidationResult ValidateTu2Payload(const fs::path& root) {
+  ValidationResult result = ValidatePayload(root);
+  if (!result.valid) return result;
+
+  std::error_code ec;
+  for (const char* relative : kRequiredTu2PatchFiles) {
+    const fs::path candidate = root / fs::path(relative);
+    if (!fs::is_regular_file(candidate, ec) || fs::file_size(candidate, ec) == 0) {
+      result.errors.push_back(std::string("missing required TU2 patch sidecar: ") + relative);
+    }
+    ec.clear();
+  }
   result.valid = result.errors.empty();
   return result;
 }
@@ -357,6 +383,63 @@ bool ExtractStfs(const fs::path& source, const fs::path& destination, XexIdentit
   return true;
 }
 
+bool PackageContainsTu2Payload(const fs::path& source) {
+  using rex::filesystem::StfsContainerDevice;
+  StfsContainerDevice device("", source);
+  if (!device.Initialize()) return false;
+  constexpr std::array<const char*, 7> required = {{
+      "/default.xexp", "/data/player_dll/dllAlucard.dllp",
+      "/data/player_dll/dllAxeArmor.dllp", "/data/player_dll/dllCharlotte.dllp",
+      "/data/player_dll/dllJonathan.dllp", "/data/player_dll/dllShanoa.dllp",
+      "/data/player_dll/dllSoma.dllp",
+  }};
+  return std::ranges::all_of(required,
+                            [&](const char* path) { return device.ResolvePath(path) != nullptr; });
+}
+
+ValidationResult FinalizeStaging(const fs::path& staging, const fs::path& destination,
+                                 bool replace_existing) {
+  ValidationResult result = ValidateTu2Payload(staging);
+  if (!result.valid) return result;
+  std::string error;
+  if (!WriteInstallMarker(staging, result.identity, error)) {
+    result.valid = false;
+    result.errors.push_back(error);
+    return result;
+  }
+  result = ValidateTu2Root(staging);
+  if (!result.valid) return result;
+
+  std::error_code ec;
+  if (fs::exists(destination) && !replace_existing) {
+    result.valid = false;
+    result.errors.push_back("destination already exists; use --force to replace it");
+    return result;
+  }
+  fs::path backup = destination;
+  backup += ".previous";
+  fs::remove_all(backup, ec);
+  ec.clear();
+  if (fs::exists(destination)) {
+    fs::rename(destination, backup, ec);
+    if (ec) {
+      result.valid = false;
+      result.errors.push_back("cannot replace existing game data: " + ec.message());
+      return result;
+    }
+  }
+  fs::rename(staging, destination, ec);
+  if (ec) {
+    std::error_code restore_error;
+    if (fs::exists(backup)) fs::rename(backup, destination, restore_error);
+    result.valid = false;
+    result.errors.push_back("cannot finalize imported game data: " + ec.message());
+    return result;
+  }
+  fs::remove_all(backup, ec);
+  return result;
+}
+
 }  // namespace
 
 fs::path DefaultRoot() {
@@ -407,6 +490,132 @@ ValidationResult ValidateRoot(const fs::path& root) {
     result.errors.push_back(
         "installation is not transactionally verified; import it with harmonyrecomp-import");
   }
+  return result;
+}
+
+ValidationResult ValidateTu2Source(const fs::path& root) {
+  return ValidateTu2Payload(root);
+}
+
+ValidationResult ValidateTu2Root(const fs::path& root) {
+  ValidationResult result = ValidateRoot(root);
+  if (!result.valid) return result;
+
+  std::error_code ec;
+  for (const char* relative : kRequiredTu2PatchFiles) {
+    const fs::path candidate = root / fs::path(relative);
+    if (!fs::is_regular_file(candidate, ec) || fs::file_size(candidate, ec) == 0) {
+      result.errors.push_back(std::string("missing required TU2 patch sidecar: ") + relative);
+    }
+    ec.clear();
+  }
+  result.valid = result.errors.empty();
+  return result;
+}
+
+AggregateInventory DiscoverPackages(const fs::path& source) {
+  using rex::filesystem::StfsContainerDevice;
+  using rex::system::XContentType;
+  AggregateInventory inventory;
+  std::error_code ec;
+  if (!fs::is_directory(source, ec)) {
+    inventory.errors.push_back("selected source folder does not exist");
+    return inventory;
+  }
+  for (fs::recursive_directory_iterator it(source, fs::directory_options::none, ec), end;
+       it != end; it.increment(ec)) {
+    if (ec) break;
+    if (it->is_symlink(ec)) {
+      it.disable_recursion_pending();
+      inventory.unrelated_files.push_back(it->path());
+      continue;
+    }
+    if (!it->is_regular_file(ec)) continue;
+    auto header = StfsContainerDevice::ReadPackageHeader(it->path());
+    if (!header) {
+      inventory.unrelated_files.push_back(it->path());
+      continue;
+    }
+    if (header->metadata.execution_info.title_id != kTitleId) {
+      inventory.wrong_title_packages.push_back(it->path());
+      continue;
+    }
+    const auto type = header->metadata.content_type;
+    if (type == XContentType::kArcadeTitle) {
+      const auto& info = header->metadata.execution_info;
+      if (info.media_id == kSupportedVersions[0].media_id &&
+          info.version_value == kSupportedVersions[0].version) {
+        inventory.base_packages.push_back(it->path());
+      } else {
+        inventory.errors.push_back("unsupported Harmony base package: " + it->path().string());
+      }
+    } else if (type == XContentType::kInstaller && PackageContainsTu2Payload(it->path())) {
+      inventory.update_packages.push_back(it->path());
+    } else if (type == XContentType::kMarketplaceContent) {
+      inventory.dlc_packages.push_back(it->path());
+    } else {
+      inventory.unrelated_files.push_back(it->path());
+    }
+  }
+  if (ec) inventory.errors.push_back("cannot enumerate selected source folder: " + ec.message());
+  std::ranges::sort(inventory.base_packages);
+  std::ranges::sort(inventory.update_packages);
+  std::ranges::sort(inventory.dlc_packages);
+  return inventory;
+}
+
+ValidationResult ImportAggregate(const ImportOptions& options, AggregateInventory* reported) {
+  ValidationResult failure;
+  AggregateInventory inventory = DiscoverPackages(options.source);
+  if (reported) *reported = inventory;
+  failure.errors = inventory.errors;
+  if (inventory.base_packages.empty())
+    failure.errors.push_back("base game package not found");
+  else if (inventory.base_packages.size() != 1)
+    failure.errors.push_back("multiple compatible base game packages found; selection is ambiguous");
+  if (inventory.update_packages.empty())
+    failure.errors.push_back("required TU2 update package not found");
+  else if (inventory.update_packages.size() != 1)
+    failure.errors.push_back("multiple compatible TU2 update packages found; selection is ambiguous");
+  if (!failure.errors.empty()) return failure;
+
+  auto base_header = rex::filesystem::StfsContainerDevice::ReadPackageHeader(
+      inventory.base_packages.front());
+  auto update_header = rex::filesystem::StfsContainerDevice::ReadPackageHeader(
+      inventory.update_packages.front());
+  if (!base_header || !update_header ||
+      base_header->metadata.execution_info.media_id !=
+          update_header->metadata.execution_info.media_id ||
+      base_header->metadata.execution_info.version_value !=
+          update_header->metadata.execution_info.base_version_value) {
+    failure.errors.push_back("base game and TU2 packages are not a compatible pair");
+    return failure;
+  }
+
+  std::error_code ec;
+  fs::path destination = fs::absolute(options.destination, ec).lexically_normal();
+  if (ec || destination == destination.root_path()) {
+    failure.errors.push_back("destination path is invalid");
+    return failure;
+  }
+  fs::path staging = destination;
+  staging += ".importing";
+  fs::remove_all(staging, ec);
+  std::string error;
+  XexIdentity base_identity;
+  if (!ExtractStfs(inventory.base_packages.front(), staging, base_identity, error)) {
+    fs::remove_all(staging, ec);
+    failure.errors.push_back(error);
+    return failure;
+  }
+  XexIdentity update_identity;
+  if (!ExtractStfs(inventory.update_packages.front(), staging, update_identity, error)) {
+    fs::remove_all(staging, ec);
+    failure.errors.push_back(error);
+    return failure;
+  }
+  ValidationResult result = FinalizeStaging(staging, destination, options.replace_existing);
+  if (!result.valid) fs::remove_all(staging, ec);
   return result;
 }
 
@@ -469,7 +678,8 @@ ValidationResult Import(const ImportOptions& options) {
   // The entire source hierarchy remains intact; these checks identify the
   // supported executable layer and do not claim that seven files are the full
   // runtime dataset.
-  ValidationResult result = ValidatePayload(staging);
+  ValidationResult result =
+      options.require_tu2 ? ValidateTu2Payload(staging) : ValidatePayload(staging);
   if (!result.valid) {
     fs::remove_all(staging, ec);
     return result;
@@ -490,7 +700,7 @@ ValidationResult Import(const ImportOptions& options) {
     result.errors.push_back(error);
     return result;
   }
-  result = ValidateRoot(staging);
+  result = options.require_tu2 ? ValidateTu2Root(staging) : ValidateRoot(staging);
   if (!result.valid) {
     fs::remove_all(staging, ec);
     return result;

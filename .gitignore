@@ -2,3 +2,6 @@
 
 # Private Harmony game binaries
 data/player_dll/
+
+# Local launcher configuration (may contain user-specific paths)
+harmonyrecomp-user.cfg

@@ -6,38 +6,59 @@ Despair*. This repository and its releases do not include the original game.
 ## Bring your own game
 
 You must provide files from your own legally obtained Xbox 360 copy. The
-companion importer accepts either:
-
-- the original Xbox 360 STFS/LIVE package; or
-- a complete directory you extracted from that package.
+companion importer accepts a folder containing the original base-game and TU2
+STFS/LIVE packages, with any optional owned DLC packages, or a complete
+already-extracted TU2 directory as an advanced fallback.
 
 ### Windows first run
 
 1. Download and extract `HarmonyRecomp-windows-amd64.zip` to a normal writable
    folder. Do not place original game data inside that folder.
-2. Open PowerShell in the extracted `HarmonyRecomp-windows-amd64` folder.
-3. Import either your owned STFS/LIVE package or its complete extracted folder:
+2. Run `Launch-Harmony.bat`.
+3. On first launch, select the folder containing your legally owned Xbox 360
+   Harmony of Despair content files.
+4. HarmonyRecomp identifies the compatible base game and TU2 update by package
+   metadata, extracts them transactionally into
+   `%LOCALAPPDATA%\HarmonyRecomp\game-data`, and installs detected DLC.
+5. The game starts. Future launches reuse that managed local installation and
+   require no folder selection or command line.
 
-   ```powershell
-   .\harmonyrecomp-import.exe "D:\path\to\owned-package-or-complete-folder"
-   ```
+The source folder must contain the owned base Arcade package and its matching
+TU2 installer package. DLC is optional and never prevents base/TU2 setup.
+Package filenames do not matter: identification uses Xbox content type, Title
+ID, Media ID, version metadata, and required package contents. The importer
+stages and validates a replacement before promotion, so a failed import does
+not replace a working installation.
 
-4. Confirm the transactional installation without starting the game:
+Run `Launch-Harmony.bat --setup` to choose and safely re-import a different
+source. Deleting `%LOCALAPPDATA%\HarmonyRecomp\game-data` also triggers setup on
+the next launch. The launcher always passes this managed directory explicitly
+as both `--game_data_root` and `--update_data_root`; it never silently launches
+against an incomplete base-only installation.
 
-   ```powershell
-   .\harmonyrecomp-import.exe --verify
-   ```
+The optional `harmonyrecomp-user.example.cfg` contains advanced runtime
+settings only. Ordinary setup does not require copying or editing a config.
+`harmonyrecomp-user.cfg` remains ignored by Git because it may contain local
+identity settings.
 
-5. Start the game with:
+### Advanced import
 
-   ```powershell
-   .\harmonyrecomp.exe --license_mask=1
-   ```
+The launcher is the normal setup path. The companion importer also exposes its
+container discovery and aggregate operation directly:
 
-The importer stores the verified private data under
-`%LOCALAPPDATA%\HarmonyRecomp\game-data`. A normal launch discovers that
-location automatically. Launching `harmonyrecomp.exe` before importing shows a
-clear missing-data message and exits without starting the runtime.
+```powershell
+.\harmonyrecomp-import.exe --inspect-containers "D:\Owned Harmony Content"
+.\harmonyrecomp-import.exe --aggregate "D:\Owned Harmony Content" --force --install-dlc
+.\harmonyrecomp-import.exe --verify
+```
+
+An already extracted complete TU2 hierarchy remains supported as an advanced
+fallback. Ordinary users do not need to extract XEX, XEXP, DLLP, or DLC files
+manually.
+
+The importer stores verified private data under
+`%LOCALAPPDATA%\HarmonyRecomp\game-data`. `Launch-Harmony.bat` invokes the same
+importer with TU2 validation and atomic replacement enabled.
 
 For development, bypass the managed installation with an explicit complete
 game-data directory:
@@ -62,15 +83,14 @@ complete source hierarchy; the seven executable files are validation anchors,
 not a seven-file runtime package. A source containing only those seven private
 build inputs is rejected as incomplete gameplay data.
 
-The currently supported base-game identity is:
+The currently supported executable chain is:
 
-- Title ID: `58410A7A`
-- Media ID: `6480C08F`
-- Version: `0.0.1.4`
+- Title ID `58410A7A`, Media ID `6480C08F`
+- base game `0.0.1.4`
+- matching TU2 patch to `0.0.2.4`
 
-Other legitimate versions and title updates will receive a clear unsupported
-version error until they are individually tested and added to the compatibility
-table.
+Other legitimate base versions and title updates remain unsupported until they
+are individually tested and added to the compatibility table.
 
 ## Private game-data location
 

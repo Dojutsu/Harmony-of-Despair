@@ -22,16 +22,31 @@ struct ValidationResult {
   std::vector<std::string> errors;
 };
 
+struct AggregateInventory {
+  std::vector<std::filesystem::path> base_packages;
+  std::vector<std::filesystem::path> update_packages;
+  std::vector<std::filesystem::path> dlc_packages;
+  std::vector<std::filesystem::path> wrong_title_packages;
+  std::vector<std::filesystem::path> unrelated_files;
+  std::vector<std::string> errors;
+};
+
 std::filesystem::path DefaultRoot();
 std::string FormatVersion(uint32_t version);
 ValidationResult ValidateRoot(const std::filesystem::path& root);
+ValidationResult ValidateTu2Source(const std::filesystem::path& root);
+ValidationResult ValidateTu2Root(const std::filesystem::path& root);
+AggregateInventory DiscoverPackages(const std::filesystem::path& source);
 
 struct ImportOptions {
   std::filesystem::path source;
   std::filesystem::path destination;
   bool replace_existing = false;
+  bool require_tu2 = false;
 };
 
 ValidationResult Import(const ImportOptions& options);
+ValidationResult ImportAggregate(const ImportOptions& options,
+                                 AggregateInventory* inventory = nullptr);
 
 }  // namespace harmony::game_data

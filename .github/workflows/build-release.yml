@@ -51,7 +51,7 @@ jobs:
             "$build/librexgpu-xenosrd.so" \
             "$runtime/librexruntimerd.so" "$runtime/libTracyClientrd.so" \
             dist/HarmonyRecomp-linux-amd64/
-          if find dist -type f \( -iname '*.xex' -o -iname '*.dll' \) -print -quit | grep -q .; then
+          if find dist -type f \( -iname '*.xex' -o -iname '*.xexp' -o -iname '*.dllp' -o -iname 'savedata.dat' -o -iname '*.dll' \) -print -quit | grep -q .; then
             echo "Refusing to package private game inputs" >&2
             exit 1
           fi
@@ -226,9 +226,17 @@ jobs:
             }
             Copy-Item -LiteralPath $source -Destination $root
           }
-          Copy-Item -LiteralPath README.md -Destination $root
+          $publicFiles = @(
+            'README.md',
+            'Launch-Harmony.bat',
+            'Setup-Harmony.ps1',
+            'harmonyrecomp-user.example.cfg'
+          )
+          foreach ($name in $publicFiles) {
+            Copy-Item -LiteralPath $name -Destination $root
+          }
 
-          $allowed = @($required + 'README.md')
+          $allowed = @($required + $publicFiles)
           $actual = @(Get-ChildItem -LiteralPath $root -File | ForEach-Object Name)
           $unexpected = @($actual | Where-Object { $_ -notin $allowed })
           $missing = @($allowed | Where-Object { $_ -notin $actual })
@@ -237,7 +245,8 @@ jobs:
           }
 
           $forbidden = @(Get-ChildItem -LiteralPath dist -Recurse -File | Where-Object {
-            $_.Extension -ieq '.xex' -or
+            $_.Extension -iin @('.xex', '.xexp', '.dllp') -or
+            $_.Name -ieq 'savedata.dat' -or
             $_.Name -iin @('default.xex', 'dllAlucard.dll', 'dllAxeArmor.dll',
               'dllCharlotte.dll', 'dllJonathan.dll', 'dllShanoa.dll', 'dllSoma.dll')
           })

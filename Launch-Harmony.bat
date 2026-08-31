@@ -1,0 +1,19 @@
+@echo off
+setlocal
+
+set "HARMONY_ROOT=%~dp0"
+set "HARMONY_SETUP_ARG="
+
+if /i "%~1"=="--setup" (
+  set "HARMONY_SETUP_ARG=-Setup"
+) else if /i "%~1"=="--reimport" (
+  set "HARMONY_SETUP_ARG=-Setup"
+) else if not "%~1"=="" (
+  echo Usage: Launch-Harmony.bat [--setup]
+  exit /b 2
+)
+
+powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass ^
+  -File "%HARMONY_ROOT%Setup-Harmony.ps1" %HARMONY_SETUP_ARG%
+
+exit /b %ERRORLEVEL%

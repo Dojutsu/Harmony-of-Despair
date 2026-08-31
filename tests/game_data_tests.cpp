@@ -54,6 +54,14 @@ void Populate(const fs::path& root, uint32_t title_id = 0x58410A7A,
   std::ofstream(root / "data/assets/synthetic.dat") << "synthetic";
 }
 
+void AddTu2Sidecars(const fs::path& root) {
+  std::ofstream(root / "default.xexp", std::ios::binary) << "synthetic-tu2";
+  for (const char* name : {"dllAlucard.dllp", "dllAxeArmor.dllp", "dllCharlotte.dllp",
+                           "dllJonathan.dllp", "dllShanoa.dllp", "dllSoma.dllp"}) {
+    std::ofstream(root / "data/player_dll" / name, std::ios::binary) << "synthetic-tu2";
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -72,6 +80,9 @@ int main() {
   Populate(base / "valid");
   if (!Check(!harmony::game_data::ValidateRoot(base / "valid").valid,
              "uninstalled payload must be rejected"))
+    return 1;
+  if (!Check(!harmony::game_data::ValidateTu2Source(base / "valid").valid,
+             "base-only source must fail TU2 validation"))
     return 1;
 
   Populate(base / "wrong-title", 0x12345678);
@@ -108,6 +119,30 @@ int main() {
   if (!Check(imported.valid, "valid payload must import")) return 1;
   if (!Check(harmony::game_data::ValidateRoot(import.destination).valid,
              "imported payload must validate"))
+    return 1;
+
+  std::cout << "Checking TU2-required transactional import" << std::endl;
+  Populate(base / "tu2-valid");
+  AddTu2Sidecars(base / "tu2-valid");
+  harmony::game_data::ImportOptions tu2_import;
+  tu2_import.source = base / "tu2-valid";
+  tu2_import.destination = base / "tu2-installed";
+  tu2_import.require_tu2 = true;
+  if (!Check(harmony::game_data::Import(tu2_import).valid,
+             "complete TU2 source must import"))
+    return 1;
+  if (!Check(harmony::game_data::ValidateTu2Root(tu2_import.destination).valid,
+             "imported TU2 installation must validate"))
+    return 1;
+
+  Populate(base / "base-only-replacement");
+  tu2_import.source = base / "base-only-replacement";
+  tu2_import.replace_existing = true;
+  if (!Check(!harmony::game_data::Import(tu2_import).valid,
+             "base-only replacement must fail TU2 import"))
+    return 1;
+  if (!Check(harmony::game_data::ValidateTu2Root(tu2_import.destination).valid,
+             "failed TU2 replacement must preserve the working installation"))
     return 1;
 
   auto refused_existing = harmony::game_data::Import(import);

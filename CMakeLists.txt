@@ -39,6 +39,7 @@ rexglue_setup_target(harmonyrecomp GPU_PLUGINS xenos)
 add_executable(harmonyrecomp-import
     tools/import_main.cpp
     src/game_data.cpp
+    src/dlc_manifest.cpp
 )
 target_include_directories(harmonyrecomp-import PRIVATE src)
 target_link_libraries(harmonyrecomp-import PRIVATE rex::runtime)
@@ -89,6 +90,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/crypto/sha256.cpp")
     add_test(NAME sha256-known-vectors COMMAND sha256_tests)
 
     target_link_libraries(harmonyrecomp-dlc-import PRIVATE sha256_lib)
+    target_link_libraries(harmonyrecomp-import PRIVATE sha256_lib)
 
     add_executable(dlc_header_tests
         tests/dlc_header_test.cpp
