@@ -570,8 +570,13 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
           }
         }
 
-        // Emit comment with instruction disassembly
-        emit_println(body, "\t// {} {}", insn.opcode->name, insn.op_str);
+        // Emit comment with instruction disassembly without leaving trailing
+        // whitespace on operand-less instructions such as blr and bctrl.
+        if (insn.op_str[0] == '\0') {
+          emit_println(body, "\t// {}", insn.opcode->name);
+        } else {
+          emit_println(body, "\t// {} {}", insn.opcode->name, insn.op_str);
+        }
 
         // Check for mid-asm hook BEFORE instruction
         auto hookIt = ctx.config.midAsmHooks.find(blockBase);

@@ -3,6 +3,7 @@
 # Core recompiler sources
 set(CODEGEN_CORE_SOURCES
     codegen.cpp
+    dispatch_table_layout.cpp
     codegen_flags.cpp
     analyze.cpp
     code_emitter.cpp
@@ -114,4 +115,3 @@ target_link_libraries(rexcodegen
         xxHash::xxhash
         simde
 )
-

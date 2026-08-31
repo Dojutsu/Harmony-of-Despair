@@ -106,6 +106,13 @@ std::optional<ManifestConfig> ManifestConfig::Load(const std::filesystem::path& 
   if (auto root = (*project)["game_root"].value<std::string>(); root && !root->empty()) {
     manifest.gameRoot = *root;
   }
+  if (auto base = (*project)["function_table_region_base"].value<int64_t>()) {
+    if (*base < 0 || static_cast<uint64_t>(*base) > UINT32_MAX) {
+      REXLOG_ERROR("Manifest [project].function_table_region_base is outside uint32 range");
+      return std::nullopt;
+    }
+    manifest.functionTableRegionBase = static_cast<uint32_t>(*base);
+  }
 
   auto* entrypoint = tbl["entrypoint"].as_table();
   if (!entrypoint) {

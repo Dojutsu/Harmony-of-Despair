@@ -26,6 +26,7 @@
 #include <rex/codegen/codegen_context.h>
 #include <rex/codegen/codegen_writer.h>
 #include <rex/codegen/config.h>
+#include <rex/codegen/dispatch_table_layout.h>
 #include <rex/codegen/output_stamp.h>
 #include <rex/codegen/progress_reporter.h>
 #include <rex/codegen/template_registry.h>
@@ -124,6 +125,11 @@ void ReportBinaryInfo(ProgressReporter* reporter, std::string_view display_name,
 ProjectRecompiler::ProjectRecompiler(ManifestConfig manifest) : manifest_(std::move(manifest)) {}
 
 Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
+  if (manifest_.functionTableRegionBase && !opts.targets.empty()) {
+    return Err<void>(ErrorCategory::Validation,
+                     "centralized dispatch-table layout requires a full manifest generation; "
+                     "targeted generation would produce an incomplete address inventory");
+  }
   namespace fs = std::filesystem;
 
   deletedFiles_.clear();
@@ -261,37 +267,6 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
   ReportBinaryInfo(opts.reporter, entry_display_name,
                    *runtime->kernel_state()->GetExecutableModule()->xex_module());
 
-  std::vector<rex::system::object_ref<rex::system::UserModule>> dllModules;
-  for (size_t i = 1; i < targeted.size(); ++i) {
-    const auto& dllConfig = targeted[i].config;
-    fs::path dllXexPath = configDir / dllConfig.filePath;
-    if (!fs::exists(dllXexPath)) {
-      return Err<void>(ErrorCategory::IO,
-                       fmt::format("DLL XEX not found: {}", dllXexPath.string()));
-    }
-    dllXexPath = fs::canonical(dllXexPath);
-
-    auto relPath = fs::relative(dllXexPath, gameRoot);
-    if (relPath.empty() || *relPath.begin() == "..") {
-      return Err<void>(ErrorCategory::Validation,
-                       fmt::format("DLL '{}' resolves outside game root '{}': {}",
-                                   targeted[i].targetName, gameRoot.string(), dllXexPath.string()));
-    }
-    std::string relStr = relPath.string();
-    std::replace(relStr.begin(), relStr.end(), '/', '\\');
-    auto dllVfsPath = "game:\\" + relStr;
-    auto userMod = runtime->kernel_state()->LoadUserModule(dllVfsPath, false);
-    if (!userMod) {
-      return Err<void>(ErrorCategory::IO,
-                       fmt::format("Failed to load DLL module: {}", targeted[i].targetName));
-    }
-    REXCODEGEN_TRACE("Loaded DLL module '{}' at base 0x{:08X}", targeted[i].targetName,
-                     userMod->xex_module()->base_address());
-    auto dll_display_name = std::filesystem::path(targeted[i].config.filePath).filename().string();
-    ReportBinaryInfo(opts.reporter, dll_display_name, *userMod->xex_module());
-    dllModules.push_back(std::move(userMod));
-  }
-
   struct ContextEntry {
     CodegenContext ctx;
     const ModuleEntry* module;
@@ -328,12 +303,42 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
     contexts.push_back({std::move(ctx), &targeted[0], std::move(entry_display)});
   }
 
-  for (size_t i = 0; i < dllModules.size(); ++i) {
-    auto& userMod = dllModules[i];
+  // BinaryView owns a copy of every mapped section, so DLLs do not need to
+  // remain loaded after their view is created. Load and snapshot modules one
+  // at a time: real projects may contain mutually exclusive DLLs with the same
+  // preferred image range, and loading all of them concurrently would let a
+  // later DLL overwrite an earlier DLL before analysis.
+  for (size_t i = 1; i < targeted.size(); ++i) {
+    const auto& dllConfig = targeted[i].config;
+    fs::path dllXexPath = configDir / dllConfig.filePath;
+    if (!fs::exists(dllXexPath)) {
+      return Err<void>(ErrorCategory::IO,
+                       fmt::format("DLL XEX not found: {}", dllXexPath.string()));
+    }
+    dllXexPath = fs::canonical(dllXexPath);
+
+    auto relPath = fs::relative(dllXexPath, gameRoot);
+    if (relPath.empty() || *relPath.begin() == "..") {
+      return Err<void>(ErrorCategory::Validation,
+                       fmt::format("DLL '{}' resolves outside game root '{}': {}",
+                                   targeted[i].targetName, gameRoot.string(), dllXexPath.string()));
+    }
+    std::string relStr = relPath.string();
+    std::replace(relStr.begin(), relStr.end(), '/', '\\');
+    auto dllVfsPath = "game:\\" + relStr;
+    auto userMod = runtime->kernel_state()->LoadUserModule(dllVfsPath, false);
+    if (!userMod) {
+      return Err<void>(ErrorCategory::IO,
+                       fmt::format("Failed to load DLL module: {}", targeted[i].targetName));
+    }
+    REXCODEGEN_TRACE("Loaded DLL module '{}' at base 0x{:08X}", targeted[i].targetName,
+                     userMod->xex_module()->base_address());
+    auto dll_display_name = std::filesystem::path(targeted[i].config.filePath).filename().string();
+    ReportBinaryInfo(opts.reporter, dll_display_name, *userMod->xex_module());
     auto bv = BinaryView::fromModule(*userMod->xex_module());
 
-    auto dll_display = make_display_name(targeted[i + 1].config.filePath);
-    RecompilerConfig cfg = std::move(targeted[i + 1].config);
+    auto dll_display = make_display_name(targeted[i].config.filePath);
+    RecompilerConfig cfg = std::move(targeted[i].config);
     if (opts.enableExceptionHandlers)
       cfg.generateExceptionHandlers = true;
 
@@ -347,7 +352,49 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
     ctx.setDllModule(ctx.Config().isDll.value_or(true));
     ctx.setHasDllModules(true);
 
-    contexts.push_back({std::move(ctx), &targeted[i + 1], std::move(dll_display)});
+    contexts.push_back({std::move(ctx), &targeted[i], std::move(dll_display)});
+    runtime->kernel_state()->UnloadUserModule(userMod, false);
+  }
+
+  if (manifest_.functionTableRegionBase) {
+    std::vector<DispatchTableLayoutInput> layout_inputs;
+    layout_inputs.reserve(contexts.size());
+    for (const auto& entry : contexts) {
+      uint64_t code_min = UINT32_MAX;
+      uint64_t code_max = 0;
+      for (const auto& section : entry.ctx.binary().sections()) {
+        if (!section.executable) {
+          continue;
+        }
+        code_min = std::min<uint64_t>(code_min, section.baseAddress);
+        code_max = std::max<uint64_t>(code_max, uint64_t(section.baseAddress) + section.size);
+      }
+      if (code_min == UINT32_MAX || code_max <= code_min || code_max > UINT32_MAX) {
+        return Err<void>(ErrorCategory::Validation,
+                         fmt::format("'{}' has an invalid executable code range",
+                                     entry.display_name));
+      }
+      layout_inputs.push_back({entry.display_name, entry.ctx.binary().baseAddress(),
+                               entry.ctx.binary().imageSize(), static_cast<uint32_t>(code_min),
+                               static_cast<uint32_t>(code_max - code_min)});
+    }
+
+    auto layout = BuildDispatchTableLayout(*manifest_.functionTableRegionBase, layout_inputs);
+    if (!layout.success) {
+      return Err<void>(ErrorCategory::Validation, layout.error);
+    }
+    if (layout.entries.size() != contexts.size()) {
+      return Err<void>(ErrorCategory::Validation,
+                       "dispatch-table allocator returned an incomplete layout");
+    }
+    for (size_t i = 0; i < contexts.size(); ++i) {
+      contexts[i].ctx.Config().functionTableBase = layout.entries[i].table_base;
+    }
+    REXCODEGEN_INFO(
+        "Dispatch-table layout: {} images, highest image end 0x{:08X}, region "
+        "0x{:08X}-0x{:08X}",
+        contexts.size(), layout.highest_image_end, *manifest_.functionTableRegionBase,
+        layout.region_end);
   }
 
   skippedModules_.clear();
@@ -392,21 +439,6 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
       } else {
         REXLOG_ERROR("Analysis failed for '{}'", entry.module->targetName);
         return result;
-      }
-    }
-  }
-
-  for (size_t i = 0; i < contexts.size(); ++i) {
-    uint32_t a_base = contexts[i].ctx.binary().baseAddress();
-    uint32_t a_end = a_base + contexts[i].ctx.binary().imageSize();
-    for (size_t j = i + 1; j < contexts.size(); ++j) {
-      uint32_t b_base = contexts[j].ctx.binary().baseAddress();
-      uint32_t b_end = b_base + contexts[j].ctx.binary().imageSize();
-      if (a_base < b_end && b_base < a_end) {
-        return Err<void>(ErrorCategory::Validation,
-                         fmt::format("Module '{}' [{:08X}, {:08X}) overlaps '{}' [{:08X}, {:08X})",
-                                     contexts[i].module->targetName, a_base, a_end,
-                                     contexts[j].module->targetName, b_base, b_end));
       }
     }
   }
@@ -528,9 +560,9 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
     dllTargetsData["project"] = manifest_.projectName;
     auto& dllTargetsArray = dllTargetsData["dll_modules"];
     dllTargetsArray = nlohmann::json::array();
-    for (size_t i = 0; i < dllModules.size(); ++i) {
-      auto& mod = targeted[i + 1];
-      auto& dllCtx = contexts[i + 1].ctx;
+    for (size_t i = 1; i < targeted.size(); ++i) {
+      auto& mod = targeted[i];
+      auto& dllCtx = contexts[i].ctx;
       nlohmann::json entry;
       entry["target_name"] = mod.targetName;
       entry["lib_name"] = manifest_.projectName + "_" + mod.targetName;
