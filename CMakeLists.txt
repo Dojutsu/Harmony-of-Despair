@@ -88,6 +88,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/crypto/sha256.cpp")
     add_test(NAME sha256-known-vectors COMMAND sha256_tests)
 
     target_link_libraries(harmonyrecomp-dlc-import PRIVATE sha256_lib)
+
+    add_executable(dlc_header_tests
+        tests/dlc_header_test.cpp
+        src/dlc_manifest.cpp
+    )
+    target_include_directories(dlc_header_tests PRIVATE src)
+    target_link_libraries(dlc_header_tests PRIVATE rex::runtime sha256_lib)
+    add_test(NAME dlc-marketplace-header COMMAND dlc_header_tests)
 else()
     message(WARNING "SHA-256 test source not found")
 endif()

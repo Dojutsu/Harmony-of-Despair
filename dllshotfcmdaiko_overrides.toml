@@ -1,0 +1,9 @@
+# Function-discovery corrections for the owned mdaiko DLC projectile module.
+# Preserve runtime-reached entry points in source configuration.
+
+[functions]
+# Runtime reaches this standalone one-time initializer after registration. It
+# checks a module global, initializes two globals once, returns zero, and ends
+# with BLR at 0x848A1340. Its exact end is 0x848A1344, followed by one padding
+# instruction before the next discovered function at 0x848A1348.
+0x848A1318 = { end = 0x848A1344 }

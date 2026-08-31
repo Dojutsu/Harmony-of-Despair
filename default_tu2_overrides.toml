@@ -1,0 +1,143 @@
+# TU2-specific function-discovery corrections for the Harmony entrypoint.
+#
+# The 0.0.1.4 addresses in default_overrides.toml are intentionally not
+# inherited. Add an override here only after matching the TU2 function by
+# instructions, callers, and purpose.
+
+# Keep the entrypoint dispatch table clear of the loadable player/DLC module
+# range. This address is a host-side generated table location, not a guest
+# function address, so it remains valid across the TU2 migration.
+
+[functions]
+
+# TU2 equivalents of the nine virtual-call tail thunks from the 0.0.1.4
+# image. Unique functions immediately before and after the cluster map
+# 0x82212FB8..0x822130C8 to 0x822230F0..0x82223200, preserving the nine
+# consecutive 16-byte thunk bodies in the intervening gap.
+0x82223170 = { end = 0x82223180 }
+0x82223180 = { end = 0x82223190 }
+0x82223190 = { end = 0x822231A0 }
+0x822231A0 = { end = 0x822231B0 }
+0x822231B0 = { end = 0x822231C0 }
+0x822231C0 = { end = 0x822231D0 }
+0x822231D0 = { end = 0x822231E0 }
+0x822231E0 = { end = 0x822231F0 }
+0x822231F0 = { end = 0x82223200 }
+
+# TU2 equivalents of durable indirect callbacks omitted by automatic
+# discovery. Each range is bounded by matched neighboring functions and is
+# rechecked against the generated PPC body after regeneration.
+0x822CB278 = { end = 0x822CB2C0 }
+0x825A7458 = { end = 0x825A746C }
+0x825BBD10 = { end = 0x825BBD20 }
+0x825D5E38 = { end = 0x825D5E50 }
+# The migrated classifier ends in a tail branch at 0x8260F624. TU2 adds a
+# separately referenced two-instruction entry in the following eight-byte gap;
+# runtime boot reaches it directly, so preserve both exact boundaries.
+0x8260F5C0 = { end = 0x8260F628 }
+0x8260F628 = { end = 0x8260F630 }
+0x8246E290 = { end = 0x8246E2AC }
+0x823AFE48 = { end = 0x823AFE58 }
+
+# TU2 equivalent of the old 0x8264D278 virtual tail dispatcher. The matched
+# neighbors bound the same 24-byte discovery gap, reached when Start advances
+# into the player/menu initialization path.
+0x82669828 = { end = 0x82669840 }
+
+# This-adjusting tail thunk corresponding to the old 0x82647CD8 callback.
+# Its new branch destination is verified from the TU2 body rather than copied
+# from the old absolute target.
+0x82664198 = { end = 0x826641A0 }
+
+# TU2-native tail thunk. Adjusts the interface pointer by eight bytes before
+# dispatching to the implementation at 0x8265F248.
+0x826609B0 = { end = 0x826609B8 }
+
+# TU2-native one-instruction tail thunk used by two direct branches.
+0x8266EB68 = { end = 0x8266EB6C }
+
+# TU2 equivalent of the resume dispatcher/shared-register CFG repair. The
+# child entry remains a genuine externally referenced target, but executes in
+# the register context established by the parent dispatcher.
+0x8279B498 = { end = 0x8279BA10 }
+0x8279B5E8 = { parent = 0x8279B498, end = 0x8279BA10, share_registers = true }
+
+# Static callable targets referenced by mapped non-executable data tables.
+# data refs=60, first reference=0x821E15A0
+0x8223FBA8 = {}
+# data refs=1, first reference=0x821E19E4
+0x82250800 = {}
+# data refs=1, first reference=0x821E19E8
+0x82250828 = {}
+# data refs=1, first reference=0x821D7AF8
+0x823989B0 = {}
+# data refs=1, first reference=0x821EBED4
+0x824CCC58 = {}
+# data refs=2, first reference=0x821EDDC8
+0x82508500 = {}
+# data refs=1, first reference=0x821F4CE8
+0x825C3D88 = {}
+# data refs=1, first reference=0x821F50EC
+0x825CF458 = {}
+# data refs=1, first reference=0x821F59A0
+0x825DE038 = {}
+# data refs=2, first reference=0x821F65B0
+0x82601D60 = {}
+# data refs=2, first reference=0x821F6610
+0x826028A8 = {}
+# data refs=1, first reference=0x821F68B8
+0x82606478 = {}
+# data refs=1, first reference=0x821F695C
+0x82609840 = {}
+# data refs=1, first reference=0x821F6960
+0x826098C0 = {}
+# data refs=1, first reference=0x821F6AD0
+0x826112C0 = {}
+# data refs=1, first reference=0x821F6ACC
+0x826112D0 = {}
+# data refs=1, first reference=0x821F6AE4
+0x826112E0 = {}
+# data refs=1, first reference=0x821F6AEC
+0x826112F0 = {}
+# data refs=1, first reference=0x821F6AF0
+0x82611300 = {}
+# data refs=5, first reference=0x82001830
+0x82664170 = {}
+# data refs=5, first reference=0x8200181C
+0x82664178 = {}
+# data refs=5, first reference=0x82001840
+0x82664180 = {}
+# data refs=1, first reference=0x82001864
+0x82664188 = {}
+# data refs=3, first reference=0x82001818
+0x826641A0 = {}
+# data refs=5, first reference=0x8200185C
+0x82668F68 = {}
+# data refs=5, first reference=0x8200182C
+0x82668F70 = {}
+# data refs=5, first reference=0x82001828
+0x82668F78 = {}
+# data refs=5, first reference=0x8200183C
+0x82668F80 = {}
+# data refs=5, first reference=0x82001824
+0x82668F88 = {}
+# data refs=1, first reference=0x82001C0C
+0x82668F90 = {}
+# data refs=5, first reference=0x82001860
+0x82669230 = {}
+# data refs=5, first reference=0x8200184C
+0x82669238 = {}
+# data refs=5, first reference=0x82001820
+0x82669240 = {}
+# data refs=2, first reference=0x82001BC0
+0x82669248 = {}
+# data refs=5, first reference=0x82001854
+0x82669250 = {}
+# data refs=1, first reference=0x82001D34
+0x8266A480 = {}
+# data refs=1, first reference=0x82001DF8
+0x8266B1D0 = {}
+# data refs=1, first reference=0x82001FEC
+0x8266DF58 = {}
+# data refs=2, first reference=0x82005EE0
+0x8267DB28 = {}

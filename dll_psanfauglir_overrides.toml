@@ -1,0 +1,9 @@
+# Static callable coverage for dll/enemy/DLL_PSanfauglir.dll.
+# Targets are referenced by mapped non-executable data tables and were outside
+# every automatically discovered function before these source-level overrides.
+
+[functions]
+# data refs=1, first reference=0x88E01DAC
+0x88E11788 = {}
+# data refs=1, first reference=0x88E300B4
+0x88E1FAD8 = {}

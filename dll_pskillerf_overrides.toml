@@ -1,0 +1,9 @@
+# Static callable coverage for dll/enemy/DLL_PSkillerf.dll.
+# Targets are referenced by mapped non-executable data tables and were outside
+# every automatically discovered function before these source-level overrides.
+
+[functions]
+# data refs=1, first reference=0x88701D98
+0x88711830 = {}
+# data refs=1, first reference=0x887300B0
+0x8871F0B8 = {}

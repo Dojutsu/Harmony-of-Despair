@@ -1,0 +1,9 @@
+# Function-discovery corrections for the owned Simon DLC gshuriken projectile
+# module. Preserve runtime-reached entry points in source configuration.
+
+[functions]
+# Runtime reaches this standalone one-time initializer after registration. It
+# checks a module global, initializes two globals once, returns zero, and ends
+# with BLR at 0x849A1500. Its exact end is 0x849A1504, followed by one padding
+# instruction before the next discovered function at 0x849A1508.
+0x849A14D8 = { end = 0x849A1504 }

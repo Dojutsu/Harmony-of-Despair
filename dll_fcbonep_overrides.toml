@@ -1,0 +1,9 @@
+# Static callable coverage for dll/enemy/DLL_FCbonep.dll.
+# Targets are referenced by mapped non-executable data tables and were outside
+# every automatically discovered function before these source-level overrides.
+
+[functions]
+# data refs=1, first reference=0x88101DAC
+0x88111970 = {}
+# data refs=1, first reference=0x881300B0
+0x8811ED48 = {}

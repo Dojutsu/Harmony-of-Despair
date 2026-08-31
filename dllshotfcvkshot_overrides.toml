@@ -1,0 +1,9 @@
+# Function-discovery corrections for the owned Simon DLC Vampire Killer
+# projectile module. Keep these in source configuration so regeneration cannot
+# silently remove runtime-reached entry points.
+
+[functions]
+# Runtime-reached standalone leaf in the gap immediately before the next
+# discovered function at 0x83CA14B8. Its final BLR is at 0x83CA14B0; the
+# function therefore ends at 0x83CA14B4, followed by one padding instruction.
+0x83CA1488 = { end = 0x83CA14B4 }

@@ -1,0 +1,9 @@
+# Static callable coverage for dll/enemy/DLL_FCwhitedra.dll.
+# Targets are referenced by mapped non-executable data tables and were outside
+# every automatically discovered function before these source-level overrides.
+
+[functions]
+# data refs=1, first reference=0x88601DDC
+0x88611AD0 = {}
+# data refs=1, first reference=0x886300B0
+0x8861FC78 = {}

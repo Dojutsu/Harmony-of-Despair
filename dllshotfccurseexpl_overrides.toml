@@ -1,0 +1,11 @@
+# Function-discovery corrections for the owned Simon DLC curse-explosion
+# projectile module. Keep runtime-reached entry points here so regeneration
+# cannot silently remove them.
+
+[functions]
+# Runtime reaches this standalone one-time initializer immediately after the
+# module is registered. The preceding discovered function ends at 0x84921818.
+# This function checks and initializes two module globals, returns zero, and
+# ends with BLR at 0x84921840; it therefore ends at 0x84921844. One padding
+# instruction separates it from the next discovered function at 0x84921848.
+0x84921818 = { end = 0x84921844 }

@@ -1,0 +1,9 @@
+# Static callable coverage for dll/enemy/DLL_FuKyokotsu.dll.
+# Targets are referenced by mapped non-executable data tables and were outside
+# every automatically discovered function before these source-level overrides.
+
+[functions]
+# data refs=1, first reference=0x892020FC
+0x89211D68 = {}
+# data refs=1, first reference=0x892300B0
+0x89221B58 = {}

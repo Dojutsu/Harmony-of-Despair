@@ -1,0 +1,7 @@
+# Static callable coverage for dll/shot/dllshotFCaxe.dll.
+# Targets are referenced by mapped non-executable data tables and were outside
+# every automatically discovered function before these source-level overrides.
+
+[functions]
+# data refs=1, first reference=0x839B00B0
+0x839A16D8 = {}

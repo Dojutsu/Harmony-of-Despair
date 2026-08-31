@@ -78,7 +78,7 @@ class HarmonyrecompApp : public rex::ReXApp {
     if (rex::cvar::GetFlagSource("session_directory_build_id") ==
         rex::cvar::Source::kDefault) {
       rex::cvar::SetFlagByName("session_directory_build_id",
-                              "harmony-0.0.1.4-p1");
+                              "harmony-0.0.2.4-p1");
     }
   }
   // void OnPostInitLogging() override {}

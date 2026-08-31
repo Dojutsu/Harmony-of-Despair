@@ -3,3 +3,7 @@
 
 [functions]
 0x83269E18 = { end = 0x83269E48 }
+
+# Static callable targets referenced by mapped non-executable data tables.
+# data refs=1, first reference=0x83270020
+0x83269DF8 = {}

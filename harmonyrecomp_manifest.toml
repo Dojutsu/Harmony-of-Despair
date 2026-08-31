@@ -3,45 +3,706 @@
 [project]
 name = "harmonyrecomp"
 sdk_version = "0.10.0"
-game_root = "../harmonygame"
+game_root = "../HarmonyTU2Private/game-data"
+function_table_region_base = 0x8C000000
 
 [entrypoint]
-file_path = "../harmonygame/default.xex"
+file_path = "../HarmonyTU2Private/game-data/default.xex"
 out_directory_path = "generated/default"
-includes = ["default_overrides.toml"]
+includes = ["default_tu2_overrides.toml"]
 
 [[modules]]
 guest_path = "data/player_dll/dllAlucard.dll"
-file_path = "../harmonygame/data/player_dll/dllAlucard.dll"
+file_path = "../HarmonyTU2Private/game-data/data/player_dll/dllAlucard.dll"
 out_directory_path = "generated/dllalucard"
 includes = []
 
 [[modules]]
 guest_path = "data/player_dll/dllAxeArmor.dll"
-file_path = "../harmonygame/data/player_dll/dllAxeArmor.dll"
+file_path = "../HarmonyTU2Private/game-data/data/player_dll/dllAxeArmor.dll"
 out_directory_path = "generated/dllaxearmor"
 includes = []
 
 [[modules]]
 guest_path = "data/player_dll/dllCharlotte.dll"
-file_path = "../harmonygame/data/player_dll/dllCharlotte.dll"
+file_path = "../HarmonyTU2Private/game-data/data/player_dll/dllCharlotte.dll"
 out_directory_path = "generated/dllcharlotte"
 includes = []
 
 [[modules]]
 guest_path = "data/player_dll/dllJonathan.dll"
-file_path = "../harmonygame/data/player_dll/dllJonathan.dll"
+file_path = "../HarmonyTU2Private/game-data/data/player_dll/dllJonathan.dll"
 out_directory_path = "generated/dlljonathan"
 includes = []
 
 [[modules]]
 guest_path = "data/player_dll/dllShanoa.dll"
-file_path = "../harmonygame/data/player_dll/dllShanoa.dll"
+file_path = "../HarmonyTU2Private/game-data/data/player_dll/dllShanoa.dll"
 out_directory_path = "generated/dllshanoa"
 includes = ["dllshanoa_overrides.toml"]
 
 [[modules]]
 guest_path = "data/player_dll/dllSoma.dll"
-file_path = "../harmonygame/data/player_dll/dllSoma.dll"
+file_path = "../HarmonyTU2Private/game-data/data/player_dll/dllSoma.dll"
 out_directory_path = "generated/dllsoma"
 includes = ["dllsoma_overrides.toml"]
+
+[[modules]]
+guest_path = "data/dll/shot/dllshotFCvkshot.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/data/dll/shot/dllshotFCvkshot.dll"
+out_directory_path = "generated/dllshotfcvkshot"
+includes = ["dllshotfcvkshot_overrides.toml"]
+
+[[modules]]
+guest_path = "data/dll/shot/dllshotFCcurseexpl.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/data/dll/shot/dllshotFCcurseexpl.dll"
+out_directory_path = "generated/dllshotfccurseexpl"
+includes = ["dllshotfccurseexpl_overrides.toml"]
+
+[[modules]]
+guest_path = "data/dll/shot/dllshotFCgshuriken.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/data/dll/shot/dllshotFCgshuriken.dll"
+out_directory_path = "generated/dllshotfcgshuriken"
+includes = ["dllshotfcgshuriken_overrides.toml"]
+
+[[modules]]
+guest_path = "data/dll/shot/dllshotFChadouken.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/data/dll/shot/dllshotFChadouken.dll"
+out_directory_path = "generated/dllshotfchadouken"
+includes = ["dllshotfchadouken_overrides.toml"]
+
+[[modules]]
+guest_path = "data/dll/shot/dllshotFCmdaiko.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/data/dll/shot/dllshotFCmdaiko.dll"
+out_directory_path = "generated/dllshotfcmdaiko"
+includes = ["dllshotfcmdaiko_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotGlyphAcerbatus.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotGlyphAcerbatus.dll"
+out_directory_path = "generated/dllshotglyphacerbatus"
+includes = ["dllshotglyphacerbatus_overrides.toml"]
+
+[[modules]]
+guest_path = "data/player/dllFuma.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/data/player/dllFuma.dll"
+out_directory_path = "generated/dllfuma"
+includes = []
+
+[[modules]]
+guest_path = "data/player/dllJulius.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/data/player/dllJulius.dll"
+out_directory_path = "generated/dlljulius"
+includes = ["dlljulius_overrides.toml"]
+
+[[modules]]
+guest_path = "data/player/dllMaria.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/data/player/dllMaria.dll"
+out_directory_path = "generated/dllmaria"
+includes = []
+
+[[modules]]
+guest_path = "data/player/dllRichter.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/data/player/dllRichter.dll"
+out_directory_path = "generated/dllrichter"
+includes = []
+
+[[modules]]
+guest_path = "data/player/dllSimon.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/data/player/dllSimon.dll"
+out_directory_path = "generated/dllsimon"
+includes = []
+
+[[modules]]
+guest_path = "data/player/dllYoko.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/data/player/dllYoko.dll"
+out_directory_path = "generated/dllyoko"
+includes = []
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCaltair.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCaltair.dll"
+out_directory_path = "generated/dll_fcaltair"
+includes = ["dll_fcaltair_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCaxe.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCaxe.dll"
+out_directory_path = "generated/dll_fcaxe"
+includes = ["dll_fcaxe_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCbat.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCbat.dll"
+out_directory_path = "generated/dll_fcbat"
+includes = ["dll_fcbat_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCbigbat.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCbigbat.dll"
+out_directory_path = "generated/dll_fcbigbat"
+includes = ["dll_fcbigbat_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCbonep.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCbonep.dll"
+out_directory_path = "generated/dll_fcbonep"
+includes = ["dll_fcbonep_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCcrow.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCcrow.dll"
+out_directory_path = "generated/dll_fccrow"
+includes = ["dll_fccrow_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCdeath.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCdeath.dll"
+out_directory_path = "generated/dll_fcdeath"
+includes = ["dll_fcdeath_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FcDracula.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FcDracula.dll"
+out_directory_path = "generated/dll_fcdracula"
+includes = ["dll_fcdracula_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FcDraPet.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FcDraPet.dll"
+out_directory_path = "generated/dll_fcdrapet"
+includes = ["dll_fcdrapet_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCfishman.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCfishman.dll"
+out_directory_path = "generated/dll_fcfishman"
+includes = ["dll_fcfishman_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCfranc.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCfranc.dll"
+out_directory_path = "generated/dll_fcfranc"
+includes = ["dll_fcfranc_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCghost.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCghost.dll"
+out_directory_path = "generated/dll_fcghost"
+includes = ["dll_fcghost_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FcGuillotine.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FcGuillotine.dll"
+out_directory_path = "generated/dll_fcguillotine"
+includes = ["dll_fcguillotine_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FClance.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FClance.dll"
+out_directory_path = "generated/dll_fclance"
+includes = ["dll_fclance_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCmeduhead.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCmeduhead.dll"
+out_directory_path = "generated/dll_fcmeduhead"
+includes = ["dll_fcmeduhead_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCmedusa.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCmedusa.dll"
+out_directory_path = "generated/dll_fcmedusa"
+includes = ["dll_fcmedusa_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCmummy.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCmummy.dll"
+out_directory_path = "generated/dll_fcmummy"
+includes = ["dll_fcmummy_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCnomi.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCnomi.dll"
+out_directory_path = "generated/dll_fcnomi"
+includes = ["dll_fcnomi_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCpanther.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCpanther.dll"
+out_directory_path = "generated/dll_fcpanther"
+includes = ["dll_fcpanther_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCredskl.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCredskl.dll"
+out_directory_path = "generated/dll_fcredskl"
+includes = ["dll_fcredskl_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCskl.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCskl.dll"
+out_directory_path = "generated/dll_fcskl"
+includes = ["dll_fcskl_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCwhitedra.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCwhitedra.dll"
+out_directory_path = "generated/dll_fcwhitedra"
+includes = ["dll_fcwhitedra_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FCzombi.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FCzombi.dll"
+out_directory_path = "generated/dll_fczombi"
+includes = ["dll_fczombi_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FuDokugan.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FuDokugan.dll"
+out_directory_path = "generated/dll_fudokugan"
+includes = ["dll_fudokugan_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FuFugubara.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FuFugubara.dll"
+out_directory_path = "generated/dll_fufugubara"
+includes = ["dll_fufugubara_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FuHannya.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FuHannya.dll"
+out_directory_path = "generated/dll_fuhannya"
+includes = ["dll_fuhannya_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FuHbsr.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FuHbsr.dll"
+out_directory_path = "generated/dll_fuhbsr"
+includes = ["dll_fuhbsr_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FuHiguruma.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FuHiguruma.dll"
+out_directory_path = "generated/dll_fuhiguruma"
+includes = ["dll_fuhiguruma_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FuHisyouka.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FuHisyouka.dll"
+out_directory_path = "generated/dll_fuhisyouka"
+includes = ["dll_fuhisyouka_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FuKetsugan.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FuKetsugan.dll"
+out_directory_path = "generated/dll_fuketsugan"
+includes = ["dll_fuketsugan_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FuKyokotsu.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FuKyokotsu.dll"
+out_directory_path = "generated/dll_fukyokotsu"
+includes = ["dll_fukyokotsu_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FuRyukibi.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FuRyukibi.dll"
+out_directory_path = "generated/dll_furyukibi"
+includes = ["dll_furyukibi_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_FuSimon.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_FuSimon.dll"
+out_directory_path = "generated/dll_fusimon"
+includes = ["dll_fusimon_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_PSanfauglir.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_PSanfauglir.dll"
+out_directory_path = "generated/dll_psanfauglir"
+includes = ["dll_psanfauglir_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_PsBeel.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_PsBeel.dll"
+out_directory_path = "generated/dll_psbeel"
+includes = ["dll_psbeel_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_PSberrigan.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_PSberrigan.dll"
+out_directory_path = "generated/dll_psberrigan"
+includes = ["dll_psberrigan_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_PSfishh.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_PSfishh.dll"
+out_directory_path = "generated/dll_psfishh"
+includes = ["dll_psfishh_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_PSgaibon.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_PSgaibon.dll"
+out_directory_path = "generated/dll_psgaibon"
+includes = ["dll_psgaibon_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_PSkillerf.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_PSkillerf.dll"
+out_directory_path = "generated/dll_pskillerf"
+includes = ["dll_pskillerf_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_PSukobach.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_PSukobach.dll"
+out_directory_path = "generated/dll_psukobach"
+includes = ["dll_psukobach_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_Region.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_Region.dll"
+out_directory_path = "generated/dll_region"
+includes = ["dll_region_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/enemy/DLL_Ryukotsu.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/enemy/DLL_Ryukotsu.dll"
+out_directory_path = "generated/dll_ryukotsu"
+includes = ["dll_ryukotsu_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotFCaxe.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotFCaxe.dll"
+out_directory_path = "generated/dllshotfcaxe"
+includes = ["dllshotfcaxe_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotFCbone.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotFCbone.dll"
+out_directory_path = "generated/dllshotfcbone"
+includes = ["dllshotfcbone_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotFcDraFire.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotFcDraFire.dll"
+out_directory_path = "generated/dllshotfcdrafire"
+includes = ["dllshotfcdrafire_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotFcDraMaku.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotFcDraMaku.dll"
+out_directory_path = "generated/dllshotfcdramaku"
+includes = ["dllshotfcdramaku_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotFCfireball.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotFCfireball.dll"
+out_directory_path = "generated/dllshotfcfireball"
+includes = ["dllshotfcfireball_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotFumaRyukotsushot.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotFumaRyukotsushot.dll"
+out_directory_path = "generated/dllshotfumaryukotsushot"
+includes = ["dllshotfumaryukotsushot_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotFumaRyukotsusoul.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotFumaRyukotsusoul.dll"
+out_directory_path = "generated/dllshotfumaryukotsusoul"
+includes = ["dllshotfumaryukotsusoul_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotGlyphDextroCustos.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotGlyphDextroCustos.dll"
+out_directory_path = "generated/dllshotglyphdextrocustos"
+includes = ["dllshotglyphdextrocustos_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotGlyphGlobus.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotGlyphGlobus.dll"
+out_directory_path = "generated/dllshotglyphglobus"
+includes = ["dllshotglyphglobus_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotGlyphLuminatio.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotGlyphLuminatio.dll"
+out_directory_path = "generated/dllshotglyphluminatio"
+includes = ["dllshotglyphluminatio_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotGlyphSinestroCustos.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotGlyphSinestroCustos.dll"
+out_directory_path = "generated/dllshotglyphsinestrocustos"
+includes = ["dllshotglyphsinestrocustos_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotLearningFCdeath.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotLearningFCdeath.dll"
+out_directory_path = "generated/dllshotlearningfcdeath"
+includes = ["dllshotlearningfcdeath_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotPSanfsoul.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotPSanfsoul.dll"
+out_directory_path = "generated/dllshotpsanfsoul"
+includes = ["dllshotpsanfsoul_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotPsBeelShot.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotPsBeelShot.dll"
+out_directory_path = "generated/dllshotpsbeelshot"
+includes = ["dllshotpsbeelshot_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotPsBeelSoul.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotPsBeelSoul.dll"
+out_directory_path = "generated/dllshotpsbeelsoul"
+includes = ["dllshotpsbeelsoul_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotPSberriganshot.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotPSberriganshot.dll"
+out_directory_path = "generated/dllshotpsberriganshot"
+includes = ["dllshotpsberriganshot_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotPSberrigansoul.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotPSberrigansoul.dll"
+out_directory_path = "generated/dllshotpsberrigansoul"
+includes = ["dllshotpsberrigansoul_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotPSfishhshot.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotPSfishhshot.dll"
+out_directory_path = "generated/dllshotpsfishhshot"
+includes = ["dllshotpsfishhshot_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotPSfishhsoul.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotPSfishhsoul.dll"
+out_directory_path = "generated/dllshotpsfishhsoul"
+includes = ["dllshotpsfishhsoul_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotPSgaibonshot.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotPSgaibonshot.dll"
+out_directory_path = "generated/dllshotpsgaibonshot"
+includes = ["dllshotpsgaibonshot_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotPSgaibonsoul.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotPSgaibonsoul.dll"
+out_directory_path = "generated/dllshotpsgaibonsoul"
+includes = ["dllshotpsgaibonsoul_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotPSkillerfsoul.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotPSkillerfsoul.dll"
+out_directory_path = "generated/dllshotpskillerfsoul"
+includes = ["dllshotpskillerfsoul_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotPSukobachfire.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotPSukobachfire.dll"
+out_directory_path = "generated/dllshotpsukobachfire"
+includes = ["dllshotpsukobachfire_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotRegionFire.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotRegionFire.dll"
+out_directory_path = "generated/dllshotregionfire"
+includes = ["dllshotregionfire_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotRegionHuman.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotRegionHuman.dll"
+out_directory_path = "generated/dllshotregionhuman"
+includes = ["dllshotregionhuman_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotRegionLaser.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotRegionLaser.dll"
+out_directory_path = "generated/dllshotregionlaser"
+includes = ["dllshotregionlaser_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFCaltair.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFCaltair.dll"
+out_directory_path = "generated/dllshotsoulfcaltair"
+includes = ["dllshotsoulfcaltair_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFCbat.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFCbat.dll"
+out_directory_path = "generated/dllshotsoulfcbat"
+includes = ["dllshotsoulfcbat_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFCbigbat.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFCbigbat.dll"
+out_directory_path = "generated/dllshotsoulfcbigbat"
+includes = ["dllshotsoulfcbigbat_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFCbone.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFCbone.dll"
+out_directory_path = "generated/dllshotsoulfcbone"
+includes = ["dllshotsoulfcbone_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFCcrow.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFCcrow.dll"
+out_directory_path = "generated/dllshotsoulfccrow"
+includes = ["dllshotsoulfccrow_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFCdeath.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFCdeath.dll"
+out_directory_path = "generated/dllshotsoulfcdeath"
+includes = ["dllshotsoulfcdeath_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFCdracula.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFCdracula.dll"
+out_directory_path = "generated/dllshotsoulfcdracula"
+includes = ["dllshotsoulfcdracula_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFCfishman.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFCfishman.dll"
+out_directory_path = "generated/dllshotsoulfcfishman"
+includes = ["dllshotsoulfcfishman_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFCghost.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFCghost.dll"
+out_directory_path = "generated/dllshotsoulfcghost"
+includes = ["dllshotsoulfcghost_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFClance.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFClance.dll"
+out_directory_path = "generated/dllshotsoulfclance"
+includes = ["dllshotsoulfclance_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFCmedusa.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFCmedusa.dll"
+out_directory_path = "generated/dllshotsoulfcmedusa"
+includes = ["dllshotsoulfcmedusa_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFCmummy.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFCmummy.dll"
+out_directory_path = "generated/dllshotsoulfcmummy"
+includes = ["dllshotsoulfcmummy_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFCnomi.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFCnomi.dll"
+out_directory_path = "generated/dllshotsoulfcnomi"
+includes = ["dllshotsoulfcnomi_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFCpanther.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFCpanther.dll"
+out_directory_path = "generated/dllshotsoulfcpanther"
+includes = ["dllshotsoulfcpanther_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFCwhitedra.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFCwhitedra.dll"
+out_directory_path = "generated/dllshotsoulfcwhitedra"
+includes = ["dllshotsoulfcwhitedra_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFCzombi.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFCzombi.dll"
+out_directory_path = "generated/dllshotsoulfczombi"
+includes = ["dllshotsoulfczombi_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFumaDokugan.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFumaDokugan.dll"
+out_directory_path = "generated/dllshotsoulfumadokugan"
+includes = ["dllshotsoulfumadokugan_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFumaFugubara.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFumaFugubara.dll"
+out_directory_path = "generated/dllshotsoulfumafugubara"
+includes = ["dllshotsoulfumafugubara_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFumaHannya.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFumaHannya.dll"
+out_directory_path = "generated/dllshotsoulfumahannya"
+includes = ["dllshotsoulfumahannya_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFumaHiguruma.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFumaHiguruma.dll"
+out_directory_path = "generated/dllshotsoulfumahiguruma"
+includes = ["dllshotsoulfumahiguruma_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFumaHisyouka.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFumaHisyouka.dll"
+out_directory_path = "generated/dllshotsoulfumahisyouka"
+includes = ["dllshotsoulfumahisyouka_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFumaKetsugan.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFumaKetsugan.dll"
+out_directory_path = "generated/dllshotsoulfumaketsugan"
+includes = ["dllshotsoulfumaketsugan_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFumaKyokotsu.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFumaKyokotsu.dll"
+out_directory_path = "generated/dllshotsoulfumakyokotsu"
+includes = ["dllshotsoulfumakyokotsu_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFumaRyukibi.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFumaRyukibi.dll"
+out_directory_path = "generated/dllshotsoulfumaryukibi"
+includes = ["dllshotsoulfumaryukibi_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSoulFumaSimon.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSoulFumaSimon.dll"
+out_directory_path = "generated/dllshotsoulfumasimon"
+includes = ["dllshotsoulfumasimon_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSubFCaxe.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSubFCaxe.dll"
+out_directory_path = "generated/dllshotsubfcaxe"
+includes = ["dllshotsubfcaxe_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSubFCcross.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSubFCcross.dll"
+out_directory_path = "generated/dllshotsubfccross"
+includes = ["dllshotsubfccross_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSubFCholywater.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSubFCholywater.dll"
+out_directory_path = "generated/dllshotsubfcholywater"
+includes = ["dllshotsubfcholywater_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSubFCknife.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSubFCknife.dll"
+out_directory_path = "generated/dllshotsubfcknife"
+includes = ["dllshotsubfcknife_overrides.toml"]
+
+[[modules]]
+guest_path = "dll/shot/dllshotSubJavelin.dll"
+file_path = "../HarmonyTU2Private/game-data/_dlc_codegen/dll/shot/dllshotSubJavelin.dll"
+out_directory_path = "generated/dllshotsubjavelin"
+includes = ["dllshotsubjavelin_overrides.toml"]

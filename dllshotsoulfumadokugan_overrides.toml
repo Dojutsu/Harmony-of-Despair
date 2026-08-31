@@ -1,0 +1,7 @@
+# Static callable coverage for dll/shot/dllshotSoulFumaDokugan.dll.
+# Targets are referenced by mapped non-executable data tables and were outside
+# every automatically discovered function before these source-level overrides.
+
+[functions]
+# data refs=1, first reference=0x852300B4
+0x852229C8 = {}
