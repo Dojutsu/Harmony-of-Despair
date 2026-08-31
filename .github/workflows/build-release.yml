@@ -108,7 +108,7 @@ jobs:
           cmake --build --preset win-amd64-relwithdebinfo --target harmonyrecomp-dlc-import --parallel
           cmake --build --preset win-amd64-relwithdebinfo --target sha256_tests --parallel
 
-      - name: Stage Microsoft application-local runtime
+      - name: Stage Windows application-local runtime
         shell: pwsh
         run: |
           $build = 'out/build/win-amd64-relwithdebinfo'
@@ -147,13 +147,13 @@ jobs:
             Copy-Item -LiteralPath (Join-Path $crtDirectory $name) -Destination $build -Force
           }
 
-          $tracyDestination = Join-Path $build 'TracyClientrd.dll'
-          if (!(Test-Path -LiteralPath $tracyDestination -PathType Leaf)) {
-            $tracySource = Join-Path $env:GITHUB_WORKSPACE '_deps/rexglue-sdk/out/win-amd64/TracyClientrd.dll'
-            if (!(Test-Path -LiteralPath $tracySource -PathType Leaf)) {
-              throw 'The built TracyClientrd.dll dependency was not found.'
+          $sdkRuntime = Join-Path $env:GITHUB_WORKSPACE '_deps/rexglue-sdk/out/win-amd64'
+          foreach ($name in @('rexruntimerd.dll', 'TracyClientrd.dll')) {
+            $source = Join-Path $sdkRuntime $name
+            if (!(Test-Path -LiteralPath $source -PathType Leaf)) {
+              throw "The built ReXGlue runtime dependency was not found: $name"
             }
-            Copy-Item -LiteralPath $tracySource -Destination $tracyDestination -Force
+            Copy-Item -LiteralPath $source -Destination $build -Force
           }
 
       - name: Test importer validation
@@ -161,31 +161,6 @@ jobs:
         run: |
           $build = 'out/build/win-amd64-relwithdebinfo'
           cmake --build --preset win-amd64-relwithdebinfo --target game_data_tests sha256_tests dlc_header_tests --parallel
-          $debuggers = @(
-            'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe',
-            'C:\Program Files\Windows Kits\10\Debuggers\x64\cdb.exe'
-          )
-          $cdb = $debuggers | Where-Object {
-            Test-Path -LiteralPath $_ -PathType Leaf
-          } | Select-Object -First 1
-          if (!$cdb) {
-            throw 'The approved hosted test probe requires CDB, but CDB is unavailable.'
-          }
-          $stalled = @()
-          foreach ($testName in @('game_data_tests.exe', 'dlc_header_tests.exe')) {
-            $probe = Start-Process -FilePath (Join-Path $build $testName) -PassThru
-            if (-not $probe.WaitForExit(10000)) {
-              Write-Host "Capturing hosted pre-main stack for $testName"
-              & $cdb -p $probe.Id -c 'lm; ~* kb; qd'
-              Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue
-              $stalled += $testName
-            } elseif ($probe.ExitCode -ne 0) {
-              throw "$testName failed with exit code $($probe.ExitCode)."
-            }
-          }
-          if ($stalled.Count) {
-            throw "Hosted ReX-linked tests stalled before main: $stalled"
-          }
           ctest --test-dir $build --verbose --output-on-failure
           $missingData = Join-Path $env:RUNNER_TEMP 'missing-harmony-data'
           $verify = Start-Process `
