@@ -108,35 +108,45 @@ jobs:
           cmake --build --preset win-amd64-relwithdebinfo --target harmonyrecomp-dlc-import --parallel
           cmake --build --preset win-amd64-relwithdebinfo --target sha256_tests --parallel
 
+      - name: Stage Microsoft application-local runtime
+        shell: pwsh
+        run: |
+          $build = 'out/build/win-amd64-relwithdebinfo'
+          $runtimeNames = @(
+            'MSVCP140.dll',
+            'MSVCP140_ATOMIC_WAIT.dll',
+            'VCRUNTIME140.dll',
+            'VCRUNTIME140_1.dll'
+          )
+          foreach ($name in $runtimeNames) {
+            $candidates = @((Join-Path "$env:WINDIR/System32" $name))
+            if ($env:VCToolsRedistDir) {
+              $candidates += Join-Path $env:VCToolsRedistDir "x64/Microsoft.VC143.CRT/$name"
+            }
+            $source = $candidates | Where-Object {
+              Test-Path -LiteralPath $_ -PathType Leaf
+            } | Select-Object -First 1
+            if (!$source) {
+              $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+              if (Test-Path -LiteralPath $vswhere -PathType Leaf) {
+                $installation = & $vswhere -latest -property installationPath
+                $redistRoot = Join-Path $installation 'VC/Redist/MSVC'
+                $source = Get-ChildItem -LiteralPath $redistRoot -Filter $name -Recurse -File |
+                  Where-Object { $_.FullName -match '[\\/]x64[\\/]Microsoft\.VC143\.CRT[\\/]' } |
+                  Select-Object -First 1 -ExpandProperty FullName
+              }
+            }
+            if (!$source) {
+              throw "Required Microsoft application-local runtime is missing: $name"
+            }
+            Copy-Item -LiteralPath $source -Destination $build -Force
+          }
+
       - name: Test importer validation
         shell: pwsh
         run: |
           $build = 'out/build/win-amd64-relwithdebinfo'
           cmake --build --preset win-amd64-relwithdebinfo --target game_data_tests sha256_tests dlc_header_tests --parallel
-          $probeOut = Join-Path $env:RUNNER_TEMP 'game-data-probe.stdout.log'
-          $probeErr = Join-Path $env:RUNNER_TEMP 'game-data-probe.stderr.log'
-          $probe = Start-Process `
-            -FilePath "$build/game_data_tests.exe" `
-            -PassThru `
-            -RedirectStandardOutput $probeOut `
-            -RedirectStandardError $probeErr
-          if (-not $probe.WaitForExit(15000)) {
-            $cdb = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
-            if (Test-Path $cdb) {
-              & $cdb -p $probe.Id -c '.symfix; .reload; ~* kb; qd'
-            } else {
-              Write-Host "CDB unavailable at $cdb"
-            }
-            Get-Content $probeOut -ErrorAction SilentlyContinue
-            Get-Content $probeErr -ErrorAction SilentlyContinue
-            Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue
-            throw 'game_data_tests.exe did not reach completion within 15 seconds.'
-          }
-          Get-Content $probeOut -ErrorAction SilentlyContinue
-          Get-Content $probeErr -ErrorAction SilentlyContinue
-          if ($probe.ExitCode -ne 0) {
-            throw "game_data_tests.exe failed with exit code $($probe.ExitCode)."
-          }
           ctest --test-dir $build --verbose --output-on-failure
           $missingData = Join-Path $env:RUNNER_TEMP 'missing-harmony-data'
           $verify = Start-Process `
@@ -171,21 +181,14 @@ jobs:
             'rexruntimerd.dll',
             'TracyClientrd.dll',
             'MSVCP140.dll',
+            'MSVCP140_ATOMIC_WAIT.dll',
             'VCRUNTIME140.dll',
             'VCRUNTIME140_1.dll'
           )
-          $projectRuntime = @($required | Where-Object { $_ -notmatch '^(MSVCP|VCRUNTIME)' })
-          foreach ($name in $projectRuntime) {
+          foreach ($name in $required) {
             $source = Join-Path $build $name
             if (!(Test-Path -LiteralPath $source -PathType Leaf)) {
               throw "Required Windows runtime file is missing: $name"
-            }
-            Copy-Item -LiteralPath $source -Destination $root
-          }
-          foreach ($name in @('MSVCP140.dll', 'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll')) {
-            $source = Join-Path "$env:WINDIR/System32" $name
-            if (!(Test-Path -LiteralPath $source -PathType Leaf)) {
-              throw "Required Microsoft application-local runtime is missing: $name"
             }
             Copy-Item -LiteralPath $source -Destination $root
           }
