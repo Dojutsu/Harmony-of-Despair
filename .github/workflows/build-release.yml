@@ -118,28 +118,33 @@ jobs:
             'VCRUNTIME140.dll',
             'VCRUNTIME140_1.dll'
           )
+          $crtDirectories = @()
+          if ($env:VCToolsRedistDir) {
+            $crtDirectories += Join-Path $env:VCToolsRedistDir 'x64/Microsoft.VC143.CRT'
+          }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          if (Test-Path -LiteralPath $vswhere -PathType Leaf) {
+            $installation = & $vswhere -latest -property installationPath
+            $redistRoot = Join-Path $installation 'VC/Redist/MSVC'
+            $crtDirectories += Get-ChildItem -LiteralPath $redistRoot -Directory -Recurse |
+              Where-Object { $_.FullName -match '[\\/]x64[\\/]Microsoft\.VC143\.CRT$' } |
+              Sort-Object FullName -Descending |
+              ForEach-Object FullName
+          }
+          $crtDirectories += Join-Path $env:WINDIR 'System32'
+          $crtDirectory = $crtDirectories | Where-Object {
+            $candidate = $_
+            (Test-Path -LiteralPath $candidate -PathType Container) -and
+              -not ($runtimeNames | Where-Object {
+                -not (Test-Path -LiteralPath (Join-Path $candidate $_) -PathType Leaf)
+              })
+          } | Select-Object -First 1
+          if (!$crtDirectory) {
+            throw 'No coherent Microsoft VC143 x64 application-local runtime set was found.'
+          }
+          Write-Host "Staging Microsoft application-local runtime from $crtDirectory"
           foreach ($name in $runtimeNames) {
-            $candidates = @((Join-Path "$env:WINDIR/System32" $name))
-            if ($env:VCToolsRedistDir) {
-              $candidates += Join-Path $env:VCToolsRedistDir "x64/Microsoft.VC143.CRT/$name"
-            }
-            $source = $candidates | Where-Object {
-              Test-Path -LiteralPath $_ -PathType Leaf
-            } | Select-Object -First 1
-            if (!$source) {
-              $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-              if (Test-Path -LiteralPath $vswhere -PathType Leaf) {
-                $installation = & $vswhere -latest -property installationPath
-                $redistRoot = Join-Path $installation 'VC/Redist/MSVC'
-                $source = Get-ChildItem -LiteralPath $redistRoot -Filter $name -Recurse -File |
-                  Where-Object { $_.FullName -match '[\\/]x64[\\/]Microsoft\.VC143\.CRT[\\/]' } |
-                  Select-Object -First 1 -ExpandProperty FullName
-              }
-            }
-            if (!$source) {
-              throw "Required Microsoft application-local runtime is missing: $name"
-            }
-            Copy-Item -LiteralPath $source -Destination $build -Force
+            Copy-Item -LiteralPath (Join-Path $crtDirectory $name) -Destination $build -Force
           }
 
       - name: Test importer validation
