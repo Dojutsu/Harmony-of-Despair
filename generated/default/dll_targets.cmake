@@ -188,3 +188,3413 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllsoma/sources.cmake")
     rexglue_configure_module_target(harmonyrecomp_dllSoma HOST ${REXGLUE_HOST_TARGET})
 endif()
 
+# DLL module: dllshotFCvkshot
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcvkshot/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotfcvkshot/sources.cmake)
+    set(DLL_SOURCES_dllshotFCvkshot ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotFCvkshot SHARED ${DLL_SOURCES_dllshotFCvkshot})
+    target_include_directories(harmonyrecomp_dllshotFCvkshot PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcvkshot
+    )
+    target_link_libraries(harmonyrecomp_dllshotFCvkshot PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotFCvkshot
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcvkshot/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotFCvkshot harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotFCvkshot PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotFCvkshot HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotFCcurseexpl
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfccurseexpl/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotfccurseexpl/sources.cmake)
+    set(DLL_SOURCES_dllshotFCcurseexpl ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotFCcurseexpl SHARED ${DLL_SOURCES_dllshotFCcurseexpl})
+    target_include_directories(harmonyrecomp_dllshotFCcurseexpl PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfccurseexpl
+    )
+    target_link_libraries(harmonyrecomp_dllshotFCcurseexpl PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotFCcurseexpl
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfccurseexpl/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotFCcurseexpl harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotFCcurseexpl PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotFCcurseexpl HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotFCgshuriken
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcgshuriken/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotfcgshuriken/sources.cmake)
+    set(DLL_SOURCES_dllshotFCgshuriken ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotFCgshuriken SHARED ${DLL_SOURCES_dllshotFCgshuriken})
+    target_include_directories(harmonyrecomp_dllshotFCgshuriken PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcgshuriken
+    )
+    target_link_libraries(harmonyrecomp_dllshotFCgshuriken PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotFCgshuriken
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcgshuriken/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotFCgshuriken harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotFCgshuriken PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotFCgshuriken HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotFChadouken
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfchadouken/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotfchadouken/sources.cmake)
+    set(DLL_SOURCES_dllshotFChadouken ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotFChadouken SHARED ${DLL_SOURCES_dllshotFChadouken})
+    target_include_directories(harmonyrecomp_dllshotFChadouken PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfchadouken
+    )
+    target_link_libraries(harmonyrecomp_dllshotFChadouken PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotFChadouken
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfchadouken/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotFChadouken harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotFChadouken PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotFChadouken HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotFCmdaiko
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcmdaiko/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotfcmdaiko/sources.cmake)
+    set(DLL_SOURCES_dllshotFCmdaiko ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotFCmdaiko SHARED ${DLL_SOURCES_dllshotFCmdaiko})
+    target_include_directories(harmonyrecomp_dllshotFCmdaiko PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcmdaiko
+    )
+    target_link_libraries(harmonyrecomp_dllshotFCmdaiko PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotFCmdaiko
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcmdaiko/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotFCmdaiko harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotFCmdaiko PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotFCmdaiko HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotGlyphAcerbatus
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotglyphacerbatus/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotglyphacerbatus/sources.cmake)
+    set(DLL_SOURCES_dllshotGlyphAcerbatus ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotGlyphAcerbatus SHARED ${DLL_SOURCES_dllshotGlyphAcerbatus})
+    target_include_directories(harmonyrecomp_dllshotGlyphAcerbatus PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotglyphacerbatus
+    )
+    target_link_libraries(harmonyrecomp_dllshotGlyphAcerbatus PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotGlyphAcerbatus
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotglyphacerbatus/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotGlyphAcerbatus harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotGlyphAcerbatus PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotGlyphAcerbatus HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllFuma
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllfuma/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllfuma/sources.cmake)
+    set(DLL_SOURCES_dllFuma ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllFuma SHARED ${DLL_SOURCES_dllFuma})
+    target_include_directories(harmonyrecomp_dllFuma PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllfuma
+    )
+    target_link_libraries(harmonyrecomp_dllFuma PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllFuma
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllfuma/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllFuma harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllFuma PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllFuma HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllJulius
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dlljulius/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dlljulius/sources.cmake)
+    set(DLL_SOURCES_dllJulius ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllJulius SHARED ${DLL_SOURCES_dllJulius})
+    target_include_directories(harmonyrecomp_dllJulius PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dlljulius
+    )
+    target_link_libraries(harmonyrecomp_dllJulius PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllJulius
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dlljulius/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllJulius harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllJulius PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllJulius HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllMaria
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllmaria/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllmaria/sources.cmake)
+    set(DLL_SOURCES_dllMaria ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllMaria SHARED ${DLL_SOURCES_dllMaria})
+    target_include_directories(harmonyrecomp_dllMaria PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllmaria
+    )
+    target_link_libraries(harmonyrecomp_dllMaria PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllMaria
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllmaria/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllMaria harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllMaria PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllMaria HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllRichter
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllrichter/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllrichter/sources.cmake)
+    set(DLL_SOURCES_dllRichter ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllRichter SHARED ${DLL_SOURCES_dllRichter})
+    target_include_directories(harmonyrecomp_dllRichter PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllrichter
+    )
+    target_link_libraries(harmonyrecomp_dllRichter PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllRichter
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllrichter/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllRichter harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllRichter PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllRichter HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllSimon
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllsimon/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllsimon/sources.cmake)
+    set(DLL_SOURCES_dllSimon ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllSimon SHARED ${DLL_SOURCES_dllSimon})
+    target_include_directories(harmonyrecomp_dllSimon PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllsimon
+    )
+    target_link_libraries(harmonyrecomp_dllSimon PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllSimon
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllsimon/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllSimon harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllSimon PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllSimon HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllYoko
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllyoko/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllyoko/sources.cmake)
+    set(DLL_SOURCES_dllYoko ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllYoko SHARED ${DLL_SOURCES_dllYoko})
+    target_include_directories(harmonyrecomp_dllYoko PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllyoko
+    )
+    target_link_libraries(harmonyrecomp_dllYoko PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllYoko
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllyoko/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllYoko harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllYoko PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllYoko HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCaltair
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcaltair/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcaltair/sources.cmake)
+    set(DLL_SOURCES_DLL_FCaltair ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCaltair SHARED ${DLL_SOURCES_DLL_FCaltair})
+    target_include_directories(harmonyrecomp_DLL_FCaltair PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcaltair
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCaltair PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCaltair
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcaltair/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCaltair harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCaltair PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCaltair HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCaxe
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcaxe/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcaxe/sources.cmake)
+    set(DLL_SOURCES_DLL_FCaxe ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCaxe SHARED ${DLL_SOURCES_DLL_FCaxe})
+    target_include_directories(harmonyrecomp_DLL_FCaxe PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcaxe
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCaxe PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCaxe
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcaxe/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCaxe harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCaxe PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCaxe HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCbat
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcbat/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcbat/sources.cmake)
+    set(DLL_SOURCES_DLL_FCbat ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCbat SHARED ${DLL_SOURCES_DLL_FCbat})
+    target_include_directories(harmonyrecomp_DLL_FCbat PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcbat
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCbat PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCbat
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcbat/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCbat harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCbat PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCbat HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCbigbat
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcbigbat/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcbigbat/sources.cmake)
+    set(DLL_SOURCES_DLL_FCbigbat ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCbigbat SHARED ${DLL_SOURCES_DLL_FCbigbat})
+    target_include_directories(harmonyrecomp_DLL_FCbigbat PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcbigbat
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCbigbat PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCbigbat
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcbigbat/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCbigbat harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCbigbat PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCbigbat HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCbonep
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcbonep/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcbonep/sources.cmake)
+    set(DLL_SOURCES_DLL_FCbonep ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCbonep SHARED ${DLL_SOURCES_DLL_FCbonep})
+    target_include_directories(harmonyrecomp_DLL_FCbonep PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcbonep
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCbonep PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCbonep
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcbonep/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCbonep harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCbonep PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCbonep HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCcrow
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fccrow/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fccrow/sources.cmake)
+    set(DLL_SOURCES_DLL_FCcrow ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCcrow SHARED ${DLL_SOURCES_DLL_FCcrow})
+    target_include_directories(harmonyrecomp_DLL_FCcrow PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fccrow
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCcrow PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCcrow
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fccrow/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCcrow harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCcrow PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCcrow HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCdeath
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcdeath/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcdeath/sources.cmake)
+    set(DLL_SOURCES_DLL_FCdeath ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCdeath SHARED ${DLL_SOURCES_DLL_FCdeath})
+    target_include_directories(harmonyrecomp_DLL_FCdeath PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcdeath
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCdeath PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCdeath
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcdeath/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCdeath harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCdeath PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCdeath HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FcDracula
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcdracula/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcdracula/sources.cmake)
+    set(DLL_SOURCES_DLL_FcDracula ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FcDracula SHARED ${DLL_SOURCES_DLL_FcDracula})
+    target_include_directories(harmonyrecomp_DLL_FcDracula PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcdracula
+    )
+    target_link_libraries(harmonyrecomp_DLL_FcDracula PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FcDracula
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcdracula/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FcDracula harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FcDracula PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FcDracula HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FcDraPet
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcdrapet/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcdrapet/sources.cmake)
+    set(DLL_SOURCES_DLL_FcDraPet ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FcDraPet SHARED ${DLL_SOURCES_DLL_FcDraPet})
+    target_include_directories(harmonyrecomp_DLL_FcDraPet PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcdrapet
+    )
+    target_link_libraries(harmonyrecomp_DLL_FcDraPet PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FcDraPet
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcdrapet/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FcDraPet harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FcDraPet PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FcDraPet HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCfishman
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcfishman/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcfishman/sources.cmake)
+    set(DLL_SOURCES_DLL_FCfishman ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCfishman SHARED ${DLL_SOURCES_DLL_FCfishman})
+    target_include_directories(harmonyrecomp_DLL_FCfishman PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcfishman
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCfishman PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCfishman
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcfishman/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCfishman harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCfishman PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCfishman HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCfranc
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcfranc/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcfranc/sources.cmake)
+    set(DLL_SOURCES_DLL_FCfranc ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCfranc SHARED ${DLL_SOURCES_DLL_FCfranc})
+    target_include_directories(harmonyrecomp_DLL_FCfranc PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcfranc
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCfranc PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCfranc
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcfranc/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCfranc harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCfranc PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCfranc HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCghost
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcghost/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcghost/sources.cmake)
+    set(DLL_SOURCES_DLL_FCghost ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCghost SHARED ${DLL_SOURCES_DLL_FCghost})
+    target_include_directories(harmonyrecomp_DLL_FCghost PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcghost
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCghost PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCghost
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcghost/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCghost harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCghost PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCghost HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FcGuillotine
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcguillotine/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcguillotine/sources.cmake)
+    set(DLL_SOURCES_DLL_FcGuillotine ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FcGuillotine SHARED ${DLL_SOURCES_DLL_FcGuillotine})
+    target_include_directories(harmonyrecomp_DLL_FcGuillotine PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcguillotine
+    )
+    target_link_libraries(harmonyrecomp_DLL_FcGuillotine PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FcGuillotine
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcguillotine/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FcGuillotine harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FcGuillotine PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FcGuillotine HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FClance
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fclance/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fclance/sources.cmake)
+    set(DLL_SOURCES_DLL_FClance ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FClance SHARED ${DLL_SOURCES_DLL_FClance})
+    target_include_directories(harmonyrecomp_DLL_FClance PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fclance
+    )
+    target_link_libraries(harmonyrecomp_DLL_FClance PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FClance
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fclance/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FClance harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FClance PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FClance HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCmeduhead
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcmeduhead/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcmeduhead/sources.cmake)
+    set(DLL_SOURCES_DLL_FCmeduhead ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCmeduhead SHARED ${DLL_SOURCES_DLL_FCmeduhead})
+    target_include_directories(harmonyrecomp_DLL_FCmeduhead PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcmeduhead
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCmeduhead PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCmeduhead
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcmeduhead/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCmeduhead harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCmeduhead PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCmeduhead HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCmedusa
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcmedusa/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcmedusa/sources.cmake)
+    set(DLL_SOURCES_DLL_FCmedusa ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCmedusa SHARED ${DLL_SOURCES_DLL_FCmedusa})
+    target_include_directories(harmonyrecomp_DLL_FCmedusa PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcmedusa
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCmedusa PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCmedusa
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcmedusa/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCmedusa harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCmedusa PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCmedusa HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCmummy
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcmummy/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcmummy/sources.cmake)
+    set(DLL_SOURCES_DLL_FCmummy ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCmummy SHARED ${DLL_SOURCES_DLL_FCmummy})
+    target_include_directories(harmonyrecomp_DLL_FCmummy PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcmummy
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCmummy PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCmummy
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcmummy/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCmummy harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCmummy PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCmummy HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCnomi
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcnomi/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcnomi/sources.cmake)
+    set(DLL_SOURCES_DLL_FCnomi ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCnomi SHARED ${DLL_SOURCES_DLL_FCnomi})
+    target_include_directories(harmonyrecomp_DLL_FCnomi PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcnomi
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCnomi PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCnomi
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcnomi/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCnomi harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCnomi PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCnomi HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCpanther
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcpanther/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcpanther/sources.cmake)
+    set(DLL_SOURCES_DLL_FCpanther ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCpanther SHARED ${DLL_SOURCES_DLL_FCpanther})
+    target_include_directories(harmonyrecomp_DLL_FCpanther PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcpanther
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCpanther PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCpanther
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcpanther/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCpanther harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCpanther PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCpanther HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCredskl
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcredskl/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcredskl/sources.cmake)
+    set(DLL_SOURCES_DLL_FCredskl ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCredskl SHARED ${DLL_SOURCES_DLL_FCredskl})
+    target_include_directories(harmonyrecomp_DLL_FCredskl PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcredskl
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCredskl PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCredskl
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcredskl/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCredskl harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCredskl PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCredskl HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCskl
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcskl/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcskl/sources.cmake)
+    set(DLL_SOURCES_DLL_FCskl ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCskl SHARED ${DLL_SOURCES_DLL_FCskl})
+    target_include_directories(harmonyrecomp_DLL_FCskl PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcskl
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCskl PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCskl
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcskl/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCskl harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCskl PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCskl HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCwhitedra
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcwhitedra/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fcwhitedra/sources.cmake)
+    set(DLL_SOURCES_DLL_FCwhitedra ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCwhitedra SHARED ${DLL_SOURCES_DLL_FCwhitedra})
+    target_include_directories(harmonyrecomp_DLL_FCwhitedra PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcwhitedra
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCwhitedra PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCwhitedra
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fcwhitedra/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCwhitedra harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCwhitedra PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCwhitedra HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FCzombi
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fczombi/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fczombi/sources.cmake)
+    set(DLL_SOURCES_DLL_FCzombi ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FCzombi SHARED ${DLL_SOURCES_DLL_FCzombi})
+    target_include_directories(harmonyrecomp_DLL_FCzombi PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fczombi
+    )
+    target_link_libraries(harmonyrecomp_DLL_FCzombi PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FCzombi
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fczombi/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FCzombi harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FCzombi PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FCzombi HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FuDokugan
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fudokugan/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fudokugan/sources.cmake)
+    set(DLL_SOURCES_DLL_FuDokugan ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FuDokugan SHARED ${DLL_SOURCES_DLL_FuDokugan})
+    target_include_directories(harmonyrecomp_DLL_FuDokugan PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fudokugan
+    )
+    target_link_libraries(harmonyrecomp_DLL_FuDokugan PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FuDokugan
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fudokugan/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FuDokugan harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FuDokugan PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FuDokugan HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FuFugubara
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fufugubara/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fufugubara/sources.cmake)
+    set(DLL_SOURCES_DLL_FuFugubara ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FuFugubara SHARED ${DLL_SOURCES_DLL_FuFugubara})
+    target_include_directories(harmonyrecomp_DLL_FuFugubara PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fufugubara
+    )
+    target_link_libraries(harmonyrecomp_DLL_FuFugubara PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FuFugubara
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fufugubara/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FuFugubara harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FuFugubara PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FuFugubara HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FuHannya
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fuhannya/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fuhannya/sources.cmake)
+    set(DLL_SOURCES_DLL_FuHannya ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FuHannya SHARED ${DLL_SOURCES_DLL_FuHannya})
+    target_include_directories(harmonyrecomp_DLL_FuHannya PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fuhannya
+    )
+    target_link_libraries(harmonyrecomp_DLL_FuHannya PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FuHannya
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fuhannya/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FuHannya harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FuHannya PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FuHannya HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FuHbsr
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fuhbsr/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fuhbsr/sources.cmake)
+    set(DLL_SOURCES_DLL_FuHbsr ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FuHbsr SHARED ${DLL_SOURCES_DLL_FuHbsr})
+    target_include_directories(harmonyrecomp_DLL_FuHbsr PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fuhbsr
+    )
+    target_link_libraries(harmonyrecomp_DLL_FuHbsr PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FuHbsr
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fuhbsr/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FuHbsr harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FuHbsr PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FuHbsr HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FuHiguruma
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fuhiguruma/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fuhiguruma/sources.cmake)
+    set(DLL_SOURCES_DLL_FuHiguruma ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FuHiguruma SHARED ${DLL_SOURCES_DLL_FuHiguruma})
+    target_include_directories(harmonyrecomp_DLL_FuHiguruma PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fuhiguruma
+    )
+    target_link_libraries(harmonyrecomp_DLL_FuHiguruma PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FuHiguruma
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fuhiguruma/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FuHiguruma harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FuHiguruma PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FuHiguruma HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FuHisyouka
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fuhisyouka/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fuhisyouka/sources.cmake)
+    set(DLL_SOURCES_DLL_FuHisyouka ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FuHisyouka SHARED ${DLL_SOURCES_DLL_FuHisyouka})
+    target_include_directories(harmonyrecomp_DLL_FuHisyouka PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fuhisyouka
+    )
+    target_link_libraries(harmonyrecomp_DLL_FuHisyouka PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FuHisyouka
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fuhisyouka/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FuHisyouka harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FuHisyouka PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FuHisyouka HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FuKetsugan
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fuketsugan/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fuketsugan/sources.cmake)
+    set(DLL_SOURCES_DLL_FuKetsugan ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FuKetsugan SHARED ${DLL_SOURCES_DLL_FuKetsugan})
+    target_include_directories(harmonyrecomp_DLL_FuKetsugan PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fuketsugan
+    )
+    target_link_libraries(harmonyrecomp_DLL_FuKetsugan PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FuKetsugan
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fuketsugan/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FuKetsugan harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FuKetsugan PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FuKetsugan HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FuKyokotsu
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fukyokotsu/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fukyokotsu/sources.cmake)
+    set(DLL_SOURCES_DLL_FuKyokotsu ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FuKyokotsu SHARED ${DLL_SOURCES_DLL_FuKyokotsu})
+    target_include_directories(harmonyrecomp_DLL_FuKyokotsu PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fukyokotsu
+    )
+    target_link_libraries(harmonyrecomp_DLL_FuKyokotsu PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FuKyokotsu
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fukyokotsu/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FuKyokotsu harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FuKyokotsu PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FuKyokotsu HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FuRyukibi
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_furyukibi/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_furyukibi/sources.cmake)
+    set(DLL_SOURCES_DLL_FuRyukibi ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FuRyukibi SHARED ${DLL_SOURCES_DLL_FuRyukibi})
+    target_include_directories(harmonyrecomp_DLL_FuRyukibi PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_furyukibi
+    )
+    target_link_libraries(harmonyrecomp_DLL_FuRyukibi PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FuRyukibi
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_furyukibi/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FuRyukibi harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FuRyukibi PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FuRyukibi HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_FuSimon
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fusimon/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_fusimon/sources.cmake)
+    set(DLL_SOURCES_DLL_FuSimon ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_FuSimon SHARED ${DLL_SOURCES_DLL_FuSimon})
+    target_include_directories(harmonyrecomp_DLL_FuSimon PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fusimon
+    )
+    target_link_libraries(harmonyrecomp_DLL_FuSimon PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_FuSimon
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_fusimon/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_FuSimon harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_FuSimon PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_FuSimon HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_PSanfauglir
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psanfauglir/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_psanfauglir/sources.cmake)
+    set(DLL_SOURCES_DLL_PSanfauglir ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_PSanfauglir SHARED ${DLL_SOURCES_DLL_PSanfauglir})
+    target_include_directories(harmonyrecomp_DLL_PSanfauglir PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psanfauglir
+    )
+    target_link_libraries(harmonyrecomp_DLL_PSanfauglir PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_PSanfauglir
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psanfauglir/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_PSanfauglir harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_PSanfauglir PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_PSanfauglir HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_PsBeel
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psbeel/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_psbeel/sources.cmake)
+    set(DLL_SOURCES_DLL_PsBeel ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_PsBeel SHARED ${DLL_SOURCES_DLL_PsBeel})
+    target_include_directories(harmonyrecomp_DLL_PsBeel PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psbeel
+    )
+    target_link_libraries(harmonyrecomp_DLL_PsBeel PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_PsBeel
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psbeel/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_PsBeel harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_PsBeel PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_PsBeel HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_PSberrigan
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psberrigan/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_psberrigan/sources.cmake)
+    set(DLL_SOURCES_DLL_PSberrigan ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_PSberrigan SHARED ${DLL_SOURCES_DLL_PSberrigan})
+    target_include_directories(harmonyrecomp_DLL_PSberrigan PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psberrigan
+    )
+    target_link_libraries(harmonyrecomp_DLL_PSberrigan PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_PSberrigan
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psberrigan/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_PSberrigan harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_PSberrigan PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_PSberrigan HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_PSfishh
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psfishh/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_psfishh/sources.cmake)
+    set(DLL_SOURCES_DLL_PSfishh ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_PSfishh SHARED ${DLL_SOURCES_DLL_PSfishh})
+    target_include_directories(harmonyrecomp_DLL_PSfishh PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psfishh
+    )
+    target_link_libraries(harmonyrecomp_DLL_PSfishh PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_PSfishh
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psfishh/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_PSfishh harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_PSfishh PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_PSfishh HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_PSgaibon
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psgaibon/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_psgaibon/sources.cmake)
+    set(DLL_SOURCES_DLL_PSgaibon ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_PSgaibon SHARED ${DLL_SOURCES_DLL_PSgaibon})
+    target_include_directories(harmonyrecomp_DLL_PSgaibon PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psgaibon
+    )
+    target_link_libraries(harmonyrecomp_DLL_PSgaibon PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_PSgaibon
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psgaibon/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_PSgaibon harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_PSgaibon PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_PSgaibon HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_PSkillerf
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_pskillerf/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_pskillerf/sources.cmake)
+    set(DLL_SOURCES_DLL_PSkillerf ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_PSkillerf SHARED ${DLL_SOURCES_DLL_PSkillerf})
+    target_include_directories(harmonyrecomp_DLL_PSkillerf PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_pskillerf
+    )
+    target_link_libraries(harmonyrecomp_DLL_PSkillerf PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_PSkillerf
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_pskillerf/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_PSkillerf harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_PSkillerf PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_PSkillerf HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_PSukobach
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psukobach/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_psukobach/sources.cmake)
+    set(DLL_SOURCES_DLL_PSukobach ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_PSukobach SHARED ${DLL_SOURCES_DLL_PSukobach})
+    target_include_directories(harmonyrecomp_DLL_PSukobach PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psukobach
+    )
+    target_link_libraries(harmonyrecomp_DLL_PSukobach PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_PSukobach
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_psukobach/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_PSukobach harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_PSukobach PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_PSukobach HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_Region
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_region/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_region/sources.cmake)
+    set(DLL_SOURCES_DLL_Region ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_Region SHARED ${DLL_SOURCES_DLL_Region})
+    target_include_directories(harmonyrecomp_DLL_Region PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_region
+    )
+    target_link_libraries(harmonyrecomp_DLL_Region PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_Region
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_region/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_Region harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_Region PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_Region HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: DLL_Ryukotsu
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_ryukotsu/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dll_ryukotsu/sources.cmake)
+    set(DLL_SOURCES_DLL_Ryukotsu ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_DLL_Ryukotsu SHARED ${DLL_SOURCES_DLL_Ryukotsu})
+    target_include_directories(harmonyrecomp_DLL_Ryukotsu PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_ryukotsu
+    )
+    target_link_libraries(harmonyrecomp_DLL_Ryukotsu PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_DLL_Ryukotsu
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dll_ryukotsu/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_DLL_Ryukotsu harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_DLL_Ryukotsu PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_DLL_Ryukotsu HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotFCaxe
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcaxe/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotfcaxe/sources.cmake)
+    set(DLL_SOURCES_dllshotFCaxe ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotFCaxe SHARED ${DLL_SOURCES_dllshotFCaxe})
+    target_include_directories(harmonyrecomp_dllshotFCaxe PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcaxe
+    )
+    target_link_libraries(harmonyrecomp_dllshotFCaxe PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotFCaxe
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcaxe/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotFCaxe harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotFCaxe PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotFCaxe HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotFCbone
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcbone/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotfcbone/sources.cmake)
+    set(DLL_SOURCES_dllshotFCbone ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotFCbone SHARED ${DLL_SOURCES_dllshotFCbone})
+    target_include_directories(harmonyrecomp_dllshotFCbone PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcbone
+    )
+    target_link_libraries(harmonyrecomp_dllshotFCbone PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotFCbone
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcbone/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotFCbone harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotFCbone PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotFCbone HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotFcDraFire
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcdrafire/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotfcdrafire/sources.cmake)
+    set(DLL_SOURCES_dllshotFcDraFire ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotFcDraFire SHARED ${DLL_SOURCES_dllshotFcDraFire})
+    target_include_directories(harmonyrecomp_dllshotFcDraFire PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcdrafire
+    )
+    target_link_libraries(harmonyrecomp_dllshotFcDraFire PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotFcDraFire
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcdrafire/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotFcDraFire harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotFcDraFire PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotFcDraFire HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotFcDraMaku
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcdramaku/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotfcdramaku/sources.cmake)
+    set(DLL_SOURCES_dllshotFcDraMaku ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotFcDraMaku SHARED ${DLL_SOURCES_dllshotFcDraMaku})
+    target_include_directories(harmonyrecomp_dllshotFcDraMaku PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcdramaku
+    )
+    target_link_libraries(harmonyrecomp_dllshotFcDraMaku PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotFcDraMaku
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcdramaku/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotFcDraMaku harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotFcDraMaku PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotFcDraMaku HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotFCfireball
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcfireball/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotfcfireball/sources.cmake)
+    set(DLL_SOURCES_dllshotFCfireball ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotFCfireball SHARED ${DLL_SOURCES_dllshotFCfireball})
+    target_include_directories(harmonyrecomp_dllshotFCfireball PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcfireball
+    )
+    target_link_libraries(harmonyrecomp_dllshotFCfireball PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotFCfireball
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfcfireball/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotFCfireball harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotFCfireball PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotFCfireball HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotFumaRyukotsushot
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfumaryukotsushot/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotfumaryukotsushot/sources.cmake)
+    set(DLL_SOURCES_dllshotFumaRyukotsushot ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotFumaRyukotsushot SHARED ${DLL_SOURCES_dllshotFumaRyukotsushot})
+    target_include_directories(harmonyrecomp_dllshotFumaRyukotsushot PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfumaryukotsushot
+    )
+    target_link_libraries(harmonyrecomp_dllshotFumaRyukotsushot PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotFumaRyukotsushot
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfumaryukotsushot/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotFumaRyukotsushot harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotFumaRyukotsushot PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotFumaRyukotsushot HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotFumaRyukotsusoul
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfumaryukotsusoul/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotfumaryukotsusoul/sources.cmake)
+    set(DLL_SOURCES_dllshotFumaRyukotsusoul ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotFumaRyukotsusoul SHARED ${DLL_SOURCES_dllshotFumaRyukotsusoul})
+    target_include_directories(harmonyrecomp_dllshotFumaRyukotsusoul PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfumaryukotsusoul
+    )
+    target_link_libraries(harmonyrecomp_dllshotFumaRyukotsusoul PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotFumaRyukotsusoul
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotfumaryukotsusoul/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotFumaRyukotsusoul harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotFumaRyukotsusoul PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotFumaRyukotsusoul HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotGlyphDextroCustos
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotglyphdextrocustos/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotglyphdextrocustos/sources.cmake)
+    set(DLL_SOURCES_dllshotGlyphDextroCustos ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotGlyphDextroCustos SHARED ${DLL_SOURCES_dllshotGlyphDextroCustos})
+    target_include_directories(harmonyrecomp_dllshotGlyphDextroCustos PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotglyphdextrocustos
+    )
+    target_link_libraries(harmonyrecomp_dllshotGlyphDextroCustos PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotGlyphDextroCustos
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotglyphdextrocustos/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotGlyphDextroCustos harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotGlyphDextroCustos PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotGlyphDextroCustos HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotGlyphGlobus
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotglyphglobus/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotglyphglobus/sources.cmake)
+    set(DLL_SOURCES_dllshotGlyphGlobus ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotGlyphGlobus SHARED ${DLL_SOURCES_dllshotGlyphGlobus})
+    target_include_directories(harmonyrecomp_dllshotGlyphGlobus PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotglyphglobus
+    )
+    target_link_libraries(harmonyrecomp_dllshotGlyphGlobus PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotGlyphGlobus
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotglyphglobus/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotGlyphGlobus harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotGlyphGlobus PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotGlyphGlobus HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotGlyphLuminatio
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotglyphluminatio/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotglyphluminatio/sources.cmake)
+    set(DLL_SOURCES_dllshotGlyphLuminatio ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotGlyphLuminatio SHARED ${DLL_SOURCES_dllshotGlyphLuminatio})
+    target_include_directories(harmonyrecomp_dllshotGlyphLuminatio PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotglyphluminatio
+    )
+    target_link_libraries(harmonyrecomp_dllshotGlyphLuminatio PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotGlyphLuminatio
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotglyphluminatio/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotGlyphLuminatio harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotGlyphLuminatio PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotGlyphLuminatio HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotGlyphSinestroCustos
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotglyphsinestrocustos/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotglyphsinestrocustos/sources.cmake)
+    set(DLL_SOURCES_dllshotGlyphSinestroCustos ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotGlyphSinestroCustos SHARED ${DLL_SOURCES_dllshotGlyphSinestroCustos})
+    target_include_directories(harmonyrecomp_dllshotGlyphSinestroCustos PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotglyphsinestrocustos
+    )
+    target_link_libraries(harmonyrecomp_dllshotGlyphSinestroCustos PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotGlyphSinestroCustos
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotglyphsinestrocustos/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotGlyphSinestroCustos harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotGlyphSinestroCustos PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotGlyphSinestroCustos HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotLearningFCdeath
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotlearningfcdeath/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotlearningfcdeath/sources.cmake)
+    set(DLL_SOURCES_dllshotLearningFCdeath ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotLearningFCdeath SHARED ${DLL_SOURCES_dllshotLearningFCdeath})
+    target_include_directories(harmonyrecomp_dllshotLearningFCdeath PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotlearningfcdeath
+    )
+    target_link_libraries(harmonyrecomp_dllshotLearningFCdeath PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotLearningFCdeath
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotlearningfcdeath/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotLearningFCdeath harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotLearningFCdeath PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotLearningFCdeath HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotPSanfsoul
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsanfsoul/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotpsanfsoul/sources.cmake)
+    set(DLL_SOURCES_dllshotPSanfsoul ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotPSanfsoul SHARED ${DLL_SOURCES_dllshotPSanfsoul})
+    target_include_directories(harmonyrecomp_dllshotPSanfsoul PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsanfsoul
+    )
+    target_link_libraries(harmonyrecomp_dllshotPSanfsoul PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotPSanfsoul
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsanfsoul/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotPSanfsoul harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotPSanfsoul PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotPSanfsoul HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotPsBeelShot
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsbeelshot/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotpsbeelshot/sources.cmake)
+    set(DLL_SOURCES_dllshotPsBeelShot ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotPsBeelShot SHARED ${DLL_SOURCES_dllshotPsBeelShot})
+    target_include_directories(harmonyrecomp_dllshotPsBeelShot PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsbeelshot
+    )
+    target_link_libraries(harmonyrecomp_dllshotPsBeelShot PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotPsBeelShot
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsbeelshot/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotPsBeelShot harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotPsBeelShot PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotPsBeelShot HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotPsBeelSoul
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsbeelsoul/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotpsbeelsoul/sources.cmake)
+    set(DLL_SOURCES_dllshotPsBeelSoul ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotPsBeelSoul SHARED ${DLL_SOURCES_dllshotPsBeelSoul})
+    target_include_directories(harmonyrecomp_dllshotPsBeelSoul PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsbeelsoul
+    )
+    target_link_libraries(harmonyrecomp_dllshotPsBeelSoul PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotPsBeelSoul
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsbeelsoul/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotPsBeelSoul harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotPsBeelSoul PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotPsBeelSoul HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotPSberriganshot
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsberriganshot/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotpsberriganshot/sources.cmake)
+    set(DLL_SOURCES_dllshotPSberriganshot ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotPSberriganshot SHARED ${DLL_SOURCES_dllshotPSberriganshot})
+    target_include_directories(harmonyrecomp_dllshotPSberriganshot PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsberriganshot
+    )
+    target_link_libraries(harmonyrecomp_dllshotPSberriganshot PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotPSberriganshot
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsberriganshot/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotPSberriganshot harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotPSberriganshot PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotPSberriganshot HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotPSberrigansoul
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsberrigansoul/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotpsberrigansoul/sources.cmake)
+    set(DLL_SOURCES_dllshotPSberrigansoul ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotPSberrigansoul SHARED ${DLL_SOURCES_dllshotPSberrigansoul})
+    target_include_directories(harmonyrecomp_dllshotPSberrigansoul PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsberrigansoul
+    )
+    target_link_libraries(harmonyrecomp_dllshotPSberrigansoul PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotPSberrigansoul
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsberrigansoul/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotPSberrigansoul harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotPSberrigansoul PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotPSberrigansoul HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotPSfishhshot
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsfishhshot/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotpsfishhshot/sources.cmake)
+    set(DLL_SOURCES_dllshotPSfishhshot ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotPSfishhshot SHARED ${DLL_SOURCES_dllshotPSfishhshot})
+    target_include_directories(harmonyrecomp_dllshotPSfishhshot PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsfishhshot
+    )
+    target_link_libraries(harmonyrecomp_dllshotPSfishhshot PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotPSfishhshot
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsfishhshot/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotPSfishhshot harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotPSfishhshot PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotPSfishhshot HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotPSfishhsoul
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsfishhsoul/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotpsfishhsoul/sources.cmake)
+    set(DLL_SOURCES_dllshotPSfishhsoul ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotPSfishhsoul SHARED ${DLL_SOURCES_dllshotPSfishhsoul})
+    target_include_directories(harmonyrecomp_dllshotPSfishhsoul PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsfishhsoul
+    )
+    target_link_libraries(harmonyrecomp_dllshotPSfishhsoul PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotPSfishhsoul
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsfishhsoul/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotPSfishhsoul harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotPSfishhsoul PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotPSfishhsoul HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotPSgaibonshot
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsgaibonshot/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotpsgaibonshot/sources.cmake)
+    set(DLL_SOURCES_dllshotPSgaibonshot ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotPSgaibonshot SHARED ${DLL_SOURCES_dllshotPSgaibonshot})
+    target_include_directories(harmonyrecomp_dllshotPSgaibonshot PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsgaibonshot
+    )
+    target_link_libraries(harmonyrecomp_dllshotPSgaibonshot PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotPSgaibonshot
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsgaibonshot/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotPSgaibonshot harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotPSgaibonshot PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotPSgaibonshot HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotPSgaibonsoul
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsgaibonsoul/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotpsgaibonsoul/sources.cmake)
+    set(DLL_SOURCES_dllshotPSgaibonsoul ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotPSgaibonsoul SHARED ${DLL_SOURCES_dllshotPSgaibonsoul})
+    target_include_directories(harmonyrecomp_dllshotPSgaibonsoul PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsgaibonsoul
+    )
+    target_link_libraries(harmonyrecomp_dllshotPSgaibonsoul PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotPSgaibonsoul
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsgaibonsoul/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotPSgaibonsoul harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotPSgaibonsoul PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotPSgaibonsoul HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotPSkillerfsoul
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpskillerfsoul/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotpskillerfsoul/sources.cmake)
+    set(DLL_SOURCES_dllshotPSkillerfsoul ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotPSkillerfsoul SHARED ${DLL_SOURCES_dllshotPSkillerfsoul})
+    target_include_directories(harmonyrecomp_dllshotPSkillerfsoul PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpskillerfsoul
+    )
+    target_link_libraries(harmonyrecomp_dllshotPSkillerfsoul PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotPSkillerfsoul
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpskillerfsoul/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotPSkillerfsoul harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotPSkillerfsoul PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotPSkillerfsoul HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotPSukobachfire
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsukobachfire/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotpsukobachfire/sources.cmake)
+    set(DLL_SOURCES_dllshotPSukobachfire ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotPSukobachfire SHARED ${DLL_SOURCES_dllshotPSukobachfire})
+    target_include_directories(harmonyrecomp_dllshotPSukobachfire PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsukobachfire
+    )
+    target_link_libraries(harmonyrecomp_dllshotPSukobachfire PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotPSukobachfire
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotpsukobachfire/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotPSukobachfire harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotPSukobachfire PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotPSukobachfire HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotRegionFire
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotregionfire/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotregionfire/sources.cmake)
+    set(DLL_SOURCES_dllshotRegionFire ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotRegionFire SHARED ${DLL_SOURCES_dllshotRegionFire})
+    target_include_directories(harmonyrecomp_dllshotRegionFire PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotregionfire
+    )
+    target_link_libraries(harmonyrecomp_dllshotRegionFire PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotRegionFire
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotregionfire/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotRegionFire harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotRegionFire PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotRegionFire HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotRegionHuman
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotregionhuman/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotregionhuman/sources.cmake)
+    set(DLL_SOURCES_dllshotRegionHuman ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotRegionHuman SHARED ${DLL_SOURCES_dllshotRegionHuman})
+    target_include_directories(harmonyrecomp_dllshotRegionHuman PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotregionhuman
+    )
+    target_link_libraries(harmonyrecomp_dllshotRegionHuman PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotRegionHuman
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotregionhuman/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotRegionHuman harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotRegionHuman PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotRegionHuman HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotRegionLaser
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotregionlaser/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotregionlaser/sources.cmake)
+    set(DLL_SOURCES_dllshotRegionLaser ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotRegionLaser SHARED ${DLL_SOURCES_dllshotRegionLaser})
+    target_include_directories(harmonyrecomp_dllshotRegionLaser PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotregionlaser
+    )
+    target_link_libraries(harmonyrecomp_dllshotRegionLaser PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotRegionLaser
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotregionlaser/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotRegionLaser harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotRegionLaser PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotRegionLaser HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFCaltair
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcaltair/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfcaltair/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFCaltair ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFCaltair SHARED ${DLL_SOURCES_dllshotSoulFCaltair})
+    target_include_directories(harmonyrecomp_dllshotSoulFCaltair PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcaltair
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFCaltair PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFCaltair
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcaltair/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFCaltair harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFCaltair PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFCaltair HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFCbat
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcbat/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfcbat/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFCbat ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFCbat SHARED ${DLL_SOURCES_dllshotSoulFCbat})
+    target_include_directories(harmonyrecomp_dllshotSoulFCbat PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcbat
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFCbat PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFCbat
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcbat/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFCbat harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFCbat PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFCbat HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFCbigbat
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcbigbat/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfcbigbat/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFCbigbat ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFCbigbat SHARED ${DLL_SOURCES_dllshotSoulFCbigbat})
+    target_include_directories(harmonyrecomp_dllshotSoulFCbigbat PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcbigbat
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFCbigbat PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFCbigbat
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcbigbat/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFCbigbat harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFCbigbat PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFCbigbat HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFCbone
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcbone/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfcbone/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFCbone ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFCbone SHARED ${DLL_SOURCES_dllshotSoulFCbone})
+    target_include_directories(harmonyrecomp_dllshotSoulFCbone PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcbone
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFCbone PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFCbone
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcbone/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFCbone harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFCbone PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFCbone HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFCcrow
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfccrow/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfccrow/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFCcrow ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFCcrow SHARED ${DLL_SOURCES_dllshotSoulFCcrow})
+    target_include_directories(harmonyrecomp_dllshotSoulFCcrow PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfccrow
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFCcrow PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFCcrow
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfccrow/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFCcrow harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFCcrow PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFCcrow HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFCdeath
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcdeath/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfcdeath/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFCdeath ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFCdeath SHARED ${DLL_SOURCES_dllshotSoulFCdeath})
+    target_include_directories(harmonyrecomp_dllshotSoulFCdeath PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcdeath
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFCdeath PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFCdeath
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcdeath/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFCdeath harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFCdeath PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFCdeath HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFCdracula
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcdracula/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfcdracula/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFCdracula ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFCdracula SHARED ${DLL_SOURCES_dllshotSoulFCdracula})
+    target_include_directories(harmonyrecomp_dllshotSoulFCdracula PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcdracula
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFCdracula PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFCdracula
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcdracula/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFCdracula harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFCdracula PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFCdracula HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFCfishman
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcfishman/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfcfishman/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFCfishman ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFCfishman SHARED ${DLL_SOURCES_dllshotSoulFCfishman})
+    target_include_directories(harmonyrecomp_dllshotSoulFCfishman PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcfishman
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFCfishman PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFCfishman
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcfishman/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFCfishman harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFCfishman PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFCfishman HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFCghost
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcghost/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfcghost/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFCghost ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFCghost SHARED ${DLL_SOURCES_dllshotSoulFCghost})
+    target_include_directories(harmonyrecomp_dllshotSoulFCghost PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcghost
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFCghost PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFCghost
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcghost/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFCghost harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFCghost PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFCghost HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFClance
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfclance/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfclance/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFClance ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFClance SHARED ${DLL_SOURCES_dllshotSoulFClance})
+    target_include_directories(harmonyrecomp_dllshotSoulFClance PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfclance
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFClance PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFClance
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfclance/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFClance harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFClance PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFClance HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFCmedusa
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcmedusa/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfcmedusa/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFCmedusa ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFCmedusa SHARED ${DLL_SOURCES_dllshotSoulFCmedusa})
+    target_include_directories(harmonyrecomp_dllshotSoulFCmedusa PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcmedusa
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFCmedusa PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFCmedusa
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcmedusa/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFCmedusa harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFCmedusa PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFCmedusa HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFCmummy
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcmummy/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfcmummy/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFCmummy ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFCmummy SHARED ${DLL_SOURCES_dllshotSoulFCmummy})
+    target_include_directories(harmonyrecomp_dllshotSoulFCmummy PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcmummy
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFCmummy PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFCmummy
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcmummy/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFCmummy harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFCmummy PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFCmummy HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFCnomi
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcnomi/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfcnomi/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFCnomi ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFCnomi SHARED ${DLL_SOURCES_dllshotSoulFCnomi})
+    target_include_directories(harmonyrecomp_dllshotSoulFCnomi PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcnomi
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFCnomi PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFCnomi
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcnomi/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFCnomi harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFCnomi PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFCnomi HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFCpanther
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcpanther/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfcpanther/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFCpanther ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFCpanther SHARED ${DLL_SOURCES_dllshotSoulFCpanther})
+    target_include_directories(harmonyrecomp_dllshotSoulFCpanther PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcpanther
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFCpanther PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFCpanther
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcpanther/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFCpanther harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFCpanther PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFCpanther HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFCwhitedra
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcwhitedra/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfcwhitedra/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFCwhitedra ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFCwhitedra SHARED ${DLL_SOURCES_dllshotSoulFCwhitedra})
+    target_include_directories(harmonyrecomp_dllshotSoulFCwhitedra PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcwhitedra
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFCwhitedra PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFCwhitedra
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfcwhitedra/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFCwhitedra harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFCwhitedra PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFCwhitedra HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFCzombi
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfczombi/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfczombi/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFCzombi ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFCzombi SHARED ${DLL_SOURCES_dllshotSoulFCzombi})
+    target_include_directories(harmonyrecomp_dllshotSoulFCzombi PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfczombi
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFCzombi PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFCzombi
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfczombi/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFCzombi harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFCzombi PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFCzombi HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFumaDokugan
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumadokugan/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfumadokugan/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFumaDokugan ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFumaDokugan SHARED ${DLL_SOURCES_dllshotSoulFumaDokugan})
+    target_include_directories(harmonyrecomp_dllshotSoulFumaDokugan PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumadokugan
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFumaDokugan PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFumaDokugan
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumadokugan/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFumaDokugan harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFumaDokugan PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFumaDokugan HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFumaFugubara
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumafugubara/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfumafugubara/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFumaFugubara ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFumaFugubara SHARED ${DLL_SOURCES_dllshotSoulFumaFugubara})
+    target_include_directories(harmonyrecomp_dllshotSoulFumaFugubara PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumafugubara
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFumaFugubara PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFumaFugubara
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumafugubara/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFumaFugubara harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFumaFugubara PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFumaFugubara HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFumaHannya
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumahannya/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfumahannya/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFumaHannya ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFumaHannya SHARED ${DLL_SOURCES_dllshotSoulFumaHannya})
+    target_include_directories(harmonyrecomp_dllshotSoulFumaHannya PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumahannya
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFumaHannya PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFumaHannya
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumahannya/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFumaHannya harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFumaHannya PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFumaHannya HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFumaHiguruma
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumahiguruma/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfumahiguruma/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFumaHiguruma ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFumaHiguruma SHARED ${DLL_SOURCES_dllshotSoulFumaHiguruma})
+    target_include_directories(harmonyrecomp_dllshotSoulFumaHiguruma PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumahiguruma
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFumaHiguruma PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFumaHiguruma
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumahiguruma/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFumaHiguruma harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFumaHiguruma PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFumaHiguruma HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFumaHisyouka
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumahisyouka/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfumahisyouka/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFumaHisyouka ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFumaHisyouka SHARED ${DLL_SOURCES_dllshotSoulFumaHisyouka})
+    target_include_directories(harmonyrecomp_dllshotSoulFumaHisyouka PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumahisyouka
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFumaHisyouka PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFumaHisyouka
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumahisyouka/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFumaHisyouka harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFumaHisyouka PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFumaHisyouka HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFumaKetsugan
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumaketsugan/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfumaketsugan/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFumaKetsugan ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFumaKetsugan SHARED ${DLL_SOURCES_dllshotSoulFumaKetsugan})
+    target_include_directories(harmonyrecomp_dllshotSoulFumaKetsugan PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumaketsugan
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFumaKetsugan PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFumaKetsugan
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumaketsugan/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFumaKetsugan harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFumaKetsugan PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFumaKetsugan HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFumaKyokotsu
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumakyokotsu/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfumakyokotsu/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFumaKyokotsu ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFumaKyokotsu SHARED ${DLL_SOURCES_dllshotSoulFumaKyokotsu})
+    target_include_directories(harmonyrecomp_dllshotSoulFumaKyokotsu PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumakyokotsu
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFumaKyokotsu PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFumaKyokotsu
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumakyokotsu/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFumaKyokotsu harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFumaKyokotsu PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFumaKyokotsu HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFumaRyukibi
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumaryukibi/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfumaryukibi/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFumaRyukibi ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFumaRyukibi SHARED ${DLL_SOURCES_dllshotSoulFumaRyukibi})
+    target_include_directories(harmonyrecomp_dllshotSoulFumaRyukibi PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumaryukibi
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFumaRyukibi PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFumaRyukibi
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumaryukibi/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFumaRyukibi harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFumaRyukibi PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFumaRyukibi HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSoulFumaSimon
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumasimon/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsoulfumasimon/sources.cmake)
+    set(DLL_SOURCES_dllshotSoulFumaSimon ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSoulFumaSimon SHARED ${DLL_SOURCES_dllshotSoulFumaSimon})
+    target_include_directories(harmonyrecomp_dllshotSoulFumaSimon PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumasimon
+    )
+    target_link_libraries(harmonyrecomp_dllshotSoulFumaSimon PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSoulFumaSimon
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsoulfumasimon/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSoulFumaSimon harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSoulFumaSimon PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSoulFumaSimon HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSubFCaxe
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsubfcaxe/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsubfcaxe/sources.cmake)
+    set(DLL_SOURCES_dllshotSubFCaxe ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSubFCaxe SHARED ${DLL_SOURCES_dllshotSubFCaxe})
+    target_include_directories(harmonyrecomp_dllshotSubFCaxe PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsubfcaxe
+    )
+    target_link_libraries(harmonyrecomp_dllshotSubFCaxe PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSubFCaxe
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsubfcaxe/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSubFCaxe harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSubFCaxe PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSubFCaxe HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSubFCcross
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsubfccross/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsubfccross/sources.cmake)
+    set(DLL_SOURCES_dllshotSubFCcross ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSubFCcross SHARED ${DLL_SOURCES_dllshotSubFCcross})
+    target_include_directories(harmonyrecomp_dllshotSubFCcross PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsubfccross
+    )
+    target_link_libraries(harmonyrecomp_dllshotSubFCcross PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSubFCcross
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsubfccross/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSubFCcross harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSubFCcross PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSubFCcross HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSubFCholywater
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsubfcholywater/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsubfcholywater/sources.cmake)
+    set(DLL_SOURCES_dllshotSubFCholywater ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSubFCholywater SHARED ${DLL_SOURCES_dllshotSubFCholywater})
+    target_include_directories(harmonyrecomp_dllshotSubFCholywater PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsubfcholywater
+    )
+    target_link_libraries(harmonyrecomp_dllshotSubFCholywater PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSubFCholywater
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsubfcholywater/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSubFCholywater harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSubFCholywater PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSubFCholywater HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSubFCknife
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsubfcknife/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsubfcknife/sources.cmake)
+    set(DLL_SOURCES_dllshotSubFCknife ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSubFCknife SHARED ${DLL_SOURCES_dllshotSubFCknife})
+    target_include_directories(harmonyrecomp_dllshotSubFCknife PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsubfcknife
+    )
+    target_link_libraries(harmonyrecomp_dllshotSubFCknife PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSubFCknife
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsubfcknife/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSubFCknife harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSubFCknife PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSubFCknife HOST ${REXGLUE_HOST_TARGET})
+endif()
+
+# DLL module: dllshotSubJavelin
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsubjavelin/sources.cmake")
+    set(_REXGLUE_RESTORE_GENERATED_SOURCES FALSE)
+    if(DEFINED GENERATED_SOURCES)
+        set(_REXGLUE_PREVIOUS_GENERATED_SOURCES ${GENERATED_SOURCES})
+        set(_REXGLUE_RESTORE_GENERATED_SOURCES TRUE)
+    endif()
+    include(generated/dllshotsubjavelin/sources.cmake)
+    set(DLL_SOURCES_dllshotSubJavelin ${GENERATED_SOURCES})
+    if(_REXGLUE_RESTORE_GENERATED_SOURCES)
+        set(GENERATED_SOURCES ${_REXGLUE_PREVIOUS_GENERATED_SOURCES})
+    else()
+        unset(GENERATED_SOURCES)
+    endif()
+    unset(_REXGLUE_PREVIOUS_GENERATED_SOURCES)
+    unset(_REXGLUE_RESTORE_GENERATED_SOURCES)
+    add_library(harmonyrecomp_dllshotSubJavelin SHARED ${DLL_SOURCES_dllshotSubJavelin})
+    target_include_directories(harmonyrecomp_dllshotSubJavelin PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsubjavelin
+    )
+    target_link_libraries(harmonyrecomp_dllshotSubJavelin PRIVATE rex::runtime)
+    rexglue_apply_recomp_settings(harmonyrecomp_dllshotSubJavelin
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/dllshotsubjavelin/harmonyrecomp_pch.h")
+    add_dependencies(harmonyrecomp_dllshotSubJavelin harmonyrecomp_codegen)
+    set_target_properties(harmonyrecomp_dllshotSubJavelin PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+    )
+    rexglue_configure_module_target(harmonyrecomp_dllshotSubJavelin HOST ${REXGLUE_HOST_TARGET})
+endif()
+
