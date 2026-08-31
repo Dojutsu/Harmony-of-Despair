@@ -1,15 +1,23 @@
 #include "game_data.h"
 
 #include <array>
-#include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <string>
 
 namespace fs = std::filesystem;
 
 namespace {
+
+bool Check(bool condition, const char* description) {
+  if (!condition) {
+    std::cerr << "FAILED: " << description << '\n';
+  }
+  return condition;
+}
 
 void WriteBe32(std::array<uint8_t, 80>& bytes, size_t offset, uint32_t value) {
   bytes[offset] = uint8_t(value >> 24);
@@ -49,52 +57,76 @@ void Populate(const fs::path& root, uint32_t title_id = 0x58410A7A,
 }  // namespace
 
 int main() {
-  fs::path base = fs::temp_directory_path() / "harmonyrecomp-game-data-tests";
+  const auto unique_suffix =
+      std::chrono::steady_clock::now().time_since_epoch().count();
+  fs::path base = fs::temp_directory_path() /
+                  ("harmonyrecomp-game-data-tests-" +
+                   std::to_string(unique_suffix));
   std::error_code ec;
   fs::remove_all(base, ec);
 
+  std::cout << "Checking missing and unsupported inputs\n";
   auto missing = harmony::game_data::ValidateRoot(base / "missing");
-  assert(!missing.valid);
+  if (!Check(!missing.valid, "missing root must be rejected")) return 1;
 
   Populate(base / "valid");
-  assert(!harmony::game_data::ValidateRoot(base / "valid").valid);
+  if (!Check(!harmony::game_data::ValidateRoot(base / "valid").valid,
+             "uninstalled payload must be rejected"))
+    return 1;
 
   Populate(base / "wrong-title", 0x12345678);
   harmony::game_data::ImportOptions wrong_title;
   wrong_title.source = base / "wrong-title";
   wrong_title.destination = base / "wrong-title-installed";
-  assert(!harmony::game_data::Import(wrong_title).valid);
+  if (!Check(!harmony::game_data::Import(wrong_title).valid,
+             "wrong title must be rejected"))
+    return 1;
 
   Populate(base / "unsupported", 0x58410A7A, 0x6480C08F, 0x00000204);
   harmony::game_data::ImportOptions unsupported;
   unsupported.source = base / "unsupported";
   unsupported.destination = base / "unsupported-installed";
-  assert(!harmony::game_data::Import(unsupported).valid);
+  if (!Check(!harmony::game_data::Import(unsupported).valid,
+             "unsupported version must be rejected"))
+    return 1;
 
   Populate(base / "incomplete");
   fs::remove(base / "incomplete/data/player_dll/dllSoma.dll");
   harmony::game_data::ImportOptions incomplete;
   incomplete.source = base / "incomplete";
   incomplete.destination = base / "incomplete-installed";
-  assert(!harmony::game_data::Import(incomplete).valid);
+  if (!Check(!harmony::game_data::Import(incomplete).valid,
+             "incomplete payload must be rejected"))
+    return 1;
 
+  std::cout << "Checking transactional import and replacement guard\n";
   harmony::game_data::ImportOptions import;
   import.source = base / "valid";
   import.destination = base / "installed";
   auto imported = harmony::game_data::Import(import);
-  assert(imported.valid);
-  assert(harmony::game_data::ValidateRoot(import.destination).valid);
+  if (!Check(imported.valid, "valid payload must import")) return 1;
+  if (!Check(harmony::game_data::ValidateRoot(import.destination).valid,
+             "imported payload must validate"))
+    return 1;
 
   auto refused_existing = harmony::game_data::Import(import);
-  assert(!refused_existing.valid);
+  if (!Check(!refused_existing.valid,
+             "existing installation must not be replaced without force"))
+    return 1;
 
+  std::cout << "Checking symbolic-link rejection\n";
   fs::create_directory_symlink(base / "valid", base / "linked-source", ec);
   if (!ec) {
     import.source = base / "linked-source";
     import.destination = base / "linked-install";
-    assert(!harmony::game_data::Import(import).valid);
+    if (!Check(!harmony::game_data::Import(import).valid,
+               "symbolic-link source must be rejected"))
+      return 1;
+    fs::remove(base / "linked-source", ec);
   }
 
+  std::cout << "Cleaning test fixture\n";
   fs::remove_all(base, ec);
+  if (!Check(!ec, "test fixture cleanup must succeed")) return 1;
   return 0;
 }
