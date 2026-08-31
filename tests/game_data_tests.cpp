@@ -65,7 +65,7 @@ int main() {
   std::error_code ec;
   fs::remove_all(base, ec);
 
-  std::cout << "Checking missing and unsupported inputs\n";
+  std::cout << "Checking missing and unsupported inputs" << std::endl;
   auto missing = harmony::game_data::ValidateRoot(base / "missing");
   if (!Check(!missing.valid, "missing root must be rejected")) return 1;
 
@@ -99,7 +99,8 @@ int main() {
              "incomplete payload must be rejected"))
     return 1;
 
-  std::cout << "Checking transactional import and replacement guard\n";
+  std::cout << "Checking transactional import and replacement guard"
+            << std::endl;
   harmony::game_data::ImportOptions import;
   import.source = base / "valid";
   import.destination = base / "installed";
@@ -114,7 +115,7 @@ int main() {
              "existing installation must not be replaced without force"))
     return 1;
 
-  std::cout << "Checking symbolic-link rejection\n";
+  std::cout << "Checking symbolic-link rejection" << std::endl;
   fs::create_directory_symlink(base / "valid", base / "linked-source", ec);
   if (!ec) {
     import.source = base / "linked-source";
@@ -125,7 +126,7 @@ int main() {
     fs::remove(base / "linked-source", ec);
   }
 
-  std::cout << "Cleaning test fixture\n";
+  std::cout << "Cleaning test fixture" << std::endl;
   fs::remove_all(base, ec);
   if (!Check(!ec, "test fixture cleanup must succeed")) return 1;
   return 0;
