@@ -69,6 +69,7 @@ add_executable(game_data_tests
 target_include_directories(game_data_tests PRIVATE src)
 target_link_libraries(game_data_tests PRIVATE rex::runtime)
 add_test(NAME game-data COMMAND game_data_tests)
+set_tests_properties(game-data PROPERTIES TIMEOUT 90)
 
 # Portable SHA-256 known-vector tests + reusable library target.
 # harmonyrecomp-dlc-import consumes the same library so dlc_manifest.cpp

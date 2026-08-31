@@ -113,7 +113,7 @@ jobs:
         run: |
           $build = 'out/build/win-amd64-relwithdebinfo'
           cmake --build --preset win-amd64-relwithdebinfo --target game_data_tests --parallel
-          ctest --test-dir $build --output-on-failure
+          ctest --test-dir $build --verbose --output-on-failure
           $missingData = Join-Path $env:RUNNER_TEMP 'missing-harmony-data'
           $verify = Start-Process `
             -FilePath "$build/harmonyrecomp-import.exe" `
