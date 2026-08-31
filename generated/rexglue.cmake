@@ -108,23 +108,32 @@ macro(rexglue_setup_target target_name)
     rexglue_configure_target(${target_name} ${ARGN})
 endmacro()
 
-# Codegen runs as part of the build, re-running only when an input in codegen.d
-# changes. Build it alone with 'cmake --build . --target harmonyrecomp_codegen'.
-# Listing the sources as outputs orders any target that compiles them after
-# codegen, including one a project assembles itself rather than taking the
-# library rexglue_setup_target() builds. The stamp comes first: the DEPFILE
-# names it.
-add_custom_command(
-    OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/codegen.build.stamp"
-           ${REXGLUE_ENTRYPOINT_GENERATED_SOURCES}
-    COMMAND $<TARGET_FILE:rex::rexglue> codegen ${CMAKE_CURRENT_SOURCE_DIR}/harmonyrecomp_manifest.toml
-    DEPFILE "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/codegen.d"
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    COMMENT "Generating recompiled code for harmonyrecomp"
-    VERBATIM
-)
-add_custom_target(harmonyrecomp_codegen
-    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/codegen.build.stamp")
+option(REXGLUE_USE_PREGENERATED
+    "Compile committed generated sources without running codegen" OFF)
+if(REXGLUE_USE_PREGENERATED)
+    if(NOT REXGLUE_ENTRYPOINT_GENERATED_SOURCES)
+        message(FATAL_ERROR
+            "REXGLUE_USE_PREGENERATED requires generated entrypoint sources")
+    endif()
+    add_custom_target(harmonyrecomp_codegen)
+else()
+    # Codegen runs as part of the build, re-running only when an input in
+    # codegen.d changes. Build it alone with 'cmake --build . --target
+    # harmonyrecomp_codegen'. Listing the sources as outputs orders any target
+    # that compiles them after codegen. The stamp comes first: the DEPFILE names
+    # it.
+    add_custom_command(
+        OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/codegen.build.stamp"
+               ${REXGLUE_ENTRYPOINT_GENERATED_SOURCES}
+        COMMAND $<TARGET_FILE:rex::rexglue> codegen ${CMAKE_CURRENT_SOURCE_DIR}/harmonyrecomp_manifest.toml
+        DEPFILE "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/codegen.d"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Generating recompiled code for harmonyrecomp"
+        VERBATIM
+    )
+    add_custom_target(harmonyrecomp_codegen
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/codegen.build.stamp")
+endif()
 
 # Include DLL module shared library targets if codegen has generated them
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/dll_targets.cmake")

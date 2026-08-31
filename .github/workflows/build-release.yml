@@ -104,9 +104,13 @@ jobs:
         shell: pwsh
         run: |
           cmake --build --preset win-amd64-relwithdebinfo --target harmonyrecomp --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build --preset win-amd64-relwithdebinfo --target harmonyrecomp-import --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build --preset win-amd64-relwithdebinfo --target harmonyrecomp-dlc-import --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build --preset win-amd64-relwithdebinfo --target sha256_tests --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Stage Windows application-local runtime
         shell: pwsh
@@ -161,7 +165,9 @@ jobs:
         run: |
           $build = 'out/build/win-amd64-relwithdebinfo'
           cmake --build --preset win-amd64-relwithdebinfo --target game_data_tests sha256_tests dlc_header_tests --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest --test-dir $build --verbose --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $missingData = Join-Path $env:RUNNER_TEMP 'missing-harmony-data'
           $verify = Start-Process `
             -FilePath "$build/harmonyrecomp-import.exe" `
