@@ -2,11 +2,22 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <map>
 #include <optional>
 
 namespace harmony::dlc {
+
+// Writes the metadata file consumed by ReXGlue's marketplace-content
+// enumeration path. Kept as a small production seam so the exact bytes written
+// by DlcManager can be regression-tested without redistributing an STFS file.
+bool write_marketplace_content_header(const std::filesystem::path& header_path,
+                                      uint32_t title_id,
+                                      std::string_view file_name,
+                                      std::string_view display_name,
+                                      uint32_t license_mask,
+                                      std::string& error);
 
 struct DlcFileEntry {
     std::filesystem::path relative_path;

@@ -1,5 +1,8 @@
 #include "dlc_manifest.h"
 #include <rex/system/xcontent.h>
+#include <rex/string/utf8.h>
+#include <rex/system/xam/content_device.h>
+#include <rex/system/xam/content_manager.h>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -23,6 +26,41 @@ using rex::filesystem::FileAccess;
 using rex::filesystem::StfsContainerDevice;
 
 namespace harmony::dlc {
+
+bool write_marketplace_content_header(const fs::path& header_path,
+                                      uint32_t title_id,
+                                      std::string_view file_name,
+                                      std::string_view display_name,
+                                      uint32_t license_mask,
+                                      std::string& error) {
+  rex::system::xam::XCONTENT_AGGREGATE_DATA content_data{};
+  content_data.device_id =
+      static_cast<uint32_t>(rex::system::xam::DummyDeviceId::HDD);
+  content_data.content_type =
+      rex::system::XContentType::kMarketplaceContent;
+  content_data.set_display_name(rex::string::to_utf16(display_name));
+  content_data.set_file_name(file_name);
+  content_data.xuid = 0;
+  content_data.title_id = title_id;
+
+  std::ofstream header_file(header_path, std::ios::binary | std::ios::trunc);
+  if (!header_file) {
+    error = "cannot create header file";
+    return false;
+  }
+
+  header_file.write(reinterpret_cast<const char*>(&content_data),
+                    sizeof(content_data));
+  if (license_mask != 0) {
+    header_file.write(reinterpret_cast<const char*>(&license_mask),
+                      sizeof(license_mask));
+  }
+  if (!header_file) {
+    error = "cannot write header file";
+    return false;
+  }
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Simple JSON helpers (enough for the manifest format we write/read)
@@ -703,16 +741,29 @@ DlcImportResult DlcManager::install(const fs::path& container_path,
   }
 
   fs::path header_path = headers_dir / (result.content_id + ".header");
-  std::ofstream header_file(header_path, std::ios::binary | std::ios::trunc);
-  if (!header_file) {
-    result.errors.push_back("cannot create header file");
+  auto package_header = StfsContainerDevice::ReadPackageHeader(container_path);
+  if (!package_header) {
+    result.errors.push_back("cannot reread STFS package license metadata");
     return result;
   }
 
-  // 0x148-byte XCONTENT_AGGREGATE_DATA + 4-byte license mask placeholder.
-  std::vector<uint8_t> header_data(0x14C, 0);
-  header_file.write(reinterpret_cast<const char*>(header_data.data()), header_data.size());
-  header_file.close();
+  // Match ContentManager::InstallContent: active STFS license records
+  // contribute their license bits to the package mask returned by
+  // XamContentCreateEx after the package is mounted.
+  uint32_t license_mask = 0;
+  for (const auto& license : package_header->header.licenses) {
+    if (license.license_flags != 0) {
+      license_mask |= static_cast<uint32_t>(license.license_bits);
+    }
+  }
+
+  std::string header_error;
+  if (!write_marketplace_content_header(
+          header_path, title_id_, result.content_id, manifest.display_name,
+          license_mask, header_error)) {
+    result.errors.push_back(header_error);
+    return result;
+  }
 
   // Copy manifest to installed path so listing can read it
   fs::path installed_manifest_path = result.installed_path / "dlc_manifest.json";
