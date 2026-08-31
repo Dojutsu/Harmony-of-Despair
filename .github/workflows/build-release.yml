@@ -149,9 +149,8 @@ jobs:
 
           $tracyDestination = Join-Path $build 'TracyClientrd.dll'
           if (!(Test-Path -LiteralPath $tracyDestination -PathType Leaf)) {
-            $tracySource = Get-ChildItem -LiteralPath $build -Filter 'TracyClientrd.dll' -Recurse -File |
-              Select-Object -First 1 -ExpandProperty FullName
-            if (!$tracySource) {
+            $tracySource = Join-Path $env:GITHUB_WORKSPACE '_deps/rexglue-sdk/out/win-amd64/TracyClientrd.dll'
+            if (!(Test-Path -LiteralPath $tracySource -PathType Leaf)) {
               throw 'The built TracyClientrd.dll dependency was not found.'
             }
             Copy-Item -LiteralPath $tracySource -Destination $tracyDestination -Force
