@@ -18,11 +18,13 @@ Harmony's UDP 30741/30742 ports. There is currently no relay fallback, so highly
 restrictive NAT or firewall configurations can still fail. A public Search may
 occasionally miss while mappings are established; retrying Search is safe.
 
-The public directory operator must provision short-lived, paired rendezvous
-attempt credentials and configure both clients. Test credentials, server
-secrets, and machine-specific addresses are never included in release
-artifacts. Until that operator integration is deployed, traversal remains an
-advanced opt-in configuration rather than part of first-run game-data setup.
+The directory now issues short-lived, role-specific rendezvous capabilities
+automatically. With a production directory URL and `public` candidate type,
+Host and Search obtain their own capabilities without attempt IDs or secrets in
+launchers or configuration. Test credentials, server secrets, and
+machine-specific addresses are never included in release artifacts. Public
+online remains operator-configured until a stable production service location
+is selected; it is separate from first-run game-data setup.
 
 ## Bring your own game
 

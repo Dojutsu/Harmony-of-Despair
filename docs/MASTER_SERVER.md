@@ -211,6 +211,9 @@ by both PCs.
 
 Do not expose the service's loopback HTTP port directly to the internet. Caddy
 terminates HTTPS for directory metadata only; it is not a UDP proxy or relay.
+The directory accepts Caddy's `X-Forwarded-For` observation only when the
+immediate HTTP peer is loopback, validates it as IPv4, and uses the final proxy
+hop. It never accepts a public endpoint from client-supplied session JSON.
 
 ## UDP rendezvous for public online play
 
@@ -218,10 +221,14 @@ The same process can optionally expose a UDP rendezvous listener:
 
 ```text
 python tools/master_server/server.py --host 127.0.0.1 --port 8080 \
-  --rendezvous-host 0.0.0.0 --rendezvous-port 30740
+  --rendezvous-host 0.0.0.0 --rendezvous-public-host rendezvous.example.com \
+  --rendezvous-port 30740
 ```
 
-Only UDP 30740 must be exposed for rendezvous. Caddy continues to proxy only
+`--rendezvous-host` is the local UDP bind address;
+`--rendezvous-public-host` is the routable DNS name or address returned by the
+HTTPS API and is required for wildcard binds. Only UDP 30740 must be exposed
+for rendezvous. Caddy continues to proxy only
 the HTTPS directory API; it does not proxy UDP or gameplay. Apply host/provider
 rate limiting to UDP 30740 for an internet deployment.
 
@@ -231,13 +238,35 @@ size, replies are no larger than requests, attempts have a short TTL and global
 cap, and each participant/role registration is rate bounded. Host/client and
 discovery/gameplay roles remain distinct.
 
-Each public attempt requires a random 16-byte attempt ID and random 16-byte
-credential shared only with its two participants. The deployment must issue
-these through an authenticated/authorized directory workflow and set the
-matching client traversal options. Never place credentials in source, release
-launchers, logs, or long-lived configuration. This repository contains the
-rendezvous transport but no production credential-issuance service; that is a
-separate operational integration step.
+The HTTPS directory creates each public join attempt. `POST
+/sessions/{session_id}/join-attempts` returns only the short-lived client
+capability. The lobby owner polls `GET /sessions/{session_id}/join-attempts`
+with its existing registration bearer token and receives only host
+capabilities. Attempt IDs and the two random 16-byte capabilities are bound to
+one lobby for 20 seconds. Attempts are capped per lobby, creation and UDP
+registration are rate bounded, and session deletion or expiry revokes all
+linked attempts. `DELETE
+/sessions/{session_id}/join-attempts/{attempt_id}` retires a completed attempt
+when authenticated with either participant capability.
+
+The UDP listener accepts only attempts pre-issued by HTTPS and compares the
+capability for the claimed participant in constant time. Capabilities are used
+only with the rendezvous server; peer punch/ack packets use the unguessable
+attempt identity and must arrive from the exact server-observed peer endpoint.
+Neither participant receives the other participant's capability. Never place
+capabilities in source, release launchers, logs, or long-lived configuration.
+
+For automatic public traversal configure both builds with the normal directory
+settings only:
+
+```text
+--session_directory_url=https://<directory-host>
+--session_directory_build_id=<compatible-build-id>
+--session_directory_candidate_type=public
+```
+
+No `nat_probe_attempt`, `nat_probe_credential`, or participant option is
+required. The directory response supplies the rendezvous host and UDP port.
 
 Both clients punch from their actual discovery and gameplay sockets. Search
 retains the responding mapped discovery endpoint through Join, while gameplay

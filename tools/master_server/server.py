@@ -34,10 +34,27 @@ RENDEZVOUS_REGISTERED = 2
 RENDEZVOUS_PACKET = struct.Struct("!4sBBBB16s16s4sH4sH4x")
 RENDEZVOUS_MIN_INTERVAL_SECONDS = 0.1
 MAX_RENDEZVOUS_ATTEMPTS = 1024
+DEFAULT_ATTEMPT_TTL_SECONDS = 20
+MAX_ATTEMPTS_PER_SESSION = 8
+ATTEMPT_CREATE_MIN_INTERVAL_SECONDS = 0.25
 
 
 class ValidationError(ValueError):
     pass
+
+
+def observed_client_ip(peer: str, forwarded_for: str = "") -> str:
+    """Use a reverse proxy's observed IPv4 only when the HTTP peer is loopback."""
+    if peer not in ("127.0.0.1", "::1") or not forwarded_for:
+        return peer
+    for value in reversed(forwarded_for.split(",")):
+        try:
+            address = ipaddress.ip_address(value.strip())
+        except ValueError:
+            continue
+        if address.version == 4:
+            return str(address)
+    return peer
 
 
 def _required_int(value: Any, name: str, minimum: int, maximum: int) -> int:
@@ -72,21 +89,26 @@ def _validate_candidates(value: Any) -> list[dict[str, Any]]:
         if not isinstance(candidate, dict):
             raise ValidationError("connectivity candidate must be an object")
         candidate_type = _required_text(candidate.get("type"), "candidate type", 24)
-        if candidate_type not in {"direct", "tailscale"}:
+        if candidate_type not in {"direct", "tailscale", "public"}:
             raise ValidationError("unsupported connectivity candidate type")
-        address = _required_text(candidate.get("address"), "candidate address", 45)
-        try:
-            parsed = ipaddress.ip_address(address)
-        except ValueError as exc:
-            raise ValidationError("candidate address must be an IPv4 literal") from exc
-        if parsed.version != 4 or parsed.is_unspecified or parsed.is_multicast or parsed.is_loopback:
-            raise ValidationError("candidate address is not publishable")
+        address = candidate.get("address", "")
+        if candidate_type == "public" and address == "":
+            parsed_address = ""
+        else:
+            address = _required_text(address, "candidate address", 45)
+            try:
+                parsed = ipaddress.ip_address(address)
+            except ValueError as exc:
+                raise ValidationError("candidate address must be an IPv4 literal") from exc
+            if parsed.version != 4 or parsed.is_unspecified or parsed.is_multicast or parsed.is_loopback:
+                raise ValidationError("candidate address is not publishable")
+            parsed_address = str(parsed)
         discovery_port = _required_int(candidate.get("discovery_port"), "discovery_port", 1, 65535)
         gameplay_port = _required_int(candidate.get("gameplay_port"), "gameplay_port", 1, 65535)
         result.append(
             {
                 "type": candidate_type,
-                "address": str(parsed),
+                "address": parsed_address,
                 "discovery_port": discovery_port,
                 "gameplay_port": gameplay_port,
             }
@@ -131,19 +153,26 @@ class StoredSession:
 
 
 class SessionRegistry:
-    def __init__(self, ttl_seconds: int = DEFAULT_TTL_SECONDS, clock=time.time):
+    def __init__(self, ttl_seconds: int = DEFAULT_TTL_SECONDS, clock=time.time,
+                 on_remove=None):
         self.ttl_seconds = ttl_seconds
         self.clock = clock
         self._lock = threading.Lock()
         self._sessions: dict[str, StoredSession] = {}
+        self.on_remove = on_remove
 
     def _expire_locked(self, now: float) -> None:
         stale = [key for key, value in self._sessions.items() if now - value.last_heartbeat >= self.ttl_seconds]
         for key in stale:
             del self._sessions[key]
+            if self.on_remove:
+                self.on_remove(key)
 
-    def create(self, payload: Any) -> StoredSession:
+    def create(self, payload: Any, source: str = "") -> StoredSession:
         metadata = validate_registration(payload)
+        for candidate in metadata["connectivity_candidates"]:
+            if candidate["type"] == "public" and source:
+                candidate["address"] = source
         now = self.clock()
         value = StoredSession(secrets.token_urlsafe(18), secrets.token_urlsafe(32), metadata, now)
         with self._lock:
@@ -151,8 +180,12 @@ class SessionRegistry:
             self._sessions[value.session_id] = value
         return value
 
-    def heartbeat(self, session_id: str, token: str, payload: Any) -> StoredSession | None:
+    def heartbeat(self, session_id: str, token: str, payload: Any,
+                  source: str = "") -> StoredSession | None:
         metadata = validate_registration(payload)
+        for candidate in metadata["connectivity_candidates"]:
+            if candidate["type"] == "public" and source:
+                candidate["address"] = source
         now = self.clock()
         with self._lock:
             self._expire_locked(now)
@@ -169,7 +202,22 @@ class SessionRegistry:
             if value is None or not secrets.compare_digest(value.registration_token, token):
                 return False
             del self._sessions[session_id]
+            if self.on_remove:
+                self.on_remove(session_id)
             return True
+
+    def owns(self, session_id: str, token: str) -> bool:
+        now = self.clock()
+        with self._lock:
+            self._expire_locked(now)
+            value = self._sessions.get(session_id)
+            return value is not None and secrets.compare_digest(value.registration_token, token)
+
+    def exists(self, session_id: str) -> bool:
+        now = self.clock()
+        with self._lock:
+            self._expire_locked(now)
+            return session_id in self._sessions
 
     def list(self, filters: dict[str, str]) -> list[dict[str, Any]]:
         now = self.clock()
@@ -199,6 +247,10 @@ class DirectoryHandler(BaseHTTPRequestHandler):
     def registry(self) -> SessionRegistry:
         return self.server.registry  # type: ignore[attr-defined]
 
+    @property
+    def traversal(self) -> RendezvousRegistry:
+        return self.server.traversal  # type: ignore[attr-defined]
+
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"{self.address_string()} - {fmt % args}")
 
@@ -227,28 +279,54 @@ class DirectoryHandler(BaseHTTPRequestHandler):
         value = self.headers.get("Authorization", "")
         return value[7:] if value.startswith("Bearer ") else ""
 
+    def _observed_client_ip(self) -> str:
+        return observed_client_ip(
+            self.client_address[0], self.headers.get("X-Forwarded-For", ""))
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlsplit(self.path)
-        if parsed.path != "/sessions":
-            self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        if parsed.path == "/sessions":
+            query = {key: values[-1] for key, values in urllib.parse.parse_qs(parsed.query).items()}
+            self._json(HTTPStatus.OK, {"sessions": self.registry.list(query)})
             return
-        query = {key: values[-1] for key, values in urllib.parse.parse_qs(parsed.query).items()}
-        self._json(HTTPStatus.OK, {"sessions": self.registry.list(query)})
+        parts = parsed.path.strip("/").split("/")
+        if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "join-attempts":
+            if not self.registry.owns(parts[1], self._bearer()):
+                self._json(HTTPStatus.NOT_FOUND, {"error": "unknown session or token"})
+            else:
+                self._json(HTTPStatus.OK, {"attempts": self.traversal.pending(parts[1])})
+            return
+        self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlsplit(self.path)
         try:
             payload = self._read_json()
             if parsed.path == "/sessions":
-                value = self.registry.create(payload)
+                value = self.registry.create(payload, self._observed_client_ip())
                 self._json(
                     HTTPStatus.CREATED,
                     {"session_id": value.session_id, "registration_token": value.registration_token},
                 )
                 return
             parts = parsed.path.strip("/").split("/")
+            if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "join-attempts":
+                if not self.registry.exists(parts[1]):
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "unknown session"})
+                    return
+                if not self.traversal.rendezvous_host:
+                    self._json(HTTPStatus.SERVICE_UNAVAILABLE,
+                               {"error": "public traversal is unavailable"})
+                    return
+                value = self.traversal.issue(parts[1], self._observed_client_ip())
+                if value is None:
+                    self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "attempt limit reached"})
+                else:
+                    self._json(HTTPStatus.CREATED, value)
+                return
             if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "heartbeat":
-                value = self.registry.heartbeat(parts[1], self._bearer(), payload)
+                value = self.registry.heartbeat(parts[1], self._bearer(), payload,
+                                                self._observed_client_ip())
                 if value is None:
                     self._json(HTTPStatus.NOT_FOUND, {"error": "unknown session or token"})
                 else:
@@ -261,6 +339,13 @@ class DirectoryHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlsplit(self.path)
         parts = parsed.path.strip("/").split("/")
+        if len(parts) == 4 and parts[0] == "sessions" and parts[2] == "join-attempts":
+            if self.traversal.complete(parts[1], parts[3], self._bearer()):
+                self.send_response(HTTPStatus.NO_CONTENT)
+                self.end_headers()
+            else:
+                self._json(HTTPStatus.NOT_FOUND, {"error": "unknown attempt or capability"})
+            return
         if len(parts) != 2 or parts[0] != "sessions":
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
@@ -274,27 +359,119 @@ class DirectoryHandler(BaseHTTPRequestHandler):
 class DirectoryServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], registry: SessionRegistry):
+    def __init__(self, address: tuple[str, int], registry: SessionRegistry,
+                 traversal: RendezvousRegistry | None = None):
         super().__init__(address, DirectoryHandler)
         self.registry = registry
+        self.traversal = traversal or RendezvousRegistry()
 
 
 @dataclass
 class RendezvousAttempt:
-    credential: bytes
-    last_seen: float
+    session_id: str
+    credentials: tuple[bytes, bytes]
+    expires_at: float
+    completed: bool
     endpoints: dict[tuple[int, int], tuple[str, int]]
     endpoint_seen: dict[tuple[int, int], float]
+    responses: dict[
+        tuple[int, int],
+        tuple[float, tuple[str, int], tuple[str, int] | None],
+    ]
 
 
 class RendezvousRegistry:
     """Short-lived, credential-bound NAT traversal endpoint observations."""
 
-    def __init__(self, ttl_seconds: int = DEFAULT_TTL_SECONDS, clock=time.monotonic):
+    def __init__(self, ttl_seconds: int = DEFAULT_ATTEMPT_TTL_SECONDS, clock=time.monotonic,
+                 rendezvous_host: str = "", rendezvous_port: int = 30740):
         self.ttl_seconds = ttl_seconds
         self.clock = clock
         self._lock = threading.Lock()
         self._attempts: dict[bytes, RendezvousAttempt] = {}
+        self._by_session: dict[str, set[bytes]] = {}
+        self._last_create: dict[tuple[str, str], float] = {}
+        self.rendezvous_host = rendezvous_host
+        self.rendezvous_port = rendezvous_port
+
+    def _expire_locked(self, now: float) -> None:
+        stale = [key for key, value in self._attempts.items()
+                 if value.completed or now >= value.expires_at]
+        for key in stale:
+            value = self._attempts.pop(key)
+            attempts = self._by_session.get(value.session_id)
+            if attempts is not None:
+                attempts.discard(key)
+                if not attempts:
+                    self._by_session.pop(value.session_id, None)
+
+    def issue(self, session_id: str, source: str = "") -> dict[str, Any] | None:
+        now = self.clock()
+        with self._lock:
+            self._expire_locked(now)
+            attempts = self._by_session.setdefault(session_id, set())
+            rate_key = (session_id, source)
+            previous = self._last_create.get(rate_key)
+            if (len(attempts) >= MAX_ATTEMPTS_PER_SESSION or
+                    previous is not None and now - previous < ATTEMPT_CREATE_MIN_INTERVAL_SECONDS or
+                    len(self._attempts) >= MAX_RENDEZVOUS_ATTEMPTS):
+                return None
+            attempt_id = secrets.token_bytes(16)
+            credentials = (secrets.token_bytes(16), secrets.token_bytes(16))
+            self._attempts[attempt_id] = RendezvousAttempt(
+                session_id, credentials, now + self.ttl_seconds, False, {}, {}, {})
+            attempts.add(attempt_id)
+            self._last_create[rate_key] = now
+            print(f"NAT timing: issued session={session_id} attempt={attempt_id.hex()} "
+                  f"expires_at={self._attempts[attempt_id].expires_at:.6f}", flush=True)
+            return self._public(attempt_id, self._attempts[attempt_id], 1)
+
+    def pending(self, session_id: str) -> list[dict[str, Any]]:
+        now = self.clock()
+        with self._lock:
+            self._expire_locked(now)
+            pending = [self._public(key, self._attempts[key], 0)
+                       for key in self._by_session.get(session_id, set())
+                       if key in self._attempts]
+            if pending:
+                print(f"NAT timing: host poll session={session_id} attempts="
+                      f"{','.join(item['attempt_id'] for item in pending)}", flush=True)
+            return pending
+
+    def complete(self, session_id: str, attempt_text: str, credential_text: str) -> bool:
+        try:
+            attempt_id = bytes.fromhex(attempt_text)
+            credential = bytes.fromhex(credential_text)
+        except ValueError:
+            return False
+        now = self.clock()
+        with self._lock:
+            self._expire_locked(now)
+            attempt = self._attempts.get(attempt_id)
+            if attempt is None or attempt.session_id != session_id:
+                return False
+            if not any(secrets.compare_digest(value, credential)
+                       for value in attempt.credentials):
+                return False
+            attempt.completed = True
+            self._expire_locked(now)
+            return True
+
+    def remove_session(self, session_id: str) -> None:
+        with self._lock:
+            for key in self._by_session.pop(session_id, set()):
+                self._attempts.pop(key, None)
+
+    def _public(self, attempt_id: bytes, attempt: RendezvousAttempt,
+                participant: int) -> dict[str, Any]:
+        return {
+            "attempt_id": attempt_id.hex(),
+            "capability": attempt.credentials[participant].hex(),
+            "participant": "host" if participant == 0 else "client",
+            "expires_in": max(0, int(attempt.expires_at - self.clock())),
+            "rendezvous_host": self.rendezvous_host,
+            "rendezvous_port": self.rendezvous_port,
+        }
 
     def register(
         self, attempt_id: bytes, credential: bytes, participant: int, role: int,
@@ -305,25 +482,34 @@ class RendezvousRegistry:
         now = self.clock()
         key = (participant, role)
         with self._lock:
-            self._attempts = {
-                value_id: value for value_id, value in self._attempts.items()
-                if now - value.last_seen < self.ttl_seconds
-            }
+            self._expire_locked(now)
             attempt = self._attempts.get(attempt_id)
-            if attempt is None:
-                if len(self._attempts) >= MAX_RENDEZVOUS_ATTEMPTS:
-                    return None
-                attempt = RendezvousAttempt(credential, now, {}, {})
-                self._attempts[attempt_id] = attempt
-            elif not secrets.compare_digest(attempt.credential, credential):
+            if (attempt is None or attempt.completed or
+                    not secrets.compare_digest(attempt.credentials[participant], credential)):
                 return None
             previous = attempt.endpoint_seen.get(key)
             if previous is not None and now - previous < RENDEZVOUS_MIN_INTERVAL_SECONDS:
                 return None
-            attempt.last_seen = now
+            previous_endpoint = attempt.endpoints.get(key)
             attempt.endpoints[key] = source
             attempt.endpoint_seen[key] = now
-            return source, attempt.endpoints.get((1 - participant, role))
+            peer = attempt.endpoints.get((1 - participant, role))
+            print(f"NAT timing: register attempt={attempt_id.hex()} participant={participant} "
+                  f"role={role} source={source[0]}:{source[1]} peer="
+                  f"{peer[0] + ':' + str(peer[1]) if peer else 'pending'}", flush=True)
+            if role == 1:
+                response = attempt.responses.get(key)
+                endpoint_changed = previous_endpoint != source
+                peer_changed = response is None or response[2] != peer
+                repeated_unpaired = (response is not None and not endpoint_changed and
+                                      not peer_changed and peer is None)
+                if repeated_unpaired:
+                    print(f"NAT timing: response coalesced attempt={attempt_id.hex()} "
+                          f"participant={participant} role={role} "
+                          f"destination={source[0]}:{source[1]} peer=pending", flush=True)
+                    return None
+                attempt.responses[key] = (now, source, peer)
+            return source, peer
 
 
 class RendezvousServer:
@@ -363,6 +549,9 @@ class RendezvousServer:
                 socket.inet_aton(peer[0]), peer[1],
             )
             self.socket.sendto(response, source)
+            print(f"NAT timing: response attempt={attempt_id.hex()} participant={participant} "
+                  f"role={role} destination={source[0]}:{source[1]} peer="
+                  f"{peer[0]}:{peer[1]}", flush=True)
 
     def shutdown(self) -> None:
         self._stopping.set()
@@ -375,18 +564,27 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--ttl", type=int, default=DEFAULT_TTL_SECONDS)
     parser.add_argument("--rendezvous-host", default="")
+    parser.add_argument(
+        "--rendezvous-public-host",
+        default="",
+        help="Public DNS name or address returned to traversal clients",
+    )
     parser.add_argument("--rendezvous-port", type=int, default=30740)
     args = parser.parse_args()
     if (not 1 <= args.port <= 65535 or not 1 <= args.rendezvous_port <= 65535 or
             not 5 <= args.ttl <= 3600):
         parser.error("port or ttl is out of range")
-    server = DirectoryServer((args.host, args.port), SessionRegistry(args.ttl))
+    rendezvous_public_host = args.rendezvous_public_host or args.rendezvous_host
+    if args.rendezvous_host in ("0.0.0.0", "::") and not args.rendezvous_public_host:
+        parser.error("--rendezvous-public-host is required when binding a wildcard address")
+    traversal = RendezvousRegistry(DEFAULT_ATTEMPT_TTL_SECONDS, rendezvous_host=rendezvous_public_host,
+                                   rendezvous_port=args.rendezvous_port)
+    sessions = SessionRegistry(args.ttl, on_remove=traversal.remove_session)
+    server = DirectoryServer((args.host, args.port), sessions, traversal)
     rendezvous = None
     rendezvous_thread = None
     if args.rendezvous_host:
-        rendezvous = RendezvousServer(
-            (args.rendezvous_host, args.rendezvous_port), RendezvousRegistry(args.ttl)
-        )
+        rendezvous = RendezvousServer((args.rendezvous_host, args.rendezvous_port), traversal)
         rendezvous_thread = threading.Thread(target=rendezvous.serve_forever, daemon=True)
         rendezvous_thread.start()
         print(f"Harmony rendezvous listening on udp://{rendezvous.address[0]}:"
