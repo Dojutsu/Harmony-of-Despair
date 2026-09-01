@@ -8,7 +8,7 @@ import threading
 import unittest
 
 from tools.master_server.server import (
-    DirectoryServer, RENDEZVOUS_MAGIC, RENDEZVOUS_PACKET, RENDEZVOUS_REGISTER,
+    AuthenticationError, DirectoryServer, RENDEZVOUS_MAGIC, RENDEZVOUS_PACKET, RENDEZVOUS_REGISTER,
     RENDEZVOUS_REGISTERED, RENDEZVOUS_VERSION, RendezvousRegistry, RendezvousServer,
     SessionRegistry, ValidationError, observed_client_ip, validate_registration,
 )
@@ -58,7 +58,8 @@ class RegistryTests(unittest.TestCase):
     def test_token_protects_update_and_delete(self):
         registry = SessionRegistry()
         created = registry.create(payload())
-        self.assertIsNone(registry.heartbeat(created.session_id, "wrong", payload()))
+        with self.assertRaises(AuthenticationError):
+            registry.heartbeat(created.session_id, "wrong", payload())
         self.assertFalse(registry.delete(created.session_id, "wrong"))
         self.assertTrue(registry.delete(created.session_id, created.registration_token))
 
@@ -85,6 +86,69 @@ class RegistryTests(unittest.TestCase):
         }])
         created = registry.create(public, "203.0.113.7")
         self.assertEqual("203.0.113.7", created.public()["connectivity_candidates"][0]["address"])
+
+    def test_host_instance_registration_is_idempotent(self):
+        registry = SessionRegistry()
+        registration = payload(
+            host_instance_id="logical-host-1",
+            host_instance_token="host-proof-1",
+        )
+        created = registry.create(registration)
+        replayed = registry.create({**registration, "player_count": 2})
+        self.assertEqual(created.session_id, replayed.session_id)
+        self.assertEqual(created.registration_token, replayed.registration_token)
+        self.assertEqual(2, replayed.metadata["player_count"])
+        self.assertEqual(1, len(registry.list({})))
+
+    def test_host_instance_authentication_cannot_replace_another_host(self):
+        registry = SessionRegistry()
+        registry.create(payload(
+            host_instance_id="logical-host-1",
+            host_instance_token="host-proof-1",
+        ))
+        with self.assertRaises(AuthenticationError):
+            registry.create(payload(
+                host_instance_id="logical-host-1",
+                host_instance_token="different-proof",
+            ))
+        self.assertEqual(1, len(registry.list({})))
+
+    def test_expired_host_instance_recovers_as_one_new_authoritative_session(self):
+        now = [1000.0]
+        removed = []
+        registry = SessionRegistry(45, lambda: now[0], removed.append)
+        registration = payload(
+            host_instance_id="logical-host-1",
+            host_instance_token="host-proof-1",
+        )
+        old = registry.create(registration)
+        now[0] += 46
+        recovered = registry.create(registration)
+        self.assertNotEqual(old.session_id, recovered.session_id)
+        self.assertFalse(registry.exists(old.session_id))
+        self.assertEqual([old.session_id], removed)
+        self.assertEqual([recovered.session_id],
+                         [value["session_id"] for value in registry.list({})])
+
+    def test_different_host_instances_remain_independent(self):
+        registry = SessionRegistry()
+        first = registry.create(payload(
+            host_instance_id="logical-host-1", host_instance_token="host-proof-1"))
+        second = registry.create(payload(
+            host_instance_id="logical-host-2", host_instance_token="host-proof-2"))
+        self.assertNotEqual(first.session_id, second.session_id)
+        self.assertEqual(2, len(registry.list({})))
+
+    def test_host_leave_removes_identity_and_new_host_game_gets_new_lobby(self):
+        registry = SessionRegistry()
+        first = registry.create(payload(
+            host_instance_id="logical-host-1", host_instance_token="host-proof-1"))
+        self.assertTrue(registry.delete(first.session_id, first.registration_token))
+        second = registry.create(payload(
+            host_instance_id="logical-host-2", host_instance_token="host-proof-2"))
+        self.assertNotEqual(first.session_id, second.session_id)
+        self.assertEqual([second.session_id],
+                         [value["session_id"] for value in registry.list({})])
 
 
 class HttpTests(unittest.TestCase):
@@ -128,6 +192,24 @@ class HttpTests(unittest.TestCase):
             "DELETE", f"/sessions/{created['session_id']}", token=created["registration_token"]
         )
         self.assertEqual(204, status)
+
+    def test_heartbeat_distinguishes_missing_session_from_bad_token(self):
+        status, created = self.request("POST", "/sessions", payload())
+        self.assertEqual(201, status)
+
+        status, _ = self.request(
+            "POST", f"/sessions/{created['session_id']}/heartbeat", payload(), "wrong-token"
+        )
+        self.assertEqual(403, status)
+        status, _ = self.request(
+            "POST", "/sessions/missing/heartbeat", payload(), created["registration_token"]
+        )
+        self.assertEqual(404, status)
+
+        status, listed = self.request("GET", "/sessions")
+        self.assertEqual(200, status)
+        self.assertEqual([created["session_id"]],
+                         [value["session_id"] for value in listed["sessions"]])
 
     def test_secure_join_attempt_lifecycle(self):
         status, created = self.request("POST", "/sessions", payload())
@@ -173,6 +255,61 @@ class HttpTests(unittest.TestCase):
             "POST", f"/sessions/{created['session_id']}/join-attempts", {})
         self.assertEqual(503, status)
         self.assertEqual("public traversal is unavailable", response["error"])
+
+    def test_replayed_registration_returns_one_authoritative_lobby(self):
+        registration = payload(
+            host_instance_id="logical-host-1",
+            host_instance_token="host-proof-1",
+        )
+        first_status, first = self.request("POST", "/sessions", registration)
+        second_status, second = self.request(
+            "POST", "/sessions", {**registration, "player_count": 2})
+        self.assertEqual(201, first_status)
+        self.assertEqual(201, second_status)
+        self.assertEqual(first, second)
+        status, listed = self.request("GET", "/sessions")
+        self.assertEqual(200, status)
+        self.assertEqual(1, len(listed["sessions"]))
+        self.assertEqual(2, listed["sessions"][0]["player_count"])
+        self.assertNotIn("host_instance_id", listed["sessions"][0])
+        self.assertNotIn("host_instance_token", listed["sessions"][0])
+
+    def test_wrong_host_instance_proof_is_rejected_without_duplicate(self):
+        registration = payload(
+            host_instance_id="logical-host-1",
+            host_instance_token="host-proof-1",
+        )
+        self.request("POST", "/sessions", registration)
+        status, _ = self.request(
+            "POST", "/sessions", {**registration, "host_instance_token": "wrong-proof"})
+        self.assertEqual(403, status)
+        _, listed = self.request("GET", "/sessions")
+        self.assertEqual(1, len(listed["sessions"]))
+
+    def test_expired_lobby_is_not_searchable_and_cannot_issue_attempt(self):
+        now = [1000.0]
+        self.registry.ttl_seconds = 45
+        self.registry.clock = lambda: now[0]
+        registration = payload(
+            host_instance_id="logical-host-1",
+            host_instance_token="host-proof-1",
+        )
+        _, old = self.request("POST", "/sessions", registration)
+        old_attempt_path = f"/sessions/{old['session_id']}/join-attempts"
+        status, issued = self.request("POST", old_attempt_path, {})
+        self.assertEqual(201, status)
+
+        now[0] += 46
+        _, recovered = self.request("POST", "/sessions", registration)
+        self.assertNotEqual(old["session_id"], recovered["session_id"])
+        status, listed = self.request("GET", "/sessions")
+        self.assertEqual([recovered["session_id"]],
+                         [value["session_id"] for value in listed["sessions"]])
+        status, _ = self.request("POST", old_attempt_path, {})
+        self.assertEqual(404, status)
+        self.assertIsNone(self.traversal.register(
+            bytes.fromhex(issued["attempt_id"]), bytes.fromhex(issued["capability"]),
+            1, 0, ("127.0.0.1", 40000)))
 
 
 class RendezvousTests(unittest.TestCase):

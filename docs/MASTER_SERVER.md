@@ -43,6 +43,8 @@ or heartbeat by default.
   "title_id": "58410A7A",
   "protocol_version": 1,
   "build_id": "harmony-0.0.1.4-p1",
+  "host_instance_id": "<opaque per-Host-Game ID>",
+  "host_instance_token": "<secret recovery proof>",
   "connectivity_candidates": [
     {
       "type": "tailscale",
@@ -54,9 +56,17 @@ or heartbeat by default.
 }
 ```
 
+The runtime generates a fresh host-instance ID and secret proof once for each
+real Host Game flow. Replaying `POST /sessions` with that same pair is an
+authenticated idempotent upsert: it refreshes and returns the one existing
+public lobby instead of creating another. A different Host Game generates a
+different pair. Neither value is returned by the public listing, used as player
+identity, derived from an IP address, or logged.
+
 The response contains a server-generated opaque `session_id` and a secret
-`registration_token`. The token is returned only once and is required for
-heartbeat and deletion. It is never returned by the public listing endpoint.
+`registration_token` required for heartbeat and deletion. An idempotent replay
+returns the same values so a host can recover from a lost create response. The
+tokens are never returned by the public listing endpoint.
 
 ### Heartbeat
 
@@ -70,6 +80,15 @@ Authorization: Bearer <registration_token>
 
 The prototype heartbeat interval is 15 seconds. It refreshes mutable player
 counts and connectivity metadata as well as the expiry deadline.
+
+A transport timeout, TLS/TCP failure, malformed success response, rate limit,
+or HTTP 5xx does not prove that the directory forgot the lobby. The runtime
+retains the current session ID and token and retries the same heartbeat with
+bounded backoff. A genuine 404 enters registration recovery with the same host
+instance identity; if the old record still exists, the server returns it, and
+if it genuinely expired or the in-memory server restarted, recovery creates one
+replacement after the old record is already absent. Authentication rejection
+does not fall through into creation of another lobby.
 
 ### List
 
@@ -103,8 +122,11 @@ immediately. Missing deletes are harmless because stale records expire.
   and set an appropriate retention policy when they are enabled.
 - Hosts must explicitly choose the address they publish. The runtime must not
   silently infer and upload a local adapter address.
-- Registration tokens reduce casual overwrites but are not accounts or strong
-  host identity. Rate limiting and authenticated ownership are later work.
+- Registration and host-instance tokens are random process-local capabilities,
+  not user accounts. Production use is restricted to HTTPS (with loopback HTTP
+  retained only for local testing); tokens are compared in constant time,
+  omitted from public responses and logs, and discarded when the host leaves
+  or the record expires.
 
 ## Caddy example
 
@@ -131,7 +153,9 @@ The opt-in Windows runtime client lives beside `SessionRecord` and
    heartbeats while the `SessionRecord` remains hosted.
 3. `XGISessionDelete`, abandoned-host teardown, and object destruction stop the
    heartbeat and attempt authenticated deletion.
-4. Failure at every directory step is logged and ignored by LAN hosting.
+4. Transient heartbeat failures retry the same registration; an authoritative
+   404 performs an idempotent recovery without exposing two searchable lobbies.
+   Directory failure is still logged and ignored by LAN hosting.
 5. A normal client search starts an asynchronous, short-lived directory query
    and immediately continues the normal LAN broadcast path.
 6. Compatible directory candidates are probed with the existing unicast UDP
@@ -148,8 +172,9 @@ command-line value overrides it.
 
 Hosting additionally requires an explicit publish address. This is deliberate:
 the runtime never guesses which adapter address to disclose. While a session is
-advertised, the host registers once, refreshes the record every 15 seconds, and
-attempts deletion when hosting stops. Directory failures are warnings only and
+advertised, the host creates one logical registration, refreshes it every 15
+seconds, and attempts deletion when hosting stops. Lost requests or responses
+reuse the same per-Host-Game identity. Directory failures are warnings only and
 do not stop the existing LAN host.
 
 Windows HTTP operations use short per-stage timeouts with connection retries

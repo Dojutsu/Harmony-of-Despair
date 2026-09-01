@@ -26,6 +26,8 @@ MAX_BODY_BYTES = 8 * 1024
 MAX_SERVER_NAME = 48
 MAX_BUILD_ID = 64
 MAX_CANDIDATES = 4
+MAX_HOST_INSTANCE_ID = 64
+MAX_HOST_INSTANCE_TOKEN = 128
 DEFAULT_TTL_SECONDS = 45
 RENDEZVOUS_MAGIC = b"HNAT"
 RENDEZVOUS_VERSION = 1
@@ -40,6 +42,10 @@ ATTEMPT_CREATE_MIN_INTERVAL_SECONDS = 0.25
 
 
 class ValidationError(ValueError):
+    pass
+
+
+class AuthenticationError(ValueError):
     pass
 
 
@@ -78,6 +84,13 @@ def _build_id(value: Any) -> str:
     value = _required_text(value, "build_id", MAX_BUILD_ID)
     if any(not (ch.isascii() and (ch.isalnum() or ch in "._-")) for ch in value):
         raise ValidationError("build_id contains unsupported characters")
+    return value
+
+
+def _url_token(value: Any, name: str, maximum: int) -> str:
+    value = _required_text(value, name, maximum)
+    if any(not (ch.isascii() and (ch.isalnum() or ch in "-_")) for ch in value):
+        raise ValidationError(f"{name} contains unsupported characters")
     return value
 
 
@@ -137,10 +150,27 @@ def validate_registration(payload: Any) -> dict[str, Any]:
     }
 
 
+def validate_host_instance(payload: Any) -> tuple[str, str]:
+    if not isinstance(payload, dict):
+        raise ValidationError("request body must be an object")
+    instance_id = payload.get("host_instance_id")
+    instance_token = payload.get("host_instance_token")
+    if instance_id is None and instance_token is None:
+        return "", ""
+    if instance_id is None or instance_token is None:
+        raise ValidationError("host instance ID and token must be supplied together")
+    return (
+        _url_token(instance_id, "host_instance_id", MAX_HOST_INSTANCE_ID),
+        _url_token(instance_token, "host_instance_token", MAX_HOST_INSTANCE_TOKEN),
+    )
+
+
 @dataclass
 class StoredSession:
     session_id: str
     registration_token: str
+    host_instance_id: str
+    host_instance_token: str
     metadata: dict[str, Any]
     last_heartbeat: float
 
@@ -159,25 +189,50 @@ class SessionRegistry:
         self.clock = clock
         self._lock = threading.Lock()
         self._sessions: dict[str, StoredSession] = {}
+        self._host_instances: dict[str, str] = {}
         self.on_remove = on_remove
+
+    def _remove_locked(self, session_id: str) -> None:
+        value = self._sessions.pop(session_id, None)
+        if value is None:
+            return
+        if (value.host_instance_id and
+                self._host_instances.get(value.host_instance_id) == session_id):
+            del self._host_instances[value.host_instance_id]
+        if self.on_remove:
+            self.on_remove(session_id)
 
     def _expire_locked(self, now: float) -> None:
         stale = [key for key, value in self._sessions.items() if now - value.last_heartbeat >= self.ttl_seconds]
         for key in stale:
-            del self._sessions[key]
-            if self.on_remove:
-                self.on_remove(key)
+            self._remove_locked(key)
 
     def create(self, payload: Any, source: str = "") -> StoredSession:
         metadata = validate_registration(payload)
+        host_instance_id, host_instance_token = validate_host_instance(payload)
         for candidate in metadata["connectivity_candidates"]:
             if candidate["type"] == "public" and source:
                 candidate["address"] = source
         now = self.clock()
-        value = StoredSession(secrets.token_urlsafe(18), secrets.token_urlsafe(32), metadata, now)
         with self._lock:
             self._expire_locked(now)
+            if host_instance_id:
+                current_id = self._host_instances.get(host_instance_id)
+                current = self._sessions.get(current_id, None)
+                if current is not None:
+                    if not secrets.compare_digest(current.host_instance_token,
+                                                  host_instance_token):
+                        raise AuthenticationError("host instance authentication failed")
+                    current.metadata = metadata
+                    current.last_heartbeat = now
+                    return current
+                self._host_instances.pop(host_instance_id, None)
+            value = StoredSession(
+                secrets.token_urlsafe(18), secrets.token_urlsafe(32),
+                host_instance_id, host_instance_token, metadata, now)
             self._sessions[value.session_id] = value
+            if host_instance_id:
+                self._host_instances[host_instance_id] = value.session_id
         return value
 
     def heartbeat(self, session_id: str, token: str, payload: Any,
@@ -190,8 +245,10 @@ class SessionRegistry:
         with self._lock:
             self._expire_locked(now)
             value = self._sessions.get(session_id)
-            if value is None or not secrets.compare_digest(value.registration_token, token):
+            if value is None:
                 return None
+            if not secrets.compare_digest(value.registration_token, token):
+                raise AuthenticationError("registration authentication failed")
             value.metadata = metadata
             value.last_heartbeat = now
             return value
@@ -201,9 +258,7 @@ class SessionRegistry:
             value = self._sessions.get(session_id)
             if value is None or not secrets.compare_digest(value.registration_token, token):
                 return False
-            del self._sessions[session_id]
-            if self.on_remove:
-                self.on_remove(session_id)
+            self._remove_locked(session_id)
             return True
 
     def owns(self, session_id: str, token: str) -> bool:
@@ -333,6 +388,8 @@ class DirectoryHandler(BaseHTTPRequestHandler):
                     self._json(HTTPStatus.OK, {"session_id": value.session_id})
                 return
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        except AuthenticationError as exc:
+            self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
         except ValidationError as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 

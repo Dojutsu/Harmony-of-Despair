@@ -535,793 +535,12 @@ index 0000000..a5931c6
 +
 +}  // namespace xam
 +}  // namespace rex::system
-
-diff --git a/include/rex/system/xam/nat_probe.h b/include/rex/system/xam/nat_probe.h
-new file mode 100644
-index 0000000..6605431
---- /dev/null
-+++ b/include/rex/system/xam/nat_probe.h
-@@ -0,0 +1,77 @@
-+#pragma once
-+
-+#include <cstddef>
-+#include <cstdint>
-+#include <optional>
-+#include <string>
-+#include <vector>
-+
-+#include <rex/system/xam/session.h>
-+
-+namespace rex::system {
-+class XSocket;
-+}
-+
-+namespace rex::system::xam {
-+
-+enum class NatProbeRole : uint8_t { kDiscovery = 0, kGameplay = 1 };
-+
-+struct NatProbeIdentity {
-+  std::string attempt_id;
-+  std::string capability;
-+  std::string server;
-+  uint16_t port = 30740;
-+  uint8_t participant = 0;
-+};
-+
-+struct NatProbePeerAttempt {
-+  std::string attempt_id;
-+  LanAddress peer;
-+};
-+
-+constexpr uint32_t NatProbeRegistrationIntervalMs(bool has_peer) {
-+  return has_peer ? 1000u : 100u;
-+}
-+
-+constexpr bool NatProbeAutomaticAttemptActive(uint32_t elapsed_ms, bool acknowledged) {
-+  return !acknowledged && elapsed_ms < 20000u;
-+}
-+
-+class NatProbeEndpointState {
-+ public:
-+  bool UpdatePeer(LanAddress peer);
-+  bool Acknowledge(LanAddress source);
-+  bool acknowledged() const;
-+  LanAddress peer() const { return peer_; }
-+  std::optional<LanAddress> acknowledged_peer() const { return acknowledged_peer_; }
-+  std::optional<LanAddress> NormalizeAcknowledgedPeer(LanAddress source,
-+                                                       LanAddress logical) const;
-+
-+ private:
-+  LanAddress peer_{};
-+  std::optional<LanAddress> acknowledged_peer_;
-+};
-+
-+bool NatProbeEnabled();
-+bool NatProbeInstallIdentity(const NatProbeIdentity& identity);
-+void NatProbeSetLogicalGameplayPeer(std::string_view attempt_id, LanAddress logical);
-+void NatProbeRetireIdentity(std::string_view attempt_id);
-+void NatProbeRetireParticipant(uint8_t participant);
-+bool NatProbeIsClient();
-+bool NatProbeIsGameplayPort(uint16_t port);
-+void NatProbeAttach(uint64_t socket, NatProbeRole role, LanAddress local,
-+                    XSocket* socket_object = nullptr);
-+void NatProbeDetach(uint64_t socket);
-+void NatProbeTick(uint64_t socket);
-+bool NatProbeIsControlPacket(uint64_t socket, const uint8_t* data, size_t size,
-+                             uint32_t source_ipv4, uint16_t source_port);
-+bool NatProbeConsume(uint64_t socket, const uint8_t* data, size_t size, uint32_t source_ipv4,
-+                     uint16_t source_port);
-+std::optional<LanAddress> NatProbePeer(uint64_t socket, bool require_ack = true);
-+std::vector<LanAddress> NatProbePeers(uint64_t socket, bool require_ack = true);
-+std::vector<NatProbePeerAttempt> NatProbePeerAttempts(uint64_t socket,
-+                                                       bool require_ack = true);
-+std::optional<LanAddress> NatProbeNormalizeGameplaySource(uint64_t socket,
-+                                                          LanAddress source);
-+
-+}  // namespace rex::system::xam
-diff --git a/src/system/xam/nat_probe.cpp b/src/system/xam/nat_probe.cpp
-new file mode 100644
-index 0000000..3a37fdb
---- /dev/null
-+++ b/src/system/xam/nat_probe.cpp
-@@ -0,0 +1,690 @@
-+#include <rex/system/xam/nat_probe.h>
-+
-+#include <algorithm>
-+#include <array>
-+#include <cerrno>
-+#include <chrono>
-+#include <condition_variable>
-+#include <cstring>
-+#include <mutex>
-+#include <string>
-+#include <thread>
-+#include <unordered_map>
-+#include <vector>
-+
-+#include <rex/cvar.h>
-+#include <rex/logging.h>
-+#include <rex/platform.h>
-+#include <rex/system/xsocket.h>
-+
-+#if REX_PLATFORM_WIN32
-+#include <winsock2.h>
-+#include <ws2tcpip.h>
-+#else
-+#include <arpa/inet.h>
-+#include <sys/socket.h>
-+#endif
-+
-+namespace rex::system::xam {
-+
-+REXCVAR_DEFINE_STRING(nat_probe_server, "", "Network",
-+                      "IPv4 UDP NAT traversal rendezvous server")
-+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-+REXCVAR_DEFINE_UINT32(nat_probe_port, 30740, "Network", "NAT traversal rendezvous UDP port")
-+    .range(1, 65535)
-+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-+REXCVAR_DEFINE_STRING(nat_probe_attempt, "", "Network", "32-hex-character NAT traversal attempt ID")
-+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-+REXCVAR_DEFINE_STRING(nat_probe_credential, "", "Network",
-+                      "32-hex-character NAT traversal credential")
-+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-+REXCVAR_DEFINE_UINT32(nat_probe_participant, 0, "Network",
-+                      "NAT traversal participant: 0 host, 1 client")
-+    .range(0, 1)
-+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-+
-+namespace {
-+constexpr uint8_t kVersion = 1;
-+constexpr uint8_t kRegister = 1;
-+constexpr uint8_t kRegistered = 2;
-+constexpr uint8_t kPunch = 3;
-+constexpr uint8_t kAck = 4;
-+
-+#pragma pack(push, 1)
-+struct Packet {
-+  char magic[4];
-+  uint8_t version;
-+  uint8_t type;
-+  uint8_t participant;
-+  uint8_t role;
-+  uint8_t attempt[16];
-+  uint8_t credential[16];
-+  uint32_t observed_ipv4;
-+  uint16_t observed_port;
-+  uint32_t peer_ipv4;
-+  uint16_t peer_port;
-+  uint32_t reserved;
-+};
-+#pragma pack(pop)
-+static_assert(sizeof(Packet) == 56);
-+
-+struct Identity {
-+  std::array<uint8_t, 16> attempt{};
-+  std::array<uint8_t, 16> capability{};
-+  LanAddress server{};
-+  uint8_t participant = 0;
-+  bool automatic = false;
-+  std::string key;
-+};
-+
-+struct AttemptState {
-+  Identity identity;
-+  LanAddress observed;
-+  NatProbeEndpointState endpoint;
-+  LanAddress logical_gameplay_peer{};
-+  std::chrono::steady_clock::time_point attached_at{};
-+  uint8_t stability_checkpoints = 0;
-+  std::chrono::steady_clock::time_point last_registration{};
-+  std::chrono::steady_clock::time_point last_punch{};
-+  bool terminal = false;
-+  uint32_t registrations_sent = 0;
-+};
-+
-+struct State {
-+  NatProbeRole role;
-+  LanAddress local;
-+  std::unordered_map<std::string, AttemptState> attempts;
-+  bool scheduled_tick_logged = false;
-+  XSocket* socket_object = nullptr;
-+  uint32_t active_receive_pumps = 0;
-+};
-+
-+std::mutex state_mutex;
-+std::condition_variable state_cv;
-+std::unordered_map<uint64_t, State> states;
-+std::unordered_map<std::string, Identity> automatic_identities;
-+std::unordered_map<std::string, LanAddress> automatic_logical_gameplay_peers;
-+std::mutex gameplay_pump_mutex;
-+std::condition_variable gameplay_pump_cv;
-+bool gameplay_pump_running = false;
-+std::jthread gameplay_pump_thread;
-+
-+bool ParseHex(std::string_view text, uint8_t* output) {
-+  if (text.size() != 32)
-+    return false;
-+  auto digit = [](char value) -> int {
-+    if (value >= '0' && value <= '9') return value - '0';
-+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
-+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
-+    return -1;
-+  };
-+  for (size_t i = 0; i < 16; ++i) {
-+    int high = digit(text[i * 2]);
-+    int low = digit(text[i * 2 + 1]);
-+    if (high < 0 || low < 0)
-+      return false;
-+    output[i] = uint8_t((high << 4) | low);
-+  }
-+  return true;
-+}
-+
-+bool FillIdentity(Packet& packet, const Identity& identity) {
-+  std::memcpy(packet.magic, "HNAT", 4);
-+  packet.version = kVersion;
-+  packet.participant = identity.participant;
-+  std::memcpy(packet.attempt, identity.attempt.data(), identity.attempt.size());
-+  std::memcpy(packet.credential, identity.capability.data(), identity.capability.size());
-+  return true;
-+}
-+
-+bool PacketPrefixValid(const Packet& packet) {
-+  return std::memcmp(packet.magic, "HNAT", 4) == 0 && packet.version == kVersion;
-+}
-+
-+void Send(uint64_t socket, Packet packet, LanAddress target) {
-+  sockaddr_in address{};
-+  address.sin_family = AF_INET;
-+  address.sin_addr.s_addr = target.ipv4;
-+  address.sin_port = htons(target.port);
-+#if REX_PLATFORM_WIN32
-+  auto native_socket = static_cast<SOCKET>(socket);
-+#else
-+  auto native_socket = static_cast<int>(socket);
-+#endif
-+  const auto sent = sendto(native_socket, reinterpret_cast<const char*>(&packet), sizeof(packet), 0,
-+                           reinterpret_cast<sockaddr*>(&address), sizeof(address));
-+#if REX_PLATFORM_WIN32
-+  if (sent == SOCKET_ERROR) {
-+    const int error = WSAGetLastError();
-+    REXSYS_WARN("NAT traversal: send failed role={} type={} target={:08X}:{} error={}",
-+                packet.role, packet.type, target.ipv4, target.port, error);
-+    return;
-+  }
-+#else
-+  if (sent < 0) {
-+    const int error = errno;
-+    REXSYS_WARN("NAT traversal: send failed role={} type={} target={:08X}:{} error={}",
-+                packet.role, packet.type, target.ipv4, target.port, error);
-+    return;
-+  }
-+#endif
-+  if (size_t(sent) != sizeof(packet)) {
-+    REXSYS_WARN(
-+        "NAT traversal: short send role={} type={} target={:08X}:{} sent={} expected={}",
-+        packet.role, packet.type, target.ipv4, target.port, sent, sizeof(packet));
-+  }
-+}
-+
-+std::optional<LanAddress> ServerAddress() {
-+  in_addr address{};
-+  const auto server = REXCVAR_GET(nat_probe_server);
-+  if (server.empty() || inet_pton(AF_INET, server.c_str(), &address) != 1)
-+    return std::nullopt;
-+  return LanAddress{address.s_addr, uint16_t(REXCVAR_GET(nat_probe_port))};
-+}
-+
-+std::optional<Identity> ManualIdentity() {
-+  auto server = ServerAddress();
-+  if (!server) return std::nullopt;
-+  Identity identity{};
-+  identity.server = *server;
-+  identity.participant = uint8_t(REXCVAR_GET(nat_probe_participant));
-+  identity.key = REXCVAR_GET(nat_probe_attempt);
-+  if (!ParseHex(identity.key, identity.attempt.data()) ||
-+      !ParseHex(REXCVAR_GET(nat_probe_credential), identity.capability.data()))
-+    return std::nullopt;
-+  return identity;
-+}
-+
-+std::optional<Identity> ParseIdentity(const NatProbeIdentity& value) {
-+  in_addr address{};
-+  Identity identity{};
-+  identity.key = value.attempt_id;
-+  identity.participant = value.participant;
-+  identity.automatic = true;
-+  identity.server.port = value.port;
-+  if (value.participant > 1 || !value.port || value.server.empty() ||
-+      !ParseHex(value.attempt_id, identity.attempt.data()) ||
-+      !ParseHex(value.capability, identity.capability.data()))
-+    return std::nullopt;
-+  if (inet_pton(AF_INET, value.server.c_str(), &address) != 1) {
-+    addrinfo hints{};
-+    hints.ai_family = AF_INET;
-+    hints.ai_socktype = SOCK_DGRAM;
-+    addrinfo* resolved = nullptr;
-+    if (getaddrinfo(value.server.c_str(), nullptr, &hints, &resolved) != 0 || !resolved)
-+      return std::nullopt;
-+    address = reinterpret_cast<sockaddr_in*>(resolved->ai_addr)->sin_addr;
-+    freeaddrinfo(resolved);
-+  }
-+  identity.server.ipv4 = address.s_addr;
-+  return identity;
-+}
-+
-+bool GameplayAttemptPendingLocked(const State& state,
-+                                  std::chrono::steady_clock::time_point now) {
-+  if (state.role != NatProbeRole::kGameplay) return false;
-+  for (const auto& [key, attempt] : state.attempts) {
-+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-+                             now - attempt.attached_at)
-+                             .count();
-+    if (attempt.identity.automatic && !attempt.terminal &&
-+        NatProbeAutomaticAttemptActive(uint32_t(std::max<int64_t>(0, elapsed)),
-+                                       attempt.endpoint.acknowledged()))
-+      return true;
-+  }
-+  return false;
-+}
-+
-+bool AnyGameplayAttemptPendingLocked(std::chrono::steady_clock::time_point now) {
-+  for (const auto& [socket, state] : states)
-+    if (GameplayAttemptPendingLocked(state, now)) return true;
-+  return false;
-+}
-+
-+void NatProbeTickLocked(uint64_t socket, State& state,
-+                        std::chrono::steady_clock::time_point now);
-+
-+void GameplayPumpMain(std::stop_token stop_token) {
-+  REXSYS_INFO("NAT traversal: gameplay probe pump started");
-+  while (!stop_token.stop_requested()) {
-+    {
-+      std::unique_lock lock(gameplay_pump_mutex);
-+      gameplay_pump_cv.wait_for(lock, std::chrono::milliseconds(100),
-+                                [&] { return stop_token.stop_requested(); });
-+    }
-+    if (stop_token.stop_requested()) break;
-+
-+    const auto now = std::chrono::steady_clock::now();
-+    std::vector<std::pair<uint64_t, XSocket*>> receive_sockets;
-+    {
-+      std::lock_guard lock(state_mutex);
-+      for (auto& [socket, state] : states) {
-+        if (!GameplayAttemptPendingLocked(state, now)) continue;
-+        if (!state.scheduled_tick_logged) {
-+          state.scheduled_tick_logged = true;
-+          REXSYS_INFO("NAT traversal: first scheduled gameplay probe tick socket={}", socket);
-+        }
-+        NatProbeTickLocked(socket, state, now);
-+        if (state.socket_object) {
-+          ++state.active_receive_pumps;
-+          receive_sockets.emplace_back(socket, state.socket_object);
-+        }
-+      }
-+    }
-+
-+    for (const auto& [socket, socket_object] : receive_sockets) {
-+      // Drain only a small bounded run of validated NAT-control datagrams. If
-+      // gameplay is at the queue head PumpNatControl leaves it untouched.
-+      for (uint32_t count = 0; count < 8 && socket_object->PumpNatControl(); ++count) {}
-+      {
-+        std::lock_guard lock(state_mutex);
-+        auto found = states.find(socket);
-+        if (found != states.end() && found->second.active_receive_pumps)
-+          --found->second.active_receive_pumps;
-+      }
-+      state_cv.notify_all();
-+    }
-+
-+    std::lock_guard pump_lock(gameplay_pump_mutex);
-+    std::lock_guard state_lock(state_mutex);
-+    if (!AnyGameplayAttemptPendingLocked(std::chrono::steady_clock::now())) {
-+      gameplay_pump_running = false;
-+      REXSYS_INFO("NAT traversal: gameplay probe pump stopped");
-+      return;
-+    }
-+  }
-+  std::lock_guard lock(gameplay_pump_mutex);
-+  gameplay_pump_running = false;
-+}
-+
-+void EnsureGameplayPump() {
-+  std::unique_lock lock(gameplay_pump_mutex);
-+  if (gameplay_pump_running) {
-+    gameplay_pump_cv.notify_all();
-+    return;
-+  }
-+  if (gameplay_pump_thread.joinable()) {
-+    lock.unlock();
-+    gameplay_pump_thread.join();
-+    lock.lock();
-+  }
-+  gameplay_pump_running = true;
-+  gameplay_pump_thread = std::jthread(GameplayPumpMain);
-+}
-+}  // namespace
-+
-+bool NatProbeEndpointState::UpdatePeer(LanAddress peer) {
-+  if (!peer.ipv4 || !peer.port || peer_ == peer) return false;
-+  peer_ = peer;
-+  acknowledged_peer_.reset();
-+  return true;
-+}
-+
-+bool NatProbeEndpointState::Acknowledge(LanAddress source) {
-+  if (source != peer_) return false;
-+  acknowledged_peer_ = source;
-+  return true;
-+}
-+
-+bool NatProbeEndpointState::acknowledged() const {
-+  return acknowledged_peer_.has_value() && *acknowledged_peer_ == peer_;
-+}
-+
-+std::optional<LanAddress> NatProbeEndpointState::NormalizeAcknowledgedPeer(
-+    LanAddress source, LanAddress logical) const {
-+  if (!logical.ipv4 || !logical.port || !acknowledged() || source != *acknowledged_peer_)
-+    return std::nullopt;
-+  return logical;
-+}
-+
-+bool NatProbeEnabled() {
-+  std::lock_guard lock(state_mutex);
-+  return ManualIdentity().has_value() || !automatic_identities.empty();
-+}
-+
-+bool NatProbeInstallIdentity(const NatProbeIdentity& value) {
-+  auto identity = ParseIdentity(value);
-+  if (!identity) return false;
-+  bool start_gameplay_pump = false;
-+  {
-+    std::lock_guard lock(state_mutex);
-+    if (automatic_identities.contains(identity->key)) return true;
-+    automatic_identities.insert_or_assign(identity->key, *identity);
-+    for (auto& [socket, state] : states) {
-+      AttemptState attempt{};
-+      attempt.identity = *identity;
-+      if (auto logical = automatic_logical_gameplay_peers.find(identity->key);
-+          logical != automatic_logical_gameplay_peers.end())
-+        attempt.logical_gameplay_peer = logical->second;
-+      attempt.attached_at = std::chrono::steady_clock::now();
-+      state.attempts.insert_or_assign(identity->key, std::move(attempt));
-+    }
-+    REXSYS_INFO("NAT traversal: installed server-issued attempt={} participant={}",
-+                identity->key, identity->participant);
-+    start_gameplay_pump = AnyGameplayAttemptPendingLocked(std::chrono::steady_clock::now());
-+  }
-+  if (start_gameplay_pump) EnsureGameplayPump();
-+  return true;
-+}
-+
-+void NatProbeSetLogicalGameplayPeer(std::string_view attempt_id, LanAddress logical) {
-+  if (!logical.ipv4 || !logical.port) return;
-+  std::lock_guard lock(state_mutex);
-+  const std::string key(attempt_id);
-+  automatic_logical_gameplay_peers.insert_or_assign(key, logical);
-+  for (auto& [socket, state] : states) {
-+    auto attempt = state.attempts.find(key);
-+    if (attempt != state.attempts.end()) attempt->second.logical_gameplay_peer = logical;
-+  }
-+}
-+
-+void NatProbeRetireIdentity(std::string_view attempt_id) {
-+  std::lock_guard lock(state_mutex);
-+  automatic_identities.erase(std::string(attempt_id));
-+  automatic_logical_gameplay_peers.erase(std::string(attempt_id));
-+  for (auto& [socket, state] : states) state.attempts.erase(std::string(attempt_id));
-+  gameplay_pump_cv.notify_all();
-+}
-+
-+void NatProbeRetireParticipant(uint8_t participant) {
-+  std::lock_guard lock(state_mutex);
-+  std::vector<std::string> retired;
-+  for (const auto& [key, identity] : automatic_identities)
-+    if (identity.participant == participant) retired.push_back(key);
-+  for (const auto& key : retired) automatic_identities.erase(key);
-+  for (const auto& key : retired) automatic_logical_gameplay_peers.erase(key);
-+  for (auto& [socket, state] : states)
-+      for (const auto& key : retired) state.attempts.erase(key);
-+  gameplay_pump_cv.notify_all();
-+}
-+
-+bool NatProbeIsClient() {
-+  std::lock_guard lock(state_mutex);
-+  if (!automatic_identities.empty()) return automatic_identities.begin()->second.participant == 1;
-+  return REXCVAR_GET(nat_probe_participant) == 1;
-+}
-+
-+bool NatProbeIsGameplayPort(uint16_t port) {
-+  const uint32_t configured = REXCVAR_GET(lan_gameplay_port);
-+  return port == (configured ? configured : 30742);
-+}
-+
-+void NatProbeAttach(uint64_t socket, NatProbeRole role, LanAddress local,
-+                    XSocket* socket_object) {
-+  bool start_gameplay_pump = false;
-+  {
-+    std::lock_guard lock(state_mutex);
-+    State state{};
-+    state.role = role;
-+    state.local = local;
-+    state.socket_object = socket_object;
-+    auto add = [&](const Identity& identity) {
-+      AttemptState attempt{};
-+      attempt.identity = identity;
-+      if (auto logical = automatic_logical_gameplay_peers.find(identity.key);
-+          logical != automatic_logical_gameplay_peers.end())
-+        attempt.logical_gameplay_peer = logical->second;
-+      attempt.attached_at = std::chrono::steady_clock::now();
-+      state.attempts.emplace(identity.key, std::move(attempt));
-+    };
-+    if (auto manual = ManualIdentity()) add(*manual);
-+    for (const auto& [key, identity] : automatic_identities) add(identity);
-+    start_gameplay_pump = role == NatProbeRole::kGameplay &&
-+                          GameplayAttemptPendingLocked(state, std::chrono::steady_clock::now());
-+    states.insert_or_assign(socket, state);
-+    REXSYS_INFO("NAT traversal: attached {} socket={} local={:08X}:{} attempts={}",
-+                role == NatProbeRole::kDiscovery ? "discovery" : "gameplay", socket, local.ipv4,
-+                local.port, state.attempts.size());
-+    for (const auto& [key, attempt] : state.attempts) {
-+      REXSYS_INFO("NAT traversal: socket={} role={} associated attempt={} participant={}", socket,
-+                  uint8_t(role), key, attempt.identity.participant);
-+    }
-+  }
-+  if (start_gameplay_pump) EnsureGameplayPump();
-+}
-+
-+void NatProbeDetach(uint64_t socket) {
-+  std::unique_lock lock(state_mutex);
-+  state_cv.wait(lock, [&] {
-+    auto found = states.find(socket);
-+    return found == states.end() || found->second.active_receive_pumps == 0;
-+  });
-+  states.erase(socket);
-+  gameplay_pump_cv.notify_all();
-+}
-+
-+namespace {
-+void NatProbeTickLocked(uint64_t socket, State& state,
-+                        std::chrono::steady_clock::time_point now) {
-+  constexpr std::array checkpoints{std::chrono::seconds(5), std::chrono::seconds(15),
-+                                   std::chrono::seconds(30)};
-+  for (auto& [key, attempt] : state.attempts) {
-+  if (attempt.terminal) continue;
-+  if (attempt.identity.automatic &&
-+      now - attempt.attached_at >= std::chrono::seconds(20)) {
-+    attempt.terminal = true;
-+    REXSYS_WARN("NAT traversal: automatic attempt expired locally role={}", uint8_t(state.role));
-+    continue;
-+  }
-+  for (size_t i = 0; i < checkpoints.size(); ++i) {
-+    const uint8_t bit = uint8_t(1u << i);
-+    if (attempt.observed.port && !(attempt.stability_checkpoints & bit) &&
-+        now - attempt.attached_at >= checkpoints[i]) {
-+      attempt.stability_checkpoints |= bit;
-+      REXSYS_INFO("NAT traversal: role={} mapping stable at {}s public={:08X}:{}",
-+                  uint8_t(state.role), checkpoints[i].count(), attempt.observed.ipv4,
-+                  attempt.observed.port);
-+    }
-+  }
-+  // A host may already have its gameplay socket registered when the joining
-+  // client's gameplay socket appears. Poll quickly until the rendezvous server
-+  // supplies that peer so the title's bounded membership exchange is not spent
-+  // waiting for the normal mapping keepalive interval.
-+  const auto registration_interval = std::chrono::milliseconds(
-+      NatProbeRegistrationIntervalMs(attempt.endpoint.peer().port != 0));
-+  if (now - attempt.last_registration >= registration_interval) {
-+    Packet packet{};
-+    FillIdentity(packet, attempt.identity);
-+    packet.type = kRegister;
-+    packet.role = uint8_t(state.role);
-+    Send(socket, packet, attempt.identity.server);
-+    attempt.last_registration = now;
-+    ++attempt.registrations_sent;
-+    REXSYS_INFO(
-+        "NAT traversal: registration sent socket={} role={} attempt={} participant={} count={}",
-+        socket, uint8_t(state.role), attempt.identity.key, attempt.identity.participant,
-+        attempt.registrations_sent);
-+  }
-+  const auto peer = attempt.endpoint.peer();
-+  if (peer.port && !attempt.endpoint.acknowledged() &&
-+      now - attempt.last_punch >= std::chrono::milliseconds(100)) {
-+    Packet packet{};
-+    FillIdentity(packet, attempt.identity);
-+    packet.type = kPunch;
-+    packet.role = uint8_t(state.role);
-+    std::memset(packet.credential, 0, sizeof(packet.credential));
-+    Send(socket, packet, peer);
-+    attempt.last_punch = now;
-+    REXSYS_INFO("NAT traversal: {} punch sent socket={} peer={:08X}:{}",
-+                state.role == NatProbeRole::kDiscovery ? "discovery" : "gameplay", socket,
-+                peer.ipv4, peer.port);
-+  }
-+  }
-+}
-+}  // namespace
-+
-+void NatProbeTick(uint64_t socket) {
-+  std::lock_guard lock(state_mutex);
-+  auto found = states.find(socket);
-+  if (found == states.end()) return;
-+  NatProbeTickLocked(socket, found->second, std::chrono::steady_clock::now());
-+}
-+
-+bool NatProbeIsControlPacket(uint64_t socket, const uint8_t* data, size_t size,
-+                             uint32_t source_ipv4, uint16_t source_port) {
-+  if (size != sizeof(Packet)) return false;
-+  Packet packet{};
-+  std::memcpy(&packet, data, sizeof(packet));
-+  if (!PacketPrefixValid(packet)) return false;
-+
-+  std::lock_guard lock(state_mutex);
-+  auto found = states.find(socket);
-+  if (found == states.end() || packet.role != uint8_t(found->second.role)) return false;
-+  auto attempt = std::find_if(found->second.attempts.begin(), found->second.attempts.end(),
-+                              [&](const auto& value) {
-+                                return std::memcmp(packet.attempt,
-+                                                   value.second.identity.attempt.data(), 16) == 0;
-+                              });
-+  if (attempt == found->second.attempts.end()) return false;
-+  const auto& attempt_state = attempt->second;
-+  if (packet.type == kRegistered)
-+    return packet.participant == attempt_state.identity.participant &&
-+           std::memcmp(packet.credential, attempt_state.identity.capability.data(), 16) == 0;
-+  if (packet.participant == attempt_state.identity.participant) return false;
-+  const LanAddress source{source_ipv4, source_port};
-+  if (packet.type == kPunch)
-+    return !attempt_state.endpoint.peer().port || attempt_state.endpoint.peer() == source;
-+  if (packet.type == kAck) return attempt_state.endpoint.peer() == source;
-+  return false;
-+}
-+
-+bool NatProbeConsume(uint64_t socket, const uint8_t* data, size_t size, uint32_t source_ipv4,
-+                     uint16_t source_port) {
-+  if (size != sizeof(Packet))
-+    return false;
-+  Packet packet{};
-+  std::memcpy(&packet, data, sizeof(packet));
-+  if (!PacketPrefixValid(packet))
-+    return false;
-+  std::lock_guard lock(state_mutex);
-+  auto found = states.find(socket);
-+  if (found == states.end()) {
-+    REXSYS_WARN("NAT traversal: packet rejected socket={} reason=detached", socket);
-+    return false;
-+  }
-+  if (packet.role != uint8_t(found->second.role)) {
-+    REXSYS_WARN("NAT traversal: packet rejected socket={} reason=socket_role packet_role={} "
-+                "socket_role={}", socket, packet.role, uint8_t(found->second.role));
-+    return false;
-+  }
-+  auto& state = found->second;
-+  auto attempt = std::find_if(state.attempts.begin(), state.attempts.end(), [&](const auto& value) {
-+    return std::memcmp(packet.attempt, value.second.identity.attempt.data(), 16) == 0;
-+  });
-+  if (attempt == state.attempts.end()) {
-+    REXSYS_WARN("NAT traversal: packet rejected socket={} role={} reason=unknown_attempt",
-+                socket, uint8_t(state.role));
-+    return false;
-+  }
-+  auto& attempt_state = attempt->second;
-+  if (packet.type == kRegistered) {
-+    if (packet.participant != attempt_state.identity.participant ||
-+        std::memcmp(packet.credential, attempt_state.identity.capability.data(), 16) != 0)
-+      {
-+        REXSYS_WARN(
-+            "NAT traversal: registration response rejected socket={} role={} attempt={} "
-+            "reason=identity",
-+            socket, uint8_t(state.role), attempt_state.identity.key);
-+        return false;
-+      }
-+    LanAddress observed{packet.observed_ipv4, ntohs(packet.observed_port)};
-+    LanAddress peer{packet.peer_ipv4, ntohs(packet.peer_port)};
-+    REXSYS_INFO(
-+        "NAT traversal: registration response socket={} role={} attempt={} participant={} "
-+        "observed={:08X}:{} peer={:08X}:{}",
-+        socket, uint8_t(state.role), attempt_state.identity.key,
-+        attempt_state.identity.participant, observed.ipv4, observed.port, peer.ipv4, peer.port);
-+    if (attempt_state.observed.port && attempt_state.observed != observed)
-+      REXSYS_WARN("NAT traversal: mapping changed role={} old={:08X}:{} new={:08X}:{}",
-+                  uint8_t(state.role), attempt_state.observed.ipv4, attempt_state.observed.port, observed.ipv4,
-+                  observed.port);
-+    if (attempt_state.observed != observed) {
-+      attempt_state.observed = observed;
-+      REXSYS_INFO("NAT traversal: role={} observed public={:08X}:{}", uint8_t(state.role),
-+                  observed.ipv4, observed.port);
-+    }
-+    const auto old_peer = attempt_state.endpoint.peer();
-+    if (attempt_state.endpoint.UpdatePeer(peer)) {
-+      if (old_peer.port) {
-+        REXSYS_INFO(
-+            "NAT traversal: role={} peer endpoint changed old={:08X}:{} new={:08X}:{}; "
-+            "old acknowledgement invalidated",
-+            uint8_t(state.role), old_peer.ipv4, old_peer.port, peer.ipv4, peer.port);
-+      } else {
-+        REXSYS_INFO("NAT traversal: role={} peer endpoint={:08X}:{}", uint8_t(state.role), peer.ipv4,
-+                    peer.port);
-+      }
-+      attempt_state.last_punch = {};
-+    }
-+    return true;
-+  }
-+  if (packet.participant == attempt_state.identity.participant)
-+    return false;
-+  // Peer punch packets prove possession of the unguessable attempt ID and are
-+  // accepted only from the server-observed endpoint for the opposite participant.
-+  if (packet.type == kPunch) {
-+    const LanAddress source{source_ipv4, source_port};
-+    if (!attempt_state.endpoint.peer().port) attempt_state.endpoint.UpdatePeer(source);
-+    if (attempt_state.endpoint.peer() != source) return true;
-+    Packet response{};
-+    FillIdentity(response, attempt_state.identity);
-+    std::memset(response.credential, 0, sizeof(response.credential));
-+    response.type = kAck;
-+    response.role = uint8_t(state.role);
-+    Send(socket, response, source);
-+    REXSYS_INFO("NAT traversal: role={} punch received and acknowledged from {:08X}:{}",
-+                uint8_t(state.role), source_ipv4, source_port);
-+    return true;
-+  }
-+  if (packet.type == kAck &&
-+      attempt_state.endpoint.Acknowledge(LanAddress{source_ipv4, source_port})) {
-+    REXSYS_INFO("NAT traversal: role={} acknowledgement received from {:08X}:{}",
-+                uint8_t(state.role), source_ipv4, source_port);
-+    gameplay_pump_cv.notify_all();
-+    return true;
-+  }
-+  return false;
-+}
-+
-+std::optional<LanAddress> NatProbePeer(uint64_t socket, bool require_ack) {
-+  auto peers = NatProbePeers(socket, require_ack);
-+  return peers.empty() ? std::nullopt : std::optional<LanAddress>(peers.front());
-+}
-+
-+std::vector<LanAddress> NatProbePeers(uint64_t socket, bool require_ack) {
-+  auto attempts = NatProbePeerAttempts(socket, require_ack);
-+  std::vector<LanAddress> result;
-+  for (const auto& attempt : attempts)
-+    if (std::find(result.begin(), result.end(), attempt.peer) == result.end())
-+      result.push_back(attempt.peer);
-+  return result;
-+}
-+
-+std::vector<NatProbePeerAttempt> NatProbePeerAttempts(uint64_t socket, bool require_ack) {
-+  std::lock_guard lock(state_mutex);
-+  std::vector<NatProbePeerAttempt> result;
-+  auto found = states.find(socket);
-+  if (found == states.end()) return result;
-+  for (const auto& [key, attempt] : found->second.attempts) {
-+    if (attempt.endpoint.peer().port && (!require_ack || attempt.endpoint.acknowledged()))
-+      result.push_back({key, attempt.endpoint.peer()});
-+  }
-+  return result;
-+}
-+
-+std::optional<LanAddress> NatProbeNormalizeGameplaySource(uint64_t socket,
-+                                                          LanAddress source) {
-+  std::lock_guard lock(state_mutex);
-+  auto found = states.find(socket);
-+  if (found == states.end() || found->second.role != NatProbeRole::kGameplay)
-+    return std::nullopt;
-+  for (const auto& [key, attempt] : found->second.attempts) {
-+    if (auto logical =
-+            attempt.endpoint.NormalizeAcknowledgedPeer(source, attempt.logical_gameplay_peer))
-+      return logical;
-+  }
-+  return std::nullopt;
-+}
-+
-+}  // namespace rex::system::xam
-
 diff --git a/include/rex/system/xam/session_directory.h b/include/rex/system/xam/session_directory.h
 new file mode 100644
-index 0000000..5faa397
+index 0000000..e95eccb
 --- /dev/null
 +++ b/include/rex/system/xam/session_directory.h
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,82 @@
 +#pragma once
 +
 +#include <cstdint>
@@ -1369,6 +588,19 @@ index 0000000..5faa397
 +  uint8_t participant = 0;
 +};
 +
++enum class DirectoryHeartbeatDisposition {
++  kAccepted,
++  kRetrySameRegistration,
++  kRecoverRegistration,
++  kRejected,
++};
++
++// Keep transport and server failures distinct from an authoritative 404. This
++// policy is public only so the host lifecycle can be covered without real HTTP
++// timing in unit tests.
++DirectoryHeartbeatDisposition ClassifyDirectoryHeartbeatResponse(std::optional<uint32_t> status,
++                                                                 bool valid_session_id);
++
 +class SessionDirectoryClient {
 + public:
 +  SessionDirectoryClient();
@@ -1382,8 +614,7 @@ index 0000000..5faa397
 +  std::vector<DirectorySession> List(uint32_t title_id) const;
 +  void RequestList(uint32_t title_id) const;
 +  std::optional<std::vector<DirectorySession>> CachedList(uint32_t title_id) const;
-+  std::optional<DirectoryTraversalAttempt> CreateJoinAttempt(
-+      const std::string& session_id) const;
++  std::optional<DirectoryTraversalAttempt> CreateJoinAttempt(const std::string& session_id) const;
 +  void CompleteJoinAttempt(const DirectoryTraversalAttempt& attempt) const;
 +
 + private:
@@ -3558,7 +2789,7 @@ index 179b2df..d79cc0a 100644
    templateData["code_size"] = "100000";
  
 diff --git a/src/system/CMakeLists.txt b/src/system/CMakeLists.txt
-index fc46d86..1ed8a3d 100644
+index fc46d86..c4543d4 100644
 --- a/src/system/CMakeLists.txt
 +++ b/src/system/CMakeLists.txt
 @@ -31,6 +31,9 @@ set(REXSYSTEM_SOURCES
@@ -3576,7 +2807,7 @@ index fc46d86..1ed8a3d 100644
  
  if(WIN32)
 -    target_link_libraries(rexruntime PRIVATE ws2_32)
-+    target_link_libraries(rexruntime PRIVATE ws2_32 winhttp)
++    target_link_libraries(rexruntime PRIVATE bcrypt ws2_32 winhttp)
      target_link_libraries(rexruntime PUBLIC dxgi dxguid)
      target_compile_definitions(rexruntime PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
  endif()
@@ -5033,10 +4264,10 @@ index 0000000..4c3eb4d
 +}  // namespace rex::system::xam
 diff --git a/src/system/xam/session_directory.cpp b/src/system/xam/session_directory.cpp
 new file mode 100644
-index 0000000..9677712
+index 0000000..97e3e47
 --- /dev/null
 +++ b/src/system/xam/session_directory.cpp
-@@ -0,0 +1,559 @@
+@@ -0,0 +1,671 @@
 +#include <rex/system/xam/session_directory.h>
 +
 +#include <algorithm>
@@ -5059,6 +4290,8 @@ index 0000000..9677712
 +
 +#if REX_PLATFORM_WIN32
 +#include <windows.h>
++
++#include <bcrypt.h>
 +#include <winhttp.h>
 +#include <ws2tcpip.h>
 +#endif
@@ -5070,6 +4303,7 @@ index 0000000..9677712
 +constexpr uint32_t kNoSessionIndex = 0xFFFFFFFFu;
 +constexpr size_t kMaxResponseBytes = 64 * 1024;
 +constexpr auto kHeartbeatInterval = std::chrono::seconds(15);
++constexpr auto kHeartbeatRetryInitial = std::chrono::seconds(1);
 +constexpr auto kTraversalPollInterval = std::chrono::milliseconds(250);
 +constexpr auto kListCacheLifetime = std::chrono::seconds(5);
 +
@@ -5120,9 +4354,11 @@ index 0000000..9677712
 +                     [](unsigned char ch) { return ch >= 0x20 && ch != 0x7F; });
 +}
 +
-+std::optional<DirectoryTraversalAttempt> ParseTraversalAttempt(
-+    const nlohmann::json& document, std::string session_id, uint8_t participant) {
-+  if (!document.is_object()) return std::nullopt;
++std::optional<DirectoryTraversalAttempt> ParseTraversalAttempt(const nlohmann::json& document,
++                                                               std::string session_id,
++                                                               uint8_t participant) {
++  if (!document.is_object())
++    return std::nullopt;
 +  auto attempt = document.value("attempt_id", "");
 +  auto capability = document.value("capability", "");
 +  auto host = document.value("rendezvous_host", "");
@@ -5130,15 +4366,32 @@ index 0000000..9677712
 +  auto role = document.value("participant", "");
 +  auto hex = [](std::string_view text) {
 +    return text.size() == 32 && std::all_of(text.begin(), text.end(), [](unsigned char ch) {
-+      return std::isxdigit(ch) != 0;
-+    });
++             return std::isxdigit(ch) != 0;
++           });
 +  };
 +  if (!hex(attempt) || !hex(capability) || host.empty() || host.size() > 255 || !port ||
 +      port > 65535 || role != (participant ? "client" : "host"))
 +    return std::nullopt;
-+  return DirectoryTraversalAttempt{std::move(session_id), std::move(attempt),
-+                                   std::move(capability), std::move(host), uint16_t(port),
-+                                   participant};
++  return DirectoryTraversalAttempt{std::move(session_id), std::move(attempt), std::move(capability),
++                                   std::move(host),       uint16_t(port),     participant};
++}
++
++std::optional<std::string> RandomUrlToken(size_t byte_count) {
++#if REX_PLATFORM_WIN32
++  std::vector<uint8_t> bytes(byte_count);
++  if (BCryptGenRandom(nullptr, bytes.data(), ULONG(bytes.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG) <
++      0)
++    return std::nullopt;
++  constexpr char kHex[] = "0123456789abcdef";
++  std::string result(bytes.size() * 2, '0');
++  for (size_t index = 0; index < bytes.size(); ++index) {
++    result[index * 2] = kHex[bytes[index] >> 4];
++    result[index * 2 + 1] = kHex[bytes[index] & 0x0F];
++  }
++  return result;
++#else
++  return std::nullopt;
++#endif
 +}
 +
 +struct HttpResult {
@@ -5287,6 +4540,19 @@ index 0000000..9677712
 +REXCVAR_DEFINE_UINT32(session_directory_session_index, kNoSessionIndex, "Network",
 +                      "Directory result index to resolve through Direct Connect")
 +    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++
++DirectoryHeartbeatDisposition ClassifyDirectoryHeartbeatResponse(std::optional<uint32_t> status,
++                                                                 bool valid_session_id) {
++  if (!status)
++    return DirectoryHeartbeatDisposition::kRetrySameRegistration;
++  if (*status == 404)
++    return DirectoryHeartbeatDisposition::kRecoverRegistration;
++  if (*status == 400 || *status == 401 || *status == 403)
++    return DirectoryHeartbeatDisposition::kRejected;
++  if (*status == 200 && valid_session_id)
++    return DirectoryHeartbeatDisposition::kAccepted;
++  return DirectoryHeartbeatDisposition::kRetrySameRegistration;
++}
 +
 +class SessionDirectoryClient::Impl {
 + public:
@@ -5451,24 +4717,25 @@ index 0000000..9677712
 +    return list_cache;
 +  }
 +
-+  std::optional<DirectoryTraversalAttempt> CreateJoinAttempt(
-+      const std::string& session_id) const {
++  std::optional<DirectoryTraversalAttempt> CreateJoinAttempt(const std::string& session_id) const {
 +    const auto& url = REXCVAR_GET(session_directory_url);
-+    if (url.empty() || !IsUrlToken(session_id, 64)) return std::nullopt;
++    if (url.empty() || !IsUrlToken(session_id, 64))
++      return std::nullopt;
 +    auto response = Request(url, L"POST", "/sessions/" + session_id + "/join-attempts", "{}");
-+    if (!response || response->status != 201) return std::nullopt;
++    if (!response || response->status != 201)
++      return std::nullopt;
 +    auto document = nlohmann::json::parse(response->body, nullptr, false);
 +    return ParseTraversalAttempt(document, session_id, 1);
 +  }
 +
 +  void CompleteJoinAttempt(const DirectoryTraversalAttempt& attempt) const {
 +    const auto& url = REXCVAR_GET(session_directory_url);
-+    if (url.empty() || !IsUrlToken(attempt.session_id, 64) ||
-+        !IsUrlToken(attempt.attempt_id, 64) || attempt.capability.empty())
++    if (url.empty() || !IsUrlToken(attempt.session_id, 64) || !IsUrlToken(attempt.attempt_id, 64) ||
++        attempt.capability.empty())
 +      return;
-+    Request(url, L"DELETE", "/sessions/" + attempt.session_id + "/join-attempts/" +
-+                                  attempt.attempt_id,
-+            "", attempt.capability);
++    Request(url, L"DELETE",
++            "/sessions/" + attempt.session_id + "/join-attempts/" + attempt.attempt_id, "",
++            attempt.capability);
 +    NatProbeRetireIdentity(attempt.attempt_id);
 +  }
 +
@@ -5488,42 +4755,117 @@ index 0000000..9677712
 +  }
 +
 +  void HostLoop(std::stop_token stop) {
++    auto host_instance_id = RandomUrlToken(16);
++    auto host_instance_token = RandomUrlToken(32);
++    if (!host_instance_id || !host_instance_token) {
++      REXSYS_WARN("Session directory: secure host registration identity unavailable");
++      return;
++    }
 +    std::string session_id;
 +    std::string token;
 +    std::unordered_set<std::string> host_attempts;
++    bool recovering = false;
 +    auto next_heartbeat = std::chrono::steady_clock::time_point{};
++    auto next_registration = std::chrono::steady_clock::time_point{};
++    auto retry_delay = kHeartbeatRetryInitial;
++    auto schedule_retry = [&] {
++      next_registration = std::chrono::steady_clock::now() + retry_delay;
++      retry_delay = std::min(retry_delay * 2, kHeartbeatInterval);
++    };
++    auto schedule_heartbeat = [&] {
++      retry_delay = kHeartbeatRetryInitial;
++      next_heartbeat = std::chrono::steady_clock::now() + kHeartbeatInterval;
++    };
 +    while (!stop.stop_requested()) {
-+      auto body = RegistrationPayload(*hosted, title_id, discovery_port).dump();
++      auto registration = RegistrationPayload(*hosted, title_id, discovery_port);
++      auto heartbeat_body = registration.dump();
++      registration["host_instance_id"] = *host_instance_id;
++      registration["host_instance_token"] = *host_instance_token;
++      auto registration_body = registration.dump();
 +      std::optional<HttpResult> response;
-+      if (session_id.empty()) {
-+        response = Request(REXCVAR_GET(session_directory_url), L"POST", "/sessions", body);
-+        if (response && response->status == 201) {
++      auto now = std::chrono::steady_clock::now();
++      if ((session_id.empty() || recovering) && now >= next_registration) {
++        response =
++            Request(REXCVAR_GET(session_directory_url), L"POST", "/sessions", registration_body);
++        bool accepted = false;
++        if (response && (response->status == 200 || response->status == 201)) {
 +          auto document = nlohmann::json::parse(response->body, nullptr, false);
 +          if (document.is_object()) {
 +            auto candidate_session_id = document.value("session_id", "");
 +            auto candidate_token = document.value("registration_token", "");
 +            if (IsUrlToken(candidate_session_id, 64) && IsUrlToken(candidate_token, 128)) {
++              bool changed = !session_id.empty() && candidate_session_id != session_id;
 +              session_id = std::move(candidate_session_id);
 +              token = std::move(candidate_token);
++              accepted = true;
++              if (recovering && changed)
++                REXSYS_INFO("Session directory: recovered '{}' with replacement {}",
++                            hosted->host_name, session_id);
++              else if (recovering)
++                REXSYS_INFO("Session directory: recovered '{}' as {}", hosted->host_name,
++                            session_id);
++              else
++                REXSYS_INFO("Session directory: registered '{}' as {}", hosted->host_name,
++                            session_id);
 +            }
 +          }
-+          if (!session_id.empty() && !token.empty())
-+            REXSYS_INFO("Session directory: registered '{}' as {}", hosted->host_name, session_id);
-+          next_heartbeat = std::chrono::steady_clock::now() + kHeartbeatInterval;
 +        }
-+      } else if (std::chrono::steady_clock::now() >= next_heartbeat) {
-+        response = Request(REXCVAR_GET(session_directory_url), L"POST",
-+                           "/sessions/" + session_id + "/heartbeat", body, token);
-+        if (!response || response->status == 404) {
-+          for (const auto& attempt : host_attempts) NatProbeRetireIdentity(attempt);
-+          host_attempts.clear();
-+          session_id.clear();
-+          token.clear();
++        if (accepted) {
++          recovering = false;
++          schedule_heartbeat();
 +        } else {
-+          next_heartbeat = std::chrono::steady_clock::now() + kHeartbeatInterval;
++          if (response &&
++              (response->status == 400 || response->status == 401 || response->status == 403))
++            REXSYS_WARN("Session directory: host registration rejected with HTTP {}",
++                        response->status);
++          else if (response)
++            REXSYS_WARN("Session directory: host registration HTTP {}; retrying same identity",
++                        response->status);
++          else
++            REXSYS_WARN(
++                "Session directory: host registration transport failure; retrying same identity");
++          schedule_retry();
++        }
++      } else if (!recovering && !session_id.empty() && now >= next_heartbeat) {
++        response = Request(REXCVAR_GET(session_directory_url), L"POST",
++                           "/sessions/" + session_id + "/heartbeat", heartbeat_body, token);
++        bool valid_session_id = false;
++        if (response && response->status == 200) {
++          auto document = nlohmann::json::parse(response->body, nullptr, false);
++          valid_session_id = document.is_object() && document.value("session_id", "") == session_id;
++        }
++        auto disposition = ClassifyDirectoryHeartbeatResponse(
++            response ? std::optional<uint32_t>(response->status) : std::nullopt, valid_session_id);
++        switch (disposition) {
++          case DirectoryHeartbeatDisposition::kAccepted:
++            schedule_heartbeat();
++            break;
++          case DirectoryHeartbeatDisposition::kRetrySameRegistration:
++            if (response)
++              REXSYS_WARN("Session directory: heartbeat HTTP {}; retrying same registration",
++                          response->status);
++            else
++              REXSYS_WARN(
++                  "Session directory: heartbeat transport failure; retrying same registration");
++            next_heartbeat = std::chrono::steady_clock::now() + retry_delay;
++            retry_delay = std::min(retry_delay * 2, kHeartbeatInterval);
++            break;
++          case DirectoryHeartbeatDisposition::kRecoverRegistration:
++            REXSYS_WARN("Session directory: heartbeat returned 404; recovering logical lobby");
++            for (const auto& attempt : host_attempts)
++              NatProbeRetireIdentity(attempt);
++            host_attempts.clear();
++            recovering = true;
++            next_registration = std::chrono::steady_clock::now();
++            retry_delay = kHeartbeatRetryInitial;
++            break;
++          case DirectoryHeartbeatDisposition::kRejected:
++            REXSYS_WARN("Session directory: heartbeat rejected with HTTP {}", response->status);
++            next_heartbeat = std::chrono::steady_clock::now() + kHeartbeatInterval;
++            break;
 +        }
 +      }
-+      if (!session_id.empty()) {
++      if (!session_id.empty() && !recovering) {
 +        auto pending = Request(REXCVAR_GET(session_directory_url), L"GET",
 +                               "/sessions/" + session_id + "/join-attempts", "", token);
 +        if (pending && pending->status == 200) {
@@ -5540,7 +4882,8 @@ index 0000000..9677712
 +              }
 +            }
 +            for (const auto& attempt : host_attempts)
-+              if (!pending_attempts.contains(attempt)) NatProbeRetireIdentity(attempt);
++              if (!pending_attempts.contains(attempt))
++                NatProbeRetireIdentity(attempt);
 +            host_attempts = std::move(pending_attempts);
 +          }
 +        }
@@ -5548,7 +4891,8 @@ index 0000000..9677712
 +      std::unique_lock lock(wait_mutex);
 +      wake.wait_for(lock, kTraversalPollInterval, [&] { return stop.stop_requested(); });
 +    }
-+    for (const auto& attempt : host_attempts) NatProbeRetireIdentity(attempt);
++    for (const auto& attempt : host_attempts)
++      NatProbeRetireIdentity(attempt);
 +    if (!session_id.empty())
 +      Request(REXCVAR_GET(session_directory_url), L"DELETE", "/sessions/" + session_id, "", token);
 +  }
@@ -5590,8 +4934,7 @@ index 0000000..9677712
 +    const std::string& session_id) const {
 +  return impl_->CreateJoinAttempt(session_id);
 +}
-+void SessionDirectoryClient::CompleteJoinAttempt(
-+    const DirectoryTraversalAttempt& attempt) const {
++void SessionDirectoryClient::CompleteJoinAttempt(const DirectoryTraversalAttempt& attempt) const {
 +  impl_->CompleteJoinAttempt(attempt);
 +}
 +
@@ -6240,10 +5583,10 @@ index 88617f2..c82fead 100644
    REQUIRE(dispatcher.SetFunction(kAddr, &ScribbleFn));
 diff --git a/tests/unit/system/session_test.cpp b/tests/unit/system/session_test.cpp
 new file mode 100644
-index 0000000..a3ff765
+index 0000000..9bee334
 --- /dev/null
 +++ b/tests/unit/system/session_test.cpp
-@@ -0,0 +1,520 @@
+@@ -0,0 +1,531 @@
 +#include <catch2/catch_test_macros.hpp>
 +
 +#include <rex/platform.h>
@@ -6261,8 +5604,7 @@ index 0000000..a3ff765
 +
 +namespace rex::system::xam {
 +
-+TEST_CASE("NAT registration polls quickly only while awaiting a peer",
-+          "[session][network][nat]") {
++TEST_CASE("NAT registration polls quickly only while awaiting a peer", "[session][network][nat]") {
 +  CHECK(NatProbeRegistrationIntervalMs(false) == 100);
 +  CHECK(NatProbeRegistrationIntervalMs(true) == 1000);
 +  CHECK(NatProbeAutomaticAttemptActive(0, false));
@@ -6439,8 +5781,7 @@ index 0000000..a3ff765
 +  CHECK_FALSE(nat.InNatExtension(nat.total_window_ms()));
 +}
 +
-+TEST_CASE("late acknowledgement query obeys the NAT extended deadline",
-+          "[session][network][nat]") {
++TEST_CASE("late acknowledgement query obeys the NAT extended deadline", "[session][network][nat]") {
 +  constexpr uint32_t original_window_ms = 250;
 +  const LanAddress peer{htonl(0xCB007171u), 49152};
 +  SearchTimingBudget nat(original_window_ms, true);
@@ -6466,7 +5807,8 @@ index 0000000..a3ff765
 +  }
 +}
 +
-+TEST_CASE("explicit LAN bind address is the network identity source of truth", "[session][network]") {
++TEST_CASE("explicit LAN bind address is the network identity source of truth",
++          "[session][network]") {
 +  auto previous = REXCVAR_GET(lan_bind_address);
 +  REXCVAR_SET(lan_bind_address, "192.168.50.213");
 +  CHECK(ntohl(LanDiscoveryService::DetermineLanIpv4()) == 0x0A0000D5u);
@@ -6565,7 +5907,8 @@ index 0000000..a3ff765
 +  CHECK(visible[0]->info.id != local->info.id);
 +}
 +
-+TEST_CASE("abandoned local host records are deleted without touching remote sessions", "[session]") {
++TEST_CASE("abandoned local host records are deleted without touching remote sessions",
++          "[session]") {
 +  SessionRegistry registry;
 +  registry.Create(0x1001, "DesktopHost", {0xD500000A, 3074}, 1, 6, 0);
 +  auto remote = registry.Create(0x1002, "ROGAlly", {0x1301000A, 3074}, 1, 6, 0);
@@ -6656,8 +5999,7 @@ index 0000000..a3ff765
 +  CHECK(results[0].info.host_address.port == 3074);
 +}
 +
-+TEST_CASE("direct connect discovers and joins a host without LAN broadcast",
-+          "[session][network]") {
++TEST_CASE("direct connect discovers and joins a host without LAN broadcast", "[session][network]") {
 +  constexpr uint32_t title_id = 0x58410A7A;
 +  constexpr uint16_t discovery_port = 39043;
 +  auto previous_bind = REXCVAR_GET(lan_bind_address);
@@ -6684,8 +6026,7 @@ index 0000000..a3ff765
 +  REXCVAR_SET(session_directory_build_id, "test-build");
 +
 +  SessionRegistry host_registry;
-+  auto hosted = host_registry.Create(0x1001, "DesktopHost",
-+                                     {htonl(0xC0A8320Au), 30742}, 1, 6, 0);
++  auto hosted = host_registry.Create(0x1001, "DesktopHost", {htonl(0xC0A8320Au), 30742}, 1, 6, 0);
 +  LanDiscoveryService host(title_id, discovery_port);
 +  REQUIRE(host.Advertise(hosted));
 +
@@ -6744,6 +6085,19 @@ index 0000000..a3ff765
 +  REQUIRE(results.size() == 1);
 +  CHECK(results[0].info.id == hosted->info.id);
 +  CHECK(results[0].host_xuid == hosted->host_xuid);
++}
++
++TEST_CASE("directory heartbeat failures preserve one logical host registration",
++          "[session][network]") {
++  using Disposition = DirectoryHeartbeatDisposition;
++  CHECK(ClassifyDirectoryHeartbeatResponse(std::nullopt, false) ==
++        Disposition::kRetrySameRegistration);
++  CHECK(ClassifyDirectoryHeartbeatResponse(500, false) == Disposition::kRetrySameRegistration);
++  CHECK(ClassifyDirectoryHeartbeatResponse(503, false) == Disposition::kRetrySameRegistration);
++  CHECK(ClassifyDirectoryHeartbeatResponse(200, false) == Disposition::kRetrySameRegistration);
++  CHECK(ClassifyDirectoryHeartbeatResponse(404, false) == Disposition::kRecoverRegistration);
++  CHECK(ClassifyDirectoryHeartbeatResponse(403, false) == Disposition::kRejected);
++  CHECK(ClassifyDirectoryHeartbeatResponse(200, true) == Disposition::kAccepted);
 +}
 +
 +TEST_CASE("stopping a LAN advertisement removes the hosted session", "[session][network]") {
@@ -7151,3 +6505,782 @@ index 0000000..c5f42cb
 +}
 +
 +}  // namespace rex::system
+diff --git a/include/rex/system/xam/nat_probe.h b/include/rex/system/xam/nat_probe.h
+new file mode 100644
+index 0000000..6605431
+--- /dev/null
++++ b/include/rex/system/xam/nat_probe.h
+@@ -0,0 +1,77 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include <rex/system/xam/session.h>
++
++namespace rex::system {
++class XSocket;
++}
++
++namespace rex::system::xam {
++
++enum class NatProbeRole : uint8_t { kDiscovery = 0, kGameplay = 1 };
++
++struct NatProbeIdentity {
++  std::string attempt_id;
++  std::string capability;
++  std::string server;
++  uint16_t port = 30740;
++  uint8_t participant = 0;
++};
++
++struct NatProbePeerAttempt {
++  std::string attempt_id;
++  LanAddress peer;
++};
++
++constexpr uint32_t NatProbeRegistrationIntervalMs(bool has_peer) {
++  return has_peer ? 1000u : 100u;
++}
++
++constexpr bool NatProbeAutomaticAttemptActive(uint32_t elapsed_ms, bool acknowledged) {
++  return !acknowledged && elapsed_ms < 20000u;
++}
++
++class NatProbeEndpointState {
++ public:
++  bool UpdatePeer(LanAddress peer);
++  bool Acknowledge(LanAddress source);
++  bool acknowledged() const;
++  LanAddress peer() const { return peer_; }
++  std::optional<LanAddress> acknowledged_peer() const { return acknowledged_peer_; }
++  std::optional<LanAddress> NormalizeAcknowledgedPeer(LanAddress source,
++                                                       LanAddress logical) const;
++
++ private:
++  LanAddress peer_{};
++  std::optional<LanAddress> acknowledged_peer_;
++};
++
++bool NatProbeEnabled();
++bool NatProbeInstallIdentity(const NatProbeIdentity& identity);
++void NatProbeSetLogicalGameplayPeer(std::string_view attempt_id, LanAddress logical);
++void NatProbeRetireIdentity(std::string_view attempt_id);
++void NatProbeRetireParticipant(uint8_t participant);
++bool NatProbeIsClient();
++bool NatProbeIsGameplayPort(uint16_t port);
++void NatProbeAttach(uint64_t socket, NatProbeRole role, LanAddress local,
++                    XSocket* socket_object = nullptr);
++void NatProbeDetach(uint64_t socket);
++void NatProbeTick(uint64_t socket);
++bool NatProbeIsControlPacket(uint64_t socket, const uint8_t* data, size_t size,
++                             uint32_t source_ipv4, uint16_t source_port);
++bool NatProbeConsume(uint64_t socket, const uint8_t* data, size_t size, uint32_t source_ipv4,
++                     uint16_t source_port);
++std::optional<LanAddress> NatProbePeer(uint64_t socket, bool require_ack = true);
++std::vector<LanAddress> NatProbePeers(uint64_t socket, bool require_ack = true);
++std::vector<NatProbePeerAttempt> NatProbePeerAttempts(uint64_t socket,
++                                                       bool require_ack = true);
++std::optional<LanAddress> NatProbeNormalizeGameplaySource(uint64_t socket,
++                                                          LanAddress source);
++
++}  // namespace rex::system::xam
+diff --git a/src/system/xam/nat_probe.cpp b/src/system/xam/nat_probe.cpp
+new file mode 100644
+index 0000000..3a37fdb
+--- /dev/null
++++ b/src/system/xam/nat_probe.cpp
+@@ -0,0 +1,690 @@
++#include <rex/system/xam/nat_probe.h>
++
++#include <algorithm>
++#include <array>
++#include <cerrno>
++#include <chrono>
++#include <condition_variable>
++#include <cstring>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <unordered_map>
++#include <vector>
++
++#include <rex/cvar.h>
++#include <rex/logging.h>
++#include <rex/platform.h>
++#include <rex/system/xsocket.h>
++
++#if REX_PLATFORM_WIN32
++#include <winsock2.h>
++#include <ws2tcpip.h>
++#else
++#include <arpa/inet.h>
++#include <sys/socket.h>
++#endif
++
++namespace rex::system::xam {
++
++REXCVAR_DEFINE_STRING(nat_probe_server, "", "Network",
++                      "IPv4 UDP NAT traversal rendezvous server")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_UINT32(nat_probe_port, 30740, "Network", "NAT traversal rendezvous UDP port")
++    .range(1, 65535)
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_STRING(nat_probe_attempt, "", "Network", "32-hex-character NAT traversal attempt ID")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_STRING(nat_probe_credential, "", "Network",
++                      "32-hex-character NAT traversal credential")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_UINT32(nat_probe_participant, 0, "Network",
++                      "NAT traversal participant: 0 host, 1 client")
++    .range(0, 1)
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++
++namespace {
++constexpr uint8_t kVersion = 1;
++constexpr uint8_t kRegister = 1;
++constexpr uint8_t kRegistered = 2;
++constexpr uint8_t kPunch = 3;
++constexpr uint8_t kAck = 4;
++
++#pragma pack(push, 1)
++struct Packet {
++  char magic[4];
++  uint8_t version;
++  uint8_t type;
++  uint8_t participant;
++  uint8_t role;
++  uint8_t attempt[16];
++  uint8_t credential[16];
++  uint32_t observed_ipv4;
++  uint16_t observed_port;
++  uint32_t peer_ipv4;
++  uint16_t peer_port;
++  uint32_t reserved;
++};
++#pragma pack(pop)
++static_assert(sizeof(Packet) == 56);
++
++struct Identity {
++  std::array<uint8_t, 16> attempt{};
++  std::array<uint8_t, 16> capability{};
++  LanAddress server{};
++  uint8_t participant = 0;
++  bool automatic = false;
++  std::string key;
++};
++
++struct AttemptState {
++  Identity identity;
++  LanAddress observed;
++  NatProbeEndpointState endpoint;
++  LanAddress logical_gameplay_peer{};
++  std::chrono::steady_clock::time_point attached_at{};
++  uint8_t stability_checkpoints = 0;
++  std::chrono::steady_clock::time_point last_registration{};
++  std::chrono::steady_clock::time_point last_punch{};
++  bool terminal = false;
++  uint32_t registrations_sent = 0;
++};
++
++struct State {
++  NatProbeRole role;
++  LanAddress local;
++  std::unordered_map<std::string, AttemptState> attempts;
++  bool scheduled_tick_logged = false;
++  XSocket* socket_object = nullptr;
++  uint32_t active_receive_pumps = 0;
++};
++
++std::mutex state_mutex;
++std::condition_variable state_cv;
++std::unordered_map<uint64_t, State> states;
++std::unordered_map<std::string, Identity> automatic_identities;
++std::unordered_map<std::string, LanAddress> automatic_logical_gameplay_peers;
++std::mutex gameplay_pump_mutex;
++std::condition_variable gameplay_pump_cv;
++bool gameplay_pump_running = false;
++std::jthread gameplay_pump_thread;
++
++bool ParseHex(std::string_view text, uint8_t* output) {
++  if (text.size() != 32)
++    return false;
++  auto digit = [](char value) -> int {
++    if (value >= '0' && value <= '9') return value - '0';
++    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
++    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
++    return -1;
++  };
++  for (size_t i = 0; i < 16; ++i) {
++    int high = digit(text[i * 2]);
++    int low = digit(text[i * 2 + 1]);
++    if (high < 0 || low < 0)
++      return false;
++    output[i] = uint8_t((high << 4) | low);
++  }
++  return true;
++}
++
++bool FillIdentity(Packet& packet, const Identity& identity) {
++  std::memcpy(packet.magic, "HNAT", 4);
++  packet.version = kVersion;
++  packet.participant = identity.participant;
++  std::memcpy(packet.attempt, identity.attempt.data(), identity.attempt.size());
++  std::memcpy(packet.credential, identity.capability.data(), identity.capability.size());
++  return true;
++}
++
++bool PacketPrefixValid(const Packet& packet) {
++  return std::memcmp(packet.magic, "HNAT", 4) == 0 && packet.version == kVersion;
++}
++
++void Send(uint64_t socket, Packet packet, LanAddress target) {
++  sockaddr_in address{};
++  address.sin_family = AF_INET;
++  address.sin_addr.s_addr = target.ipv4;
++  address.sin_port = htons(target.port);
++#if REX_PLATFORM_WIN32
++  auto native_socket = static_cast<SOCKET>(socket);
++#else
++  auto native_socket = static_cast<int>(socket);
++#endif
++  const auto sent = sendto(native_socket, reinterpret_cast<const char*>(&packet), sizeof(packet), 0,
++                           reinterpret_cast<sockaddr*>(&address), sizeof(address));
++#if REX_PLATFORM_WIN32
++  if (sent == SOCKET_ERROR) {
++    const int error = WSAGetLastError();
++    REXSYS_WARN("NAT traversal: send failed role={} type={} target={:08X}:{} error={}",
++                packet.role, packet.type, target.ipv4, target.port, error);
++    return;
++  }
++#else
++  if (sent < 0) {
++    const int error = errno;
++    REXSYS_WARN("NAT traversal: send failed role={} type={} target={:08X}:{} error={}",
++                packet.role, packet.type, target.ipv4, target.port, error);
++    return;
++  }
++#endif
++  if (size_t(sent) != sizeof(packet)) {
++    REXSYS_WARN(
++        "NAT traversal: short send role={} type={} target={:08X}:{} sent={} expected={}",
++        packet.role, packet.type, target.ipv4, target.port, sent, sizeof(packet));
++  }
++}
++
++std::optional<LanAddress> ServerAddress() {
++  in_addr address{};
++  const auto server = REXCVAR_GET(nat_probe_server);
++  if (server.empty() || inet_pton(AF_INET, server.c_str(), &address) != 1)
++    return std::nullopt;
++  return LanAddress{address.s_addr, uint16_t(REXCVAR_GET(nat_probe_port))};
++}
++
++std::optional<Identity> ManualIdentity() {
++  auto server = ServerAddress();
++  if (!server) return std::nullopt;
++  Identity identity{};
++  identity.server = *server;
++  identity.participant = uint8_t(REXCVAR_GET(nat_probe_participant));
++  identity.key = REXCVAR_GET(nat_probe_attempt);
++  if (!ParseHex(identity.key, identity.attempt.data()) ||
++      !ParseHex(REXCVAR_GET(nat_probe_credential), identity.capability.data()))
++    return std::nullopt;
++  return identity;
++}
++
++std::optional<Identity> ParseIdentity(const NatProbeIdentity& value) {
++  in_addr address{};
++  Identity identity{};
++  identity.key = value.attempt_id;
++  identity.participant = value.participant;
++  identity.automatic = true;
++  identity.server.port = value.port;
++  if (value.participant > 1 || !value.port || value.server.empty() ||
++      !ParseHex(value.attempt_id, identity.attempt.data()) ||
++      !ParseHex(value.capability, identity.capability.data()))
++    return std::nullopt;
++  if (inet_pton(AF_INET, value.server.c_str(), &address) != 1) {
++    addrinfo hints{};
++    hints.ai_family = AF_INET;
++    hints.ai_socktype = SOCK_DGRAM;
++    addrinfo* resolved = nullptr;
++    if (getaddrinfo(value.server.c_str(), nullptr, &hints, &resolved) != 0 || !resolved)
++      return std::nullopt;
++    address = reinterpret_cast<sockaddr_in*>(resolved->ai_addr)->sin_addr;
++    freeaddrinfo(resolved);
++  }
++  identity.server.ipv4 = address.s_addr;
++  return identity;
++}
++
++bool GameplayAttemptPendingLocked(const State& state,
++                                  std::chrono::steady_clock::time_point now) {
++  if (state.role != NatProbeRole::kGameplay) return false;
++  for (const auto& [key, attempt] : state.attempts) {
++    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
++                             now - attempt.attached_at)
++                             .count();
++    if (attempt.identity.automatic && !attempt.terminal &&
++        NatProbeAutomaticAttemptActive(uint32_t(std::max<int64_t>(0, elapsed)),
++                                       attempt.endpoint.acknowledged()))
++      return true;
++  }
++  return false;
++}
++
++bool AnyGameplayAttemptPendingLocked(std::chrono::steady_clock::time_point now) {
++  for (const auto& [socket, state] : states)
++    if (GameplayAttemptPendingLocked(state, now)) return true;
++  return false;
++}
++
++void NatProbeTickLocked(uint64_t socket, State& state,
++                        std::chrono::steady_clock::time_point now);
++
++void GameplayPumpMain(std::stop_token stop_token) {
++  REXSYS_INFO("NAT traversal: gameplay probe pump started");
++  while (!stop_token.stop_requested()) {
++    {
++      std::unique_lock lock(gameplay_pump_mutex);
++      gameplay_pump_cv.wait_for(lock, std::chrono::milliseconds(100),
++                                [&] { return stop_token.stop_requested(); });
++    }
++    if (stop_token.stop_requested()) break;
++
++    const auto now = std::chrono::steady_clock::now();
++    std::vector<std::pair<uint64_t, XSocket*>> receive_sockets;
++    {
++      std::lock_guard lock(state_mutex);
++      for (auto& [socket, state] : states) {
++        if (!GameplayAttemptPendingLocked(state, now)) continue;
++        if (!state.scheduled_tick_logged) {
++          state.scheduled_tick_logged = true;
++          REXSYS_INFO("NAT traversal: first scheduled gameplay probe tick socket={}", socket);
++        }
++        NatProbeTickLocked(socket, state, now);
++        if (state.socket_object) {
++          ++state.active_receive_pumps;
++          receive_sockets.emplace_back(socket, state.socket_object);
++        }
++      }
++    }
++
++    for (const auto& [socket, socket_object] : receive_sockets) {
++      // Drain only a small bounded run of validated NAT-control datagrams. If
++      // gameplay is at the queue head PumpNatControl leaves it untouched.
++      for (uint32_t count = 0; count < 8 && socket_object->PumpNatControl(); ++count) {}
++      {
++        std::lock_guard lock(state_mutex);
++        auto found = states.find(socket);
++        if (found != states.end() && found->second.active_receive_pumps)
++          --found->second.active_receive_pumps;
++      }
++      state_cv.notify_all();
++    }
++
++    std::lock_guard pump_lock(gameplay_pump_mutex);
++    std::lock_guard state_lock(state_mutex);
++    if (!AnyGameplayAttemptPendingLocked(std::chrono::steady_clock::now())) {
++      gameplay_pump_running = false;
++      REXSYS_INFO("NAT traversal: gameplay probe pump stopped");
++      return;
++    }
++  }
++  std::lock_guard lock(gameplay_pump_mutex);
++  gameplay_pump_running = false;
++}
++
++void EnsureGameplayPump() {
++  std::unique_lock lock(gameplay_pump_mutex);
++  if (gameplay_pump_running) {
++    gameplay_pump_cv.notify_all();
++    return;
++  }
++  if (gameplay_pump_thread.joinable()) {
++    lock.unlock();
++    gameplay_pump_thread.join();
++    lock.lock();
++  }
++  gameplay_pump_running = true;
++  gameplay_pump_thread = std::jthread(GameplayPumpMain);
++}
++}  // namespace
++
++bool NatProbeEndpointState::UpdatePeer(LanAddress peer) {
++  if (!peer.ipv4 || !peer.port || peer_ == peer) return false;
++  peer_ = peer;
++  acknowledged_peer_.reset();
++  return true;
++}
++
++bool NatProbeEndpointState::Acknowledge(LanAddress source) {
++  if (source != peer_) return false;
++  acknowledged_peer_ = source;
++  return true;
++}
++
++bool NatProbeEndpointState::acknowledged() const {
++  return acknowledged_peer_.has_value() && *acknowledged_peer_ == peer_;
++}
++
++std::optional<LanAddress> NatProbeEndpointState::NormalizeAcknowledgedPeer(
++    LanAddress source, LanAddress logical) const {
++  if (!logical.ipv4 || !logical.port || !acknowledged() || source != *acknowledged_peer_)
++    return std::nullopt;
++  return logical;
++}
++
++bool NatProbeEnabled() {
++  std::lock_guard lock(state_mutex);
++  return ManualIdentity().has_value() || !automatic_identities.empty();
++}
++
++bool NatProbeInstallIdentity(const NatProbeIdentity& value) {
++  auto identity = ParseIdentity(value);
++  if (!identity) return false;
++  bool start_gameplay_pump = false;
++  {
++    std::lock_guard lock(state_mutex);
++    if (automatic_identities.contains(identity->key)) return true;
++    automatic_identities.insert_or_assign(identity->key, *identity);
++    for (auto& [socket, state] : states) {
++      AttemptState attempt{};
++      attempt.identity = *identity;
++      if (auto logical = automatic_logical_gameplay_peers.find(identity->key);
++          logical != automatic_logical_gameplay_peers.end())
++        attempt.logical_gameplay_peer = logical->second;
++      attempt.attached_at = std::chrono::steady_clock::now();
++      state.attempts.insert_or_assign(identity->key, std::move(attempt));
++    }
++    REXSYS_INFO("NAT traversal: installed server-issued attempt={} participant={}",
++                identity->key, identity->participant);
++    start_gameplay_pump = AnyGameplayAttemptPendingLocked(std::chrono::steady_clock::now());
++  }
++  if (start_gameplay_pump) EnsureGameplayPump();
++  return true;
++}
++
++void NatProbeSetLogicalGameplayPeer(std::string_view attempt_id, LanAddress logical) {
++  if (!logical.ipv4 || !logical.port) return;
++  std::lock_guard lock(state_mutex);
++  const std::string key(attempt_id);
++  automatic_logical_gameplay_peers.insert_or_assign(key, logical);
++  for (auto& [socket, state] : states) {
++    auto attempt = state.attempts.find(key);
++    if (attempt != state.attempts.end()) attempt->second.logical_gameplay_peer = logical;
++  }
++}
++
++void NatProbeRetireIdentity(std::string_view attempt_id) {
++  std::lock_guard lock(state_mutex);
++  automatic_identities.erase(std::string(attempt_id));
++  automatic_logical_gameplay_peers.erase(std::string(attempt_id));
++  for (auto& [socket, state] : states) state.attempts.erase(std::string(attempt_id));
++  gameplay_pump_cv.notify_all();
++}
++
++void NatProbeRetireParticipant(uint8_t participant) {
++  std::lock_guard lock(state_mutex);
++  std::vector<std::string> retired;
++  for (const auto& [key, identity] : automatic_identities)
++    if (identity.participant == participant) retired.push_back(key);
++  for (const auto& key : retired) automatic_identities.erase(key);
++  for (const auto& key : retired) automatic_logical_gameplay_peers.erase(key);
++  for (auto& [socket, state] : states)
++      for (const auto& key : retired) state.attempts.erase(key);
++  gameplay_pump_cv.notify_all();
++}
++
++bool NatProbeIsClient() {
++  std::lock_guard lock(state_mutex);
++  if (!automatic_identities.empty()) return automatic_identities.begin()->second.participant == 1;
++  return REXCVAR_GET(nat_probe_participant) == 1;
++}
++
++bool NatProbeIsGameplayPort(uint16_t port) {
++  const uint32_t configured = REXCVAR_GET(lan_gameplay_port);
++  return port == (configured ? configured : 30742);
++}
++
++void NatProbeAttach(uint64_t socket, NatProbeRole role, LanAddress local,
++                    XSocket* socket_object) {
++  bool start_gameplay_pump = false;
++  {
++    std::lock_guard lock(state_mutex);
++    State state{};
++    state.role = role;
++    state.local = local;
++    state.socket_object = socket_object;
++    auto add = [&](const Identity& identity) {
++      AttemptState attempt{};
++      attempt.identity = identity;
++      if (auto logical = automatic_logical_gameplay_peers.find(identity.key);
++          logical != automatic_logical_gameplay_peers.end())
++        attempt.logical_gameplay_peer = logical->second;
++      attempt.attached_at = std::chrono::steady_clock::now();
++      state.attempts.emplace(identity.key, std::move(attempt));
++    };
++    if (auto manual = ManualIdentity()) add(*manual);
++    for (const auto& [key, identity] : automatic_identities) add(identity);
++    start_gameplay_pump = role == NatProbeRole::kGameplay &&
++                          GameplayAttemptPendingLocked(state, std::chrono::steady_clock::now());
++    states.insert_or_assign(socket, state);
++    REXSYS_INFO("NAT traversal: attached {} socket={} local={:08X}:{} attempts={}",
++                role == NatProbeRole::kDiscovery ? "discovery" : "gameplay", socket, local.ipv4,
++                local.port, state.attempts.size());
++    for (const auto& [key, attempt] : state.attempts) {
++      REXSYS_INFO("NAT traversal: socket={} role={} associated attempt={} participant={}", socket,
++                  uint8_t(role), key, attempt.identity.participant);
++    }
++  }
++  if (start_gameplay_pump) EnsureGameplayPump();
++}
++
++void NatProbeDetach(uint64_t socket) {
++  std::unique_lock lock(state_mutex);
++  state_cv.wait(lock, [&] {
++    auto found = states.find(socket);
++    return found == states.end() || found->second.active_receive_pumps == 0;
++  });
++  states.erase(socket);
++  gameplay_pump_cv.notify_all();
++}
++
++namespace {
++void NatProbeTickLocked(uint64_t socket, State& state,
++                        std::chrono::steady_clock::time_point now) {
++  constexpr std::array checkpoints{std::chrono::seconds(5), std::chrono::seconds(15),
++                                   std::chrono::seconds(30)};
++  for (auto& [key, attempt] : state.attempts) {
++  if (attempt.terminal) continue;
++  if (attempt.identity.automatic &&
++      now - attempt.attached_at >= std::chrono::seconds(20)) {
++    attempt.terminal = true;
++    REXSYS_WARN("NAT traversal: automatic attempt expired locally role={}", uint8_t(state.role));
++    continue;
++  }
++  for (size_t i = 0; i < checkpoints.size(); ++i) {
++    const uint8_t bit = uint8_t(1u << i);
++    if (attempt.observed.port && !(attempt.stability_checkpoints & bit) &&
++        now - attempt.attached_at >= checkpoints[i]) {
++      attempt.stability_checkpoints |= bit;
++      REXSYS_INFO("NAT traversal: role={} mapping stable at {}s public={:08X}:{}",
++                  uint8_t(state.role), checkpoints[i].count(), attempt.observed.ipv4,
++                  attempt.observed.port);
++    }
++  }
++  // A host may already have its gameplay socket registered when the joining
++  // client's gameplay socket appears. Poll quickly until the rendezvous server
++  // supplies that peer so the title's bounded membership exchange is not spent
++  // waiting for the normal mapping keepalive interval.
++  const auto registration_interval = std::chrono::milliseconds(
++      NatProbeRegistrationIntervalMs(attempt.endpoint.peer().port != 0));
++  if (now - attempt.last_registration >= registration_interval) {
++    Packet packet{};
++    FillIdentity(packet, attempt.identity);
++    packet.type = kRegister;
++    packet.role = uint8_t(state.role);
++    Send(socket, packet, attempt.identity.server);
++    attempt.last_registration = now;
++    ++attempt.registrations_sent;
++    REXSYS_INFO(
++        "NAT traversal: registration sent socket={} role={} attempt={} participant={} count={}",
++        socket, uint8_t(state.role), attempt.identity.key, attempt.identity.participant,
++        attempt.registrations_sent);
++  }
++  const auto peer = attempt.endpoint.peer();
++  if (peer.port && !attempt.endpoint.acknowledged() &&
++      now - attempt.last_punch >= std::chrono::milliseconds(100)) {
++    Packet packet{};
++    FillIdentity(packet, attempt.identity);
++    packet.type = kPunch;
++    packet.role = uint8_t(state.role);
++    std::memset(packet.credential, 0, sizeof(packet.credential));
++    Send(socket, packet, peer);
++    attempt.last_punch = now;
++    REXSYS_INFO("NAT traversal: {} punch sent socket={} peer={:08X}:{}",
++                state.role == NatProbeRole::kDiscovery ? "discovery" : "gameplay", socket,
++                peer.ipv4, peer.port);
++  }
++  }
++}
++}  // namespace
++
++void NatProbeTick(uint64_t socket) {
++  std::lock_guard lock(state_mutex);
++  auto found = states.find(socket);
++  if (found == states.end()) return;
++  NatProbeTickLocked(socket, found->second, std::chrono::steady_clock::now());
++}
++
++bool NatProbeIsControlPacket(uint64_t socket, const uint8_t* data, size_t size,
++                             uint32_t source_ipv4, uint16_t source_port) {
++  if (size != sizeof(Packet)) return false;
++  Packet packet{};
++  std::memcpy(&packet, data, sizeof(packet));
++  if (!PacketPrefixValid(packet)) return false;
++
++  std::lock_guard lock(state_mutex);
++  auto found = states.find(socket);
++  if (found == states.end() || packet.role != uint8_t(found->second.role)) return false;
++  auto attempt = std::find_if(found->second.attempts.begin(), found->second.attempts.end(),
++                              [&](const auto& value) {
++                                return std::memcmp(packet.attempt,
++                                                   value.second.identity.attempt.data(), 16) == 0;
++                              });
++  if (attempt == found->second.attempts.end()) return false;
++  const auto& attempt_state = attempt->second;
++  if (packet.type == kRegistered)
++    return packet.participant == attempt_state.identity.participant &&
++           std::memcmp(packet.credential, attempt_state.identity.capability.data(), 16) == 0;
++  if (packet.participant == attempt_state.identity.participant) return false;
++  const LanAddress source{source_ipv4, source_port};
++  if (packet.type == kPunch)
++    return !attempt_state.endpoint.peer().port || attempt_state.endpoint.peer() == source;
++  if (packet.type == kAck) return attempt_state.endpoint.peer() == source;
++  return false;
++}
++
++bool NatProbeConsume(uint64_t socket, const uint8_t* data, size_t size, uint32_t source_ipv4,
++                     uint16_t source_port) {
++  if (size != sizeof(Packet))
++    return false;
++  Packet packet{};
++  std::memcpy(&packet, data, sizeof(packet));
++  if (!PacketPrefixValid(packet))
++    return false;
++  std::lock_guard lock(state_mutex);
++  auto found = states.find(socket);
++  if (found == states.end()) {
++    REXSYS_WARN("NAT traversal: packet rejected socket={} reason=detached", socket);
++    return false;
++  }
++  if (packet.role != uint8_t(found->second.role)) {
++    REXSYS_WARN("NAT traversal: packet rejected socket={} reason=socket_role packet_role={} "
++                "socket_role={}", socket, packet.role, uint8_t(found->second.role));
++    return false;
++  }
++  auto& state = found->second;
++  auto attempt = std::find_if(state.attempts.begin(), state.attempts.end(), [&](const auto& value) {
++    return std::memcmp(packet.attempt, value.second.identity.attempt.data(), 16) == 0;
++  });
++  if (attempt == state.attempts.end()) {
++    REXSYS_WARN("NAT traversal: packet rejected socket={} role={} reason=unknown_attempt",
++                socket, uint8_t(state.role));
++    return false;
++  }
++  auto& attempt_state = attempt->second;
++  if (packet.type == kRegistered) {
++    if (packet.participant != attempt_state.identity.participant ||
++        std::memcmp(packet.credential, attempt_state.identity.capability.data(), 16) != 0)
++      {
++        REXSYS_WARN(
++            "NAT traversal: registration response rejected socket={} role={} attempt={} "
++            "reason=identity",
++            socket, uint8_t(state.role), attempt_state.identity.key);
++        return false;
++      }
++    LanAddress observed{packet.observed_ipv4, ntohs(packet.observed_port)};
++    LanAddress peer{packet.peer_ipv4, ntohs(packet.peer_port)};
++    REXSYS_INFO(
++        "NAT traversal: registration response socket={} role={} attempt={} participant={} "
++        "observed={:08X}:{} peer={:08X}:{}",
++        socket, uint8_t(state.role), attempt_state.identity.key,
++        attempt_state.identity.participant, observed.ipv4, observed.port, peer.ipv4, peer.port);
++    if (attempt_state.observed.port && attempt_state.observed != observed)
++      REXSYS_WARN("NAT traversal: mapping changed role={} old={:08X}:{} new={:08X}:{}",
++                  uint8_t(state.role), attempt_state.observed.ipv4, attempt_state.observed.port, observed.ipv4,
++                  observed.port);
++    if (attempt_state.observed != observed) {
++      attempt_state.observed = observed;
++      REXSYS_INFO("NAT traversal: role={} observed public={:08X}:{}", uint8_t(state.role),
++                  observed.ipv4, observed.port);
++    }
++    const auto old_peer = attempt_state.endpoint.peer();
++    if (attempt_state.endpoint.UpdatePeer(peer)) {
++      if (old_peer.port) {
++        REXSYS_INFO(
++            "NAT traversal: role={} peer endpoint changed old={:08X}:{} new={:08X}:{}; "
++            "old acknowledgement invalidated",
++            uint8_t(state.role), old_peer.ipv4, old_peer.port, peer.ipv4, peer.port);
++      } else {
++        REXSYS_INFO("NAT traversal: role={} peer endpoint={:08X}:{}", uint8_t(state.role), peer.ipv4,
++                    peer.port);
++      }
++      attempt_state.last_punch = {};
++    }
++    return true;
++  }
++  if (packet.participant == attempt_state.identity.participant)
++    return false;
++  // Peer punch packets prove possession of the unguessable attempt ID and are
++  // accepted only from the server-observed endpoint for the opposite participant.
++  if (packet.type == kPunch) {
++    const LanAddress source{source_ipv4, source_port};
++    if (!attempt_state.endpoint.peer().port) attempt_state.endpoint.UpdatePeer(source);
++    if (attempt_state.endpoint.peer() != source) return true;
++    Packet response{};
++    FillIdentity(response, attempt_state.identity);
++    std::memset(response.credential, 0, sizeof(response.credential));
++    response.type = kAck;
++    response.role = uint8_t(state.role);
++    Send(socket, response, source);
++    REXSYS_INFO("NAT traversal: role={} punch received and acknowledged from {:08X}:{}",
++                uint8_t(state.role), source_ipv4, source_port);
++    return true;
++  }
++  if (packet.type == kAck &&
++      attempt_state.endpoint.Acknowledge(LanAddress{source_ipv4, source_port})) {
++    REXSYS_INFO("NAT traversal: role={} acknowledgement received from {:08X}:{}",
++                uint8_t(state.role), source_ipv4, source_port);
++    gameplay_pump_cv.notify_all();
++    return true;
++  }
++  return false;
++}
++
++std::optional<LanAddress> NatProbePeer(uint64_t socket, bool require_ack) {
++  auto peers = NatProbePeers(socket, require_ack);
++  return peers.empty() ? std::nullopt : std::optional<LanAddress>(peers.front());
++}
++
++std::vector<LanAddress> NatProbePeers(uint64_t socket, bool require_ack) {
++  auto attempts = NatProbePeerAttempts(socket, require_ack);
++  std::vector<LanAddress> result;
++  for (const auto& attempt : attempts)
++    if (std::find(result.begin(), result.end(), attempt.peer) == result.end())
++      result.push_back(attempt.peer);
++  return result;
++}
++
++std::vector<NatProbePeerAttempt> NatProbePeerAttempts(uint64_t socket, bool require_ack) {
++  std::lock_guard lock(state_mutex);
++  std::vector<NatProbePeerAttempt> result;
++  auto found = states.find(socket);
++  if (found == states.end()) return result;
++  for (const auto& [key, attempt] : found->second.attempts) {
++    if (attempt.endpoint.peer().port && (!require_ack || attempt.endpoint.acknowledged()))
++      result.push_back({key, attempt.endpoint.peer()});
++  }
++  return result;
++}
++
++std::optional<LanAddress> NatProbeNormalizeGameplaySource(uint64_t socket,
++                                                          LanAddress source) {
++  std::lock_guard lock(state_mutex);
++  auto found = states.find(socket);
++  if (found == states.end() || found->second.role != NatProbeRole::kGameplay)
++    return std::nullopt;
++  for (const auto& [key, attempt] : found->second.attempts) {
++    if (auto logical =
++            attempt.endpoint.NormalizeAcknowledgedPeer(source, attempt.logical_gameplay_peer))
++      return logical;
++  }
++  return std::nullopt;
++}
++
++}  // namespace rex::system::xam
