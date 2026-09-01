@@ -3,6 +3,27 @@
 HarmonyRecomp is a native recompilation project for *Castlevania: Harmony of
 Despair*. This repository and its releases do not include the original game.
 
+## Public online multiplayer
+
+HarmonyRecomp can use its session directory and UDP rendezvous service to
+establish a direct peer-to-peer connection between ordinary home networks. The
+in-game flow remains unchanged: the host creates a team, and the client uses
+Multiplayer Search, selects the host, and joins. Rendezvous coordinates the
+public discovery and gameplay endpoints; Harmony's existing UDP transport
+carries gameplay directly between the players.
+
+The rendezvous service listens on UDP 30740. A correctly configured public
+deployment normally requires neither Tailscale nor manual forwarding of
+Harmony's UDP 30741/30742 ports. There is currently no relay fallback, so highly
+restrictive NAT or firewall configurations can still fail. A public Search may
+occasionally miss while mappings are established; retrying Search is safe.
+
+The public directory operator must provision short-lived, paired rendezvous
+attempt credentials and configure both clients. Test credentials, server
+secrets, and machine-specific addresses are never included in release
+artifacts. Until that operator integration is deployed, traversal remains an
+advanced opt-in configuration rather than part of first-run game-data setup.
+
 ## Bring your own game
 
 You must provide files from your own legally obtained Xbox 360 copy. The

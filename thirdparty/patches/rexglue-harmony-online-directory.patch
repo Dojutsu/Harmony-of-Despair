@@ -1,9 +1,9 @@
 diff --git a/HARMONY_RECOMP_NOTES.md b/HARMONY_RECOMP_NOTES.md
 new file mode 100644
-index 0000000..ef63dc8
+index 0000000..86b51b0
 --- /dev/null
 +++ b/HARMONY_RECOMP_NOTES.md
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,119 @@
 +# HarmonyRecomp Notes for ReXGlue Development
 +
 +Last updated: 2026-08-27
@@ -11,6 +11,13 @@ index 0000000..ef63dc8
 +HarmonyRecomp is a multi-image Xbox 360 static recompilation target consisting
 +of `default.xex` plus six dynamically loaded player DLLs. Keep reusable ReXGlue
 +fixes here separate from Harmony-specific function overrides.
++
++Hosted redistributable builds use `REXGLUE_USE_PREGENERATED=ON` to compile the
++project's committed generated sources without invoking codegen or requiring
++private guest binaries. The generated CMake integration makes the codegen
++target a no-op in that mode and rejects projects that do not provide generated
++entrypoint sources. Local regeneration keeps the default mode and still runs
++normal dependency-aware codegen.
 +
 +## Runtime-verified behavior
 +
@@ -214,6 +221,31 @@ index c8751b7..fa0fec7 100644
  
    // Mouse delta tracking. Fractional because relative motion arrives in
    // fractions of a pixel, and truncating each event drops slow movement.
+diff --git a/include/rex/kernel/xam/apps/xgi_app.h b/include/rex/kernel/xam/apps/xgi_app.h
+index 3a5ff93..545b78b 100644
+--- a/include/rex/kernel/xam/apps/xgi_app.h
++++ b/include/rex/kernel/xam/apps/xgi_app.h
+@@ -10,6 +10,8 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <span>
++
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/xam/app_manager.h>
+ 
+@@ -18,6 +20,11 @@ namespace kernel {
+ namespace xam {
+ namespace apps {
+ 
++// X_USER_STATS_READ_RESULTS begins with a count and a pointer. An empty
++// response has both fields cleared; clear the full caller-owned buffer as well
++// so no uninitialized per-user/per-view records can be observed by the title.
++bool InitializeEmptyStatsReadResults(std::span<uint8_t> results);
++
+ class XgiApp : public system::xam::App {
+  public:
+   explicit XgiApp(system::KernelState* kernel_state);
 diff --git a/include/rex/system/function_dispatcher.h b/include/rex/system/function_dispatcher.h
 index 916f3d6..99fe2da 100644
 --- a/include/rex/system/function_dispatcher.h
@@ -282,10 +314,10 @@ index 9b9cf9e..657352a 100644
    // don't return into freed pages. Drained at the end of ~KernelState.
 diff --git a/include/rex/system/xam/session.h b/include/rex/system/xam/session.h
 new file mode 100644
-index 0000000..2495c11
+index 0000000..7a280b6
 --- /dev/null
 +++ b/include/rex/system/xam/session.h
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,212 @@
 +#pragma once
 +
 +#include <array>
@@ -317,6 +349,56 @@ index 0000000..2495c11
 +  bool operator==(const LanAddress&) const = default;
 +};
 +
++class LateTraversalQueryState {
++ public:
++  LateTraversalQueryState(bool traversal_enabled,
++                          std::optional<LanAddress> initially_queried_peer = std::nullopt)
++      : traversal_enabled_(traversal_enabled), queried_peer_(initially_queried_peer) {}
++
++  std::optional<LanAddress> TakeAcknowledgedPeer(
++      bool search_active, std::optional<LanAddress> acknowledged_peer);
++
++ private:
++  bool traversal_enabled_ = false;
++  bool late_query_sent_ = false;
++  std::optional<LanAddress> queried_peer_;
++};
++
++class SearchTimingBudget {
++ public:
++  static constexpr uint32_t kNatGraceMs = 1250;
++
++  SearchTimingBudget(uint32_t original_window_ms, bool traversal_enabled)
++      : original_window_ms_(original_window_ms),
++        total_window_ms_(original_window_ms + (traversal_enabled ? kNatGraceMs : 0)) {}
++
++  uint32_t original_window_ms() const { return original_window_ms_; }
++  uint32_t total_window_ms() const { return total_window_ms_; }
++  bool IsActive(uint32_t elapsed_ms) const { return elapsed_ms < total_window_ms_; }
++  bool InNatExtension(uint32_t elapsed_ms) const {
++    return elapsed_ms >= original_window_ms_ && IsActive(elapsed_ms);
++  }
++
++ private:
++  uint32_t original_window_ms_ = 0;
++  uint32_t total_window_ms_ = 0;
++};
++
++class RetainedDiscoverySearchState {
++ public:
++  void Retain(uint64_t generation) { generation_ = generation; }
++  std::optional<uint64_t> Retire() {
++    auto generation = generation_;
++    generation_.reset();
++    return generation;
++  }
++  bool IsRetained(uint64_t generation) const { return generation_ == generation; }
++  std::optional<uint64_t> generation() const { return generation_; }
++
++ private:
++  std::optional<uint64_t> generation_;
++};
++
 +struct SessionInfo {
 +  std::array<uint8_t, 8> id{};
 +  LanAddress host_address{};
@@ -342,6 +424,9 @@ index 0000000..2495c11
 +  // safe without forcing callers to copy mutable records.
 +  std::shared_ptr<std::recursive_mutex> mutex = std::make_shared<std::recursive_mutex>();
 +  SessionInfo info{};
++  // Discovery/join control endpoint. SessionInfo::host_address remains the
++  // independent gameplay endpoint exposed to XGI/XNet.
++  LanAddress discovery_address{};
 +  uint64_t nonce = 0;
 +  uint64_t host_xuid = 0;
 +  std::string host_name;
@@ -365,6 +450,7 @@ index 0000000..2495c11
 +  bool Delete(const std::array<uint8_t, 8>& id);
 +  size_t DeleteHostedBy(uint64_t host_xuid);
 +  size_t UpdateHostedPort(uint64_t host_xuid, uint16_t port);
++  size_t UpdateRemoteGameplayEndpoint(uint64_t local_xuid, LanAddress address);
 +  std::shared_ptr<SessionRecord> Find(const std::array<uint8_t, 8>& id) const;
 +  std::vector<std::shared_ptr<SessionRecord>> List() const;
 +  std::vector<std::shared_ptr<SessionRecord>> ListRemote(uint64_t local_xuid) const;
@@ -444,61 +530,6 @@ index 0000000..2495c11
 +
 +}  // namespace xam
 +}  // namespace rex::system
-
-diff --git a/resources/templates/init/rexglue_cmake.inja b/resources/templates/init/rexglue_cmake.inja
-index f39557b..d5bed39 100644
---- a/resources/templates/init/rexglue_cmake.inja
-+++ b/resources/templates/init/rexglue_cmake.inja
-@@ -108,23 +108,32 @@ macro(rexglue_setup_target target_name)
-     rexglue_configure_target({{ cmake_var("target_name") }} {{ cmake_var("ARGN") }})
- endmacro()
- 
--# Codegen runs as part of the build, re-running only when an input in codegen.d
--# changes. Build it alone with 'cmake --build . --target {{ names.snake_case }}_codegen'.
--# Listing the sources as outputs orders any target that compiles them after
--# codegen, including one a project assembles itself rather than taking the
--# library rexglue_setup_target() builds. The stamp comes first: the DEPFILE
--# names it.
--add_custom_command(
--    OUTPUT "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ entrypoint_out_dir }}/codegen.build.stamp"
--           {{ cmake_var("REXGLUE_ENTRYPOINT_GENERATED_SOURCES") }}
--    COMMAND $<TARGET_FILE:rex::rexglue> codegen {{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ names.snake_case }}_manifest.toml
--    DEPFILE "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ entrypoint_out_dir }}/codegen.d"
--    WORKING_DIRECTORY {{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}
--    COMMENT "Generating recompiled code for {{ names.snake_case }}"
--    VERBATIM
--)
--add_custom_target({{ names.snake_case }}_codegen
--    DEPENDS "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ entrypoint_out_dir }}/codegen.build.stamp")
-+option(REXGLUE_USE_PREGENERATED
-+    "Compile committed generated sources without running codegen" OFF)
-+if(REXGLUE_USE_PREGENERATED)
-+    if(NOT REXGLUE_ENTRYPOINT_GENERATED_SOURCES)
-+        message(FATAL_ERROR
-+            "REXGLUE_USE_PREGENERATED requires generated entrypoint sources")
-+    endif()
-+    add_custom_target({{ names.snake_case }}_codegen)
-+else()
-+    # Codegen runs as part of the build, re-running only when an input in
-+    # codegen.d changes. Build it alone with 'cmake --build . --target
-+    # {{ names.snake_case }}_codegen'. Listing the sources as outputs orders any
-+    # target that compiles them after codegen. The stamp comes first: the
-+    # DEPFILE names it.
-+    add_custom_command(
-+        OUTPUT "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ entrypoint_out_dir }}/codegen.build.stamp"
-+               {{ cmake_var("REXGLUE_ENTRYPOINT_GENERATED_SOURCES") }}
-+        COMMAND $<TARGET_FILE:rex::rexglue> codegen {{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ names.snake_case }}_manifest.toml
-+        DEPFILE "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ entrypoint_out_dir }}/codegen.d"
-+        WORKING_DIRECTORY {{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}
-+        COMMENT "Generating recompiled code for {{ names.snake_case }}"
-+        VERBATIM
-+    )
-+    add_custom_target({{ names.snake_case }}_codegen
-+        DEPENDS "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ entrypoint_out_dir }}/codegen.build.stamp")
-+endif()
- 
- # Include DLL module shared library targets if codegen has generated them
- if(EXISTS "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ entrypoint_out_dir }}/dll_targets.cmake")
 diff --git a/include/rex/system/xam/session_directory.h b/include/rex/system/xam/session_directory.h
 new file mode 100644
 index 0000000..c0f9d38
@@ -690,6 +721,60 @@ index 68274d2..e783d6f 100644
  #define REX_CODE_BASE {{ code_base }}ull
  #define REX_CODE_SIZE {{ code_size }}ull
  #define REX_THUNK_RESERVE_SIZE {{ thunk_reserve_size }}ull
+diff --git a/resources/templates/init/rexglue_cmake.inja b/resources/templates/init/rexglue_cmake.inja
+index f39557b..d5bed39 100644
+--- a/resources/templates/init/rexglue_cmake.inja
++++ b/resources/templates/init/rexglue_cmake.inja
+@@ -108,23 +108,32 @@ macro(rexglue_setup_target target_name)
+     rexglue_configure_target({{ cmake_var("target_name") }} {{ cmake_var("ARGN") }})
+ endmacro()
+ 
+-# Codegen runs as part of the build, re-running only when an input in codegen.d
+-# changes. Build it alone with 'cmake --build . --target {{ names.snake_case }}_codegen'.
+-# Listing the sources as outputs orders any target that compiles them after
+-# codegen, including one a project assembles itself rather than taking the
+-# library rexglue_setup_target() builds. The stamp comes first: the DEPFILE
+-# names it.
+-add_custom_command(
+-    OUTPUT "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ entrypoint_out_dir }}/codegen.build.stamp"
+-           {{ cmake_var("REXGLUE_ENTRYPOINT_GENERATED_SOURCES") }}
+-    COMMAND $<TARGET_FILE:rex::rexglue> codegen {{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ names.snake_case }}_manifest.toml
+-    DEPFILE "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ entrypoint_out_dir }}/codegen.d"
+-    WORKING_DIRECTORY {{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}
+-    COMMENT "Generating recompiled code for {{ names.snake_case }}"
+-    VERBATIM
+-)
+-add_custom_target({{ names.snake_case }}_codegen
+-    DEPENDS "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ entrypoint_out_dir }}/codegen.build.stamp")
++option(REXGLUE_USE_PREGENERATED
++    "Compile committed generated sources without running codegen" OFF)
++if(REXGLUE_USE_PREGENERATED)
++    if(NOT REXGLUE_ENTRYPOINT_GENERATED_SOURCES)
++        message(FATAL_ERROR
++            "REXGLUE_USE_PREGENERATED requires generated entrypoint sources")
++    endif()
++    add_custom_target({{ names.snake_case }}_codegen)
++else()
++    # Codegen runs as part of the build, re-running only when an input in
++    # codegen.d changes. Build it alone with 'cmake --build . --target
++    # {{ names.snake_case }}_codegen'. Listing the sources as outputs orders any
++    # target that compiles them after codegen. The stamp comes first: the
++    # DEPFILE names it.
++    add_custom_command(
++        OUTPUT "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ entrypoint_out_dir }}/codegen.build.stamp"
++               {{ cmake_var("REXGLUE_ENTRYPOINT_GENERATED_SOURCES") }}
++        COMMAND $<TARGET_FILE:rex::rexglue> codegen {{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ names.snake_case }}_manifest.toml
++        DEPFILE "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ entrypoint_out_dir }}/codegen.d"
++        WORKING_DIRECTORY {{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}
++        COMMENT "Generating recompiled code for {{ names.snake_case }}"
++        VERBATIM
++    )
++    add_custom_target({{ names.snake_case }}_codegen
++        DEPENDS "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ entrypoint_out_dir }}/codegen.build.stamp")
++endif()
+ 
+ # Include DLL module shared library targets if codegen has generated them
+ if(EXISTS "{{ cmake_var("CMAKE_CURRENT_SOURCE_DIR") }}/{{ entrypoint_out_dir }}/dll_targets.cmake")
 diff --git a/resources/templates/test/ppc_config_h.inja b/resources/templates/test/ppc_config_h.inja
 index 0c334f8..3b5ce7b 100644
 --- a/resources/templates/test/ppc_config_h.inja
@@ -1178,19 +1263,34 @@ index 3f9422d..e0dbf41 100644
      mouse_dy_ = 0.0f;
    }
 diff --git a/src/kernel/xam/apps/xgi_app.cpp b/src/kernel/xam/apps/xgi_app.cpp
-index 2b222da..ba31c82 100644
+index 2b222da..03a89ff 100644
 --- a/src/kernel/xam/apps/xgi_app.cpp
 +++ b/src/kernel/xam/apps/xgi_app.cpp
-@@ -11,6 +11,7 @@
+@@ -9,8 +9,11 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
  
++#include <algorithm>
++
  #include <rex/kernel/xam/apps/xgi_app.h>
  #include <rex/logging.h>
 +#include <rex/system/xam/session.h>
  #include <rex/thread.h>
  
  namespace rex {
-@@ -21,6 +22,184 @@ using namespace rex::system::xam;
+@@ -19,8 +22,195 @@ namespace xam {
+ using namespace rex::system;
+ using namespace rex::system::xam;
  namespace apps {
++
++bool InitializeEmptyStatsReadResults(std::span<uint8_t> results) {
++  constexpr size_t kStatsReadResultsHeaderSize = 8;
++  if (results.size() < kStatsReadResultsHeaderSize) {
++    return false;
++  }
++  std::fill(results.begin(), results.end(), uint8_t{0});
++  return true;
++}
  using namespace rex::system;
  
 +namespace {
@@ -1374,7 +1474,7 @@ index 2b222da..ba31c82 100644
  XgiApp::XgiApp(KernelState* kernel_state) : App(kernel_state, 0xFB) {}
  
  // http://mb.mirage.org/bugzilla/xliveless/main.c
-@@ -42,6 +221,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -42,6 +232,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        uint32_t context_value = memory::load_and_swap<uint32_t>(buffer + 20);
        REXKRNL_DEBUG("XGIUserSetContextEx({:08X}, {:08X}, {:08X})", user_index, context_id,
                      context_value);
@@ -1383,7 +1483,7 @@ index 2b222da..ba31c82 100644
        return X_E_SUCCESS;
      }
      case 0x000B0007: {
-@@ -51,6 +232,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -51,6 +243,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        uint32_t value_ptr = memory::load_and_swap<uint32_t>(buffer + 24);
        REXKRNL_DEBUG("XGIUserSetPropertyEx({:08X}, {:08X}, {}, {:08X})", user_index, property_id,
                      value_size, value_ptr);
@@ -1392,7 +1492,7 @@ index 2b222da..ba31c82 100644
        return X_E_SUCCESS;
      }
      case 0x000B0008: {
-@@ -104,15 +287,50 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -104,15 +298,50 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        uint32_t flags = memory::load_and_swap<uint32_t>(buffer + 4);
        uint32_t num_slots_public = memory::load_and_swap<uint32_t>(buffer + 8);
        uint32_t num_slots_private = memory::load_and_swap<uint32_t>(buffer + 12);
@@ -1445,7 +1545,7 @@ index 2b222da..ba31c82 100644
        return X_E_SUCCESS;
      }
      case 0x000B0011: {
-@@ -124,6 +342,14 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -124,6 +353,14 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
  
        REXKRNL_DEBUG("XGISessionDelete({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
  
@@ -1460,7 +1560,7 @@ index 2b222da..ba31c82 100644
        return X_E_SUCCESS;
      }
      case 0x000B0012: {
-@@ -135,9 +361,78 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -135,9 +372,78 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        uint32_t private_slots_array = memory::load_and_swap<uint32_t>(buffer + 16);
        bool is_local = xuid_array_ptr == 0;
  
@@ -1540,7 +1640,7 @@ index 2b222da..ba31c82 100644
        return X_E_SUCCESS;
      }
      case 0x000B0014: {
-@@ -149,7 +444,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -149,7 +455,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
  
        REXKRNL_DEBUG("XSessionStart({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
  
@@ -1553,7 +1653,7 @@ index 2b222da..ba31c82 100644
      }
      case 0x000B0015: {
        // send high scores?
-@@ -161,7 +460,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -161,7 +471,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
  
        REXKRNL_DEBUG("XSessionEnd({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
  
@@ -1566,7 +1666,7 @@ index 2b222da..ba31c82 100644
      }
      case 0x000B0016: {
        assert_true(!buffer_length || buffer_length == 32);
-@@ -179,7 +482,13 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -179,7 +493,13 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XSessionSearch({}, {}, {}, {}, {}, {:08X}, {:08X}, {}, {:08X})", proc_index,
                      user_index, num_results, num_props, num_ctx, props_ptr, ctx_ptr,
                      results_buffer_size, search_results_ptr);
@@ -1581,7 +1681,7 @@ index 2b222da..ba31c82 100644
      }
      case 0x000B0018: {
        assert_true(!buffer_length || buffer_length == 16);
-@@ -192,7 +501,12 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -192,7 +512,12 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XSessionModify({:08X}, {:08X}, {:08X}, {:08X})", obj_ptr, flags,
                      maxPublicSlots, maxPrivateSlots);
  
@@ -1595,7 +1695,7 @@ index 2b222da..ba31c82 100644
      }
      case 0x000B001C: {
        assert_true(!buffer_length || buffer_length == 36);
-@@ -213,8 +527,33 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -213,8 +538,33 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XSessionSearchEx({}, {}, {}, {}, {}, {:08X}, {:08X}, {}, {:08X}, {})",
                      proc_index, user_index, num_results, num_props, num_ctx, props_ptr, ctx_ptr,
                      results_buffer_size, search_results_ptr, num_users);
@@ -1630,7 +1730,7 @@ index 2b222da..ba31c82 100644
      }
      case 0x000B001D: {
        assert_true(!buffer_length || buffer_length == 24);
-@@ -229,6 +568,44 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -229,6 +579,44 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XSessionGetDetails({:08X}, {}, {:08X}, {}, {}, {})", obj_ptr,
                      details_buffer_size, session_details_ptr, reserved1, reserved2, reserved3);
  
@@ -1675,7 +1775,7 @@ index 2b222da..ba31c82 100644
        return X_E_SUCCESS;
      }
      case 0x000B001E: {
-@@ -289,7 +666,15 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -289,7 +677,15 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                      user_index, num_session_ids, session_ids_ptr, results_buffer_size,
                      search_results_ptr, reserved1, reserved2, reserved3);
  
@@ -1692,6 +1792,17 @@ index 2b222da..ba31c82 100644
      }
      case 0x000B001F: {
        assert_true(!buffer_length || buffer_length == 24);
+@@ -330,6 +726,10 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       REXKRNL_DEBUG("XUserReadStats({}, {}, {:08X}, {}, {:08X}, {}, {:08X})", title_id, xuids_count,
+                     xuids_ptr, specs_count, specs_ptr, results_size, results_ptr);
+ 
++      if (!results_ptr || !InitializeEmptyStatsReadResults(std::span<uint8_t>(
++                              memory_->TranslateVirtual(results_ptr), results_size))) {
++        return X_E_INVALIDARG;
++      }
+       return X_E_SUCCESS;
+     }
+     case 0x000B0025: {
 diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
 index 58e36a4..11eec79 100644
 --- a/src/kernel/xam/xam_net.cpp
@@ -2640,19 +2751,20 @@ index 179b2df..d79cc0a 100644
    templateData["code_size"] = "100000";
  
 diff --git a/src/system/CMakeLists.txt b/src/system/CMakeLists.txt
-index fc46d86..a046f8d 100644
+index fc46d86..1ed8a3d 100644
 --- a/src/system/CMakeLists.txt
 +++ b/src/system/CMakeLists.txt
-@@ -31,6 +31,8 @@ set(REXSYSTEM_SOURCES
+@@ -31,6 +31,9 @@ set(REXSYSTEM_SOURCES
      # XAM services
      xam/app_manager.cpp
      xam/content_manager.cpp
++    xam/nat_probe.cpp
 +    xam/session.cpp
 +    xam/session_directory.cpp
      xam/user_profile.cpp
  
      ppc_types.cpp
-@@ -106,7 +108,7 @@ if(REXGLUE_ENABLE_PERF_COUNTERS)
+@@ -106,7 +109,7 @@ if(REXGLUE_ENABLE_PERF_COUNTERS)
  endif()
  
  if(WIN32)
@@ -2965,10 +3077,10 @@ index c10694c..ceffd4f 100644
      Shutdown();
 diff --git a/src/system/xam/session.cpp b/src/system/xam/session.cpp
 new file mode 100644
-index 0000000..f1b0ee7
+index 0000000..01ad303
 --- /dev/null
 +++ b/src/system/xam/session.cpp
-@@ -0,0 +1,861 @@
+@@ -0,0 +1,1081 @@
 +#include <rex/system/xam/session.h>
 +
 +#include <algorithm>
@@ -2981,6 +3093,7 @@ index 0000000..f1b0ee7
 +#include <rex/logging.h>
 +#include <rex/cvar.h>
 +#include <rex/system/kernel_state.h>
++#include <rex/system/xam/nat_probe.h>
 +
 +#if REX_PLATFORM_WIN32
 +#define _WINSOCK_DEPRECATED_NO_WARNINGS
@@ -3001,6 +3114,17 @@ index 0000000..f1b0ee7
 +#endif
 +
 +namespace rex::system::xam {
++
++std::optional<LanAddress> LateTraversalQueryState::TakeAcknowledgedPeer(
++    bool search_active, std::optional<LanAddress> acknowledged_peer) {
++  if (!traversal_enabled_ || !search_active || late_query_sent_ || !acknowledged_peer ||
++      queried_peer_ == acknowledged_peer) {
++    return std::nullopt;
++  }
++  late_query_sent_ = true;
++  queried_peer_ = acknowledged_peer;
++  return acknowledged_peer;
++}
 +
 +REXCVAR_DEFINE_STRING(lan_bind_address, "", "Network",
 +                      "Physical IPv4 address used for LAN discovery and gameplay traffic")
@@ -3187,13 +3311,14 @@ index 0000000..f1b0ee7
 +
 +std::optional<SessionRecord> Exchange(const SessionRecord& session, const SessionMember* member,
 +                                      uint8_t type, uint32_t title_id, uint16_t discovery_port,
-+                                      uint32_t timeout_ms) {
++                                      uint32_t timeout_ms, SOCKET retained_socket = kInvalidSocket) {
 +  if (!EnsureSocketRuntime())
 +    return std::nullopt;
-+  SOCKET socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++  const bool owns_socket = retained_socket == kInvalidSocket;
++  SOCKET socket = owns_socket ? ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) : retained_socket;
 +  if (socket == kInvalidSocket)
 +    return std::nullopt;
-+  if (!BindLanSocket(socket, 0)) {
++  if (owns_socket && !BindLanSocket(socket, 0)) {
 +    REXSYS_ERROR("LAN discovery: failed to bind join socket to configured interface");
 +    CloseSocket(socket);
 +    return std::nullopt;
@@ -3210,12 +3335,24 @@ index 0000000..f1b0ee7
 +  }
 +  sockaddr_in target{};
 +  target.sin_family = AF_INET;
-+  target.sin_addr.s_addr = session.info.host_address.ipv4;
-+  target.sin_port = htons(discovery_port);
++  uint32_t target_ipv4 = session.discovery_address.ipv4
++                                   ? session.discovery_address.ipv4
++                                   : session.info.host_address.ipv4;
++  uint16_t target_port = session.discovery_address.port
++                                   ? session.discovery_address.port
++                                   : discovery_port;
++  if (auto peer = NatProbePeer(socket)) {
++    target_ipv4 = peer->ipv4;
++    target_port = peer->port;
++    REXSYS_INFO("NAT traversal: Join using acknowledged discovery endpoint {:08X}:{}", target_ipv4,
++                target_port);
++  }
++  target.sin_addr.s_addr = target_ipv4;
++  target.sin_port = htons(target_port);
 +  int sent = sendto(socket, reinterpret_cast<const char*>(&packet), sizeof(packet), 0,
 +                    reinterpret_cast<sockaddr*>(&target), sizeof(target));
 +  REXSYS_INFO("LAN discovery: {} request bytes={} to {:08X}:{} xuid={:016X}",
-+              type == kJoin ? "join" : "leave", sent, target.sin_addr.s_addr, discovery_port,
++              type == kJoin ? "join" : "leave", sent, target.sin_addr.s_addr, target_port,
 +              member ? member->xuid : 0);
 +  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
 +  std::optional<SessionRecord> result;
@@ -3225,6 +3362,11 @@ index 0000000..f1b0ee7
 +    DiscoveryPacket response{};
 +    int count = recvfrom(socket, reinterpret_cast<char*>(&response), sizeof(response), 0,
 +                         reinterpret_cast<sockaddr*>(&source), &length);
++    if (count > 0 && NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&response), count,
++                                     source.sin_addr.s_addr, ntohs(source.sin_port))) {
++      NatProbeTick(socket);
++      continue;
++    }
 +    if (count == sizeof(response)) {
 +      result = Decode(response, title_id, source.sin_addr.s_addr);
 +      if (result) {
@@ -3232,6 +3374,7 @@ index 0000000..f1b0ee7
 +        // direct-connect search may have intentionally replaced the address
 +        // embedded by a multi-homed host.
 +        result->info.host_address.ipv4 = session.info.host_address.ipv4;
++        result->discovery_address = session.discovery_address;
 +      }
 +      if (result && result->info.id == session.info.id) {
 +        REXSYS_INFO("LAN discovery: {} response from {:08X}:{} members={}",
@@ -3242,10 +3385,11 @@ index 0000000..f1b0ee7
 +    }
 +    std::this_thread::sleep_for(std::chrono::milliseconds(5));
 +  }
-+  CloseSocket(socket);
++  if (owns_socket)
++    CloseSocket(socket);
 +  if (!result)
 +    REXSYS_WARN("LAN discovery: {} request timed out for {:08X}:{}",
-+                type == kJoin ? "join" : "leave", session.info.host_address.ipv4, discovery_port);
++                type == kJoin ? "join" : "leave", target_ipv4, target_port);
 +  return result;
 +}
 +}  // namespace
@@ -3334,6 +3478,19 @@ index 0000000..f1b0ee7
 +    std::lock_guard session_lock(*session->mutex);
 +    if (session->host_xuid == host_xuid && session->state != SessionState::kDeleted) {
 +      session->info.host_address.port = port;
++      ++updated;
++    }
++  }
++  return updated;
++}
++size_t SessionRegistry::UpdateRemoteGameplayEndpoint(uint64_t local_xuid, LanAddress address) {
++  std::lock_guard lock(mutex_);
++  size_t updated = 0;
++  for (auto& [id, session] : sessions_) {
++    std::lock_guard session_lock(*session->mutex);
++    if (session->host_xuid != local_xuid && !local_session_ids_.contains(id) &&
++        session->state != SessionState::kDeleted && session->info.host_address != address) {
++      session->info.host_address = address;
 +      ++updated;
 +    }
 +  }
@@ -3461,6 +3618,12 @@ index 0000000..f1b0ee7
 +      return false;
 +    }
 +    SetNonBlocking(socket);
++    sockaddr_in local_address{};
++    socket_len_t local_length = sizeof(local_address);
++    if (getsockname(socket, reinterpret_cast<sockaddr*>(&local_address), &local_length) == 0) {
++      NatProbeAttach(socket, NatProbeRole::kDiscovery,
++                     {local_address.sin_addr.s_addr, ntohs(local_address.sin_port)});
++    }
 +    running = true;
 +    REXSYS_INFO("LAN discovery: advertising on UDP {} as {:08X}:{}", port,
 +                advertised->info.host_address.ipv4, advertised->info.host_address.port);
@@ -3472,16 +3635,52 @@ index 0000000..f1b0ee7
 +    if (thread.joinable())
 +      thread.join();
 +    CloseSocket(socket);
++    NatProbeDetach(socket);
 +    socket = kInvalidSocket;
 +    advertised.reset();
++    StopClient();
++  }
++  void StopClient() {
++    client_running = false;
++    if (client_thread.joinable())
++      client_thread.join();
++    if (client_socket != kInvalidSocket) {
++      const auto generation = retained_search.Retire();
++      REXSYS_INFO("NAT traversal: retiring retained discovery search generation={} socket={}",
++                  generation.value_or(0), client_socket);
++      NatProbeDetach(client_socket);
++      CloseSocket(client_socket);
++      client_socket = kInvalidSocket;
++    }
++  }
++  void RunClient() {
++    while (client_running) {
++      NatProbeTick(client_socket);
++      if (!client_exchange) {
++        sockaddr_in source{};
++        socket_len_t length = sizeof(source);
++        std::array<uint8_t, sizeof(DiscoveryPacket)> packet{};
++        int count = recvfrom(client_socket, reinterpret_cast<char*>(packet.data()),
++                             int(packet.size()), 0, reinterpret_cast<sockaddr*>(&source), &length);
++        if (count > 0)
++          NatProbeConsume(client_socket, packet.data(), count, source.sin_addr.s_addr,
++                          ntohs(source.sin_port));
++      }
++      std::this_thread::sleep_for(std::chrono::milliseconds(5));
++    }
 +  }
 +  void Run() {
 +    while (running) {
++      NatProbeTick(socket);
 +      sockaddr_in source{};
 +      socket_len_t length = sizeof(source);
 +      DiscoveryPacket query{};
 +      int count = recvfrom(socket, reinterpret_cast<char*>(&query), sizeof(query), 0,
 +                           reinterpret_cast<sockaddr*>(&source), &length);
++      if (count > 0 && NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&query), count,
++                                       source.sin_addr.s_addr, ntohs(source.sin_port))) {
++        continue;
++      }
 +      bool valid = count == sizeof(query) && ntohl(query.magic) == kDiscoveryMagic &&
 +                   ntohs(query.version) == kDiscoveryVersion && ntohl(query.title_id) == title_id &&
 +                   advertised;
@@ -3535,6 +3734,11 @@ index 0000000..f1b0ee7
 +  std::atomic<bool> running = false;
 +  std::thread thread;
 +  std::shared_ptr<SessionRecord> advertised;
++  SOCKET client_socket = kInvalidSocket;
++  std::atomic<bool> client_running = false;
++  std::atomic<bool> client_exchange = false;
++  std::thread client_thread;
++  RetainedDiscoverySearchState retained_search;
 +};
 +
 +LanDiscoveryService::LanDiscoveryService(uint32_t title_id, uint16_t port)
@@ -3557,9 +3761,17 @@ index 0000000..f1b0ee7
 +  return impl_->running;
 +}
 +std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint32_t max_results) {
++  static std::atomic<uint64_t> next_search_attempt{0};
++  const uint64_t search_attempt = ++next_search_attempt;
++  const auto search_started = std::chrono::steady_clock::now();
 +  std::vector<SessionRecord> results;
 +  if (!EnsureSocketRuntime())
 +    return results;
++  // A retained discovery socket belongs to the completed Search that created
++  // it and remains alive only so Join/Leave can reuse its punched mapping. A
++  // replacement Search supersedes that attempt before creating a new socket;
++  // otherwise both probes keep registering under the same participant/role.
++  impl_->StopClient();
 +  SOCKET socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 +  if (socket == kInvalidSocket)
 +    return results;
@@ -3598,9 +3810,16 @@ index 0000000..f1b0ee7
 +    }
 +  }
 +  const bool direct = !selected_address.empty();
-+  if (direct) {
++  const bool traversal = NatProbeEnabled();
++  const SearchTimingBudget timing(timeout_ms, traversal);
++  REXSYS_INFO(
++      "Discovery: search attempt={} started response_window_ms={} nat_grace_ms={} "
++      "nat_enabled={}",
++      search_attempt, timing.original_window_ms(),
++      timing.total_window_ms() - timing.original_window_ms(), traversal);
++  if (direct || traversal) {
 +    if (!BindLanSocket(socket, 0)) {
-+      REXSYS_ERROR("Direct connect: failed to bind search socket to configured interface");
++      REXSYS_ERROR("Discovery: failed to bind search socket to configured interface");
 +      CloseSocket(socket);
 +      return results;
 +    }
@@ -3612,7 +3831,13 @@ index 0000000..f1b0ee7
 +  // 255.255.255.255 datagram from a socket bound to a unicast address, and the
 +  // listener has the same requirement. Advertisements, XNADDR, join exchange,
 +  // and gameplay transport still use the explicit selected address.
-+  SetNonBlocking(socket);
++    SetNonBlocking(socket);
++  sockaddr_in local_address{};
++  socket_len_t local_length = sizeof(local_address);
++  if (getsockname(socket, reinterpret_cast<sockaddr*>(&local_address), &local_length) == 0) {
++    NatProbeAttach(socket, NatProbeRole::kDiscovery,
++                   {local_address.sin_addr.s_addr, ntohs(local_address.sin_port)});
++  }
 +  sockaddr_in target{};
 +  target.sin_family = AF_INET;
 +  if (direct) {
@@ -3625,6 +3850,38 @@ index 0000000..f1b0ee7
 +    target.sin_addr.s_addr = htonl(INADDR_BROADCAST);
 +  }
 +  target.sin_port = htons(selected_discovery_port);
++  bool traversal_target = false;
++  std::optional<LanAddress> initially_queried_traversal_peer;
++  if (traversal) {
++    auto rendezvous_deadline =
++        std::chrono::steady_clock::now() + std::chrono::milliseconds(std::min(timeout_ms, 2000u));
++    while (std::chrono::steady_clock::now() < rendezvous_deadline) {
++      NatProbeTick(socket);
++      sockaddr_in source{};
++      socket_len_t source_length = sizeof(source);
++      std::array<uint8_t, sizeof(DiscoveryPacket)> packet{};
++      int count = recvfrom(socket, reinterpret_cast<char*>(packet.data()), int(packet.size()), 0,
++                           reinterpret_cast<sockaddr*>(&source), &source_length);
++      if (count > 0)
++        NatProbeConsume(socket, packet.data(), count, source.sin_addr.s_addr,
++                        ntohs(source.sin_port));
++      if (auto peer = NatProbePeer(socket)) {
++        target.sin_addr.s_addr = peer->ipv4;
++        target.sin_port = htons(peer->port);
++        traversal_target = true;
++        initially_queried_traversal_peer = peer;
++        REXSYS_INFO("NAT traversal: search attempt={} ready during initial wait peer={:08X}:{}",
++                    search_attempt, peer->ipv4, peer->port);
++        break;
++      }
++      std::this_thread::sleep_for(std::chrono::milliseconds(5));
++    }
++    if (!traversal_target) {
++      REXSYS_INFO("NAT traversal: search attempt={} initial rendezvous wait expired without readiness",
++                  search_attempt);
++    }
++  }
++  LateTraversalQueryState late_traversal_query(traversal, initially_queried_traversal_peer);
 +  DiscoveryPacket query{};
 +  query.magic = htonl(kDiscoveryMagic);
 +  query.version = htons(kDiscoveryVersion);
@@ -3632,17 +3889,22 @@ index 0000000..f1b0ee7
 +  query.title_id = htonl(impl_->title_id);
 +  int query_sent = sendto(socket, reinterpret_cast<const char*>(&query), sizeof(query), 0,
 +                          reinterpret_cast<sockaddr*>(&target), sizeof(target));
-+  if (direct) {
-+    REXSYS_INFO("Direct connect: search query bytes={} to {:08X}:{} title={:08X}", query_sent,
-+                target.sin_addr.s_addr, selected_discovery_port, impl_->title_id);
++  if (direct || traversal_target) {
++    REXSYS_INFO(
++        "Direct connect: search attempt={} initial query bytes={} to {:08X}:{} title={:08X} "
++        "traversal_ready={}",
++        search_attempt, query_sent, target.sin_addr.s_addr, ntohs(target.sin_port),
++        impl_->title_id, traversal_target);
 +  } else {
-+    REXSYS_INFO("LAN discovery: search broadcast bytes={} UDP {} title={:08X}", query_sent,
-+                impl_->port, impl_->title_id);
++    REXSYS_INFO(
++        "LAN discovery: search attempt={} initial broadcast bytes={} UDP {} title={:08X} "
++        "traversal_ready={}",
++        search_attempt, query_sent, impl_->port, impl_->title_id, traversal_target);
 +  }
 +  // Also probe the local listener for deterministic same-host tests/tools.
 +  // Stable XUID/session-ID filtering prevents this from surfacing as a remote
 +  // result in the title.
-+  if (!direct) {
++  if (!direct && !traversal_target) {
 +    target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 +    sendto(socket, reinterpret_cast<const char*>(&query), sizeof(query), 0,
 +           reinterpret_cast<sockaddr*>(&target), sizeof(target));
@@ -3687,17 +3949,56 @@ index 0000000..f1b0ee7
 +      }
 +    }
 +  };
-+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
++  const auto response_window_started = std::chrono::steady_clock::now();
++  const auto original_deadline =
++      response_window_started + std::chrono::milliseconds(timing.original_window_ms());
++  const auto deadline =
++      response_window_started + std::chrono::milliseconds(timing.total_window_ms());
++  REXSYS_INFO(
++      "Discovery: search attempt={} original_deadline_ms={} final_deadline_ms={} "
++      "from_response_window_start",
++      search_attempt, timing.original_window_ms(), timing.total_window_ms());
++  bool extension_logged = false;
 +  while (std::chrono::steady_clock::now() < deadline && results.size() < max_results) {
++    const auto now = std::chrono::steady_clock::now();
++    if (traversal && !extension_logged && now >= original_deadline) {
++      extension_logged = true;
++      REXSYS_INFO(
++          "NAT traversal: search attempt={} original deadline reached; entering bounded {} ms "
++          "extension",
++          search_attempt, SearchTimingBudget::kNatGraceMs);
++    }
++    NatProbeTick(socket);
 +    send_directory_probes();
 +    sockaddr_in source{};
 +    socket_len_t length = sizeof(source);
 +    DiscoveryPacket response{};
 +    int count = recvfrom(socket, reinterpret_cast<char*>(&response), sizeof(response), 0,
 +                         reinterpret_cast<sockaddr*>(&source), &length);
++    bool consumed_probe =
++        count > 0 && NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&response), count,
++                                     source.sin_addr.s_addr, ntohs(source.sin_port));
++    if (auto peer = late_traversal_query.TakeAcknowledgedPeer(now < deadline,
++                                                              NatProbePeer(socket))) {
++      target.sin_addr.s_addr = peer->ipv4;
++      target.sin_port = htons(peer->port);
++      traversal_target = true;
++      int sent = sendto(socket, reinterpret_cast<const char*>(&query), sizeof(query), 0,
++                        reinterpret_cast<sockaddr*>(&target), sizeof(target));
++      REXSYS_INFO(
++          "NAT traversal: search attempt={} late acknowledged peer={:08X}:{}; one-time discovery "
++          "query bytes={}",
++          search_attempt, peer->ipv4, peer->port, sent);
++    }
++    if (consumed_probe) {
++      continue;
++    }
 +    if (count == sizeof(response)) {
 +      auto decoded = Decode(response, impl_->title_id, source.sin_addr.s_addr);
-+      if (decoded && direct) {
++      if (decoded) {
++        decoded->discovery_address = {source.sin_addr.s_addr, ntohs(source.sin_port)};
++      }
++      if (decoded && (direct || traversal_target)) {
 +        // The manually supplied endpoint is authoritative. This preserves the
 +        // complete host-provided session identity while avoiding a private or
 +        // otherwise unreachable address embedded by a multi-homed host.
@@ -3727,23 +4028,54 @@ index 0000000..f1b0ee7
 +                    decoded->host_name, decoded->host_xuid, decoded->info.host_address.ipv4,
 +                    decoded->info.host_address.port);
 +        results.push_back(std::move(*decoded));
++        if (traversal) {
++          REXSYS_INFO(
++              "NAT traversal: search attempt={} added remote session count={} retained discovery "
++              "endpoint={:08X}:{}",
++              search_attempt, results.size(), source.sin_addr.s_addr, ntohs(source.sin_port));
++        }
 +      }
 +    }
 +    std::this_thread::sleep_for(std::chrono::milliseconds(5));
 +  }
-+  CloseSocket(socket);
++  const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
++                              std::chrono::steady_clock::now() - search_started)
++                              .count();
++  REXSYS_INFO("Discovery: search attempt={} completed results={} elapsed_ms={} reason={}",
++              search_attempt, results.size(), elapsed_ms,
++              results.size() >= max_results
++                  ? "max_results"
++                  : (traversal ? "nat_deadline" : "original_deadline"));
++  if (NatProbeEnabled()) {
++    impl_->client_socket = socket;
++    impl_->retained_search.Retain(search_attempt);
++    impl_->client_running = true;
++    REXSYS_INFO("NAT traversal: retained discovery search generation={} socket={} for Join/Leave",
++                search_attempt, socket);
++    impl_->client_thread = std::thread([impl = impl_.get()] { impl->RunClient(); });
++  } else {
++    CloseSocket(socket);
++  }
 +  return results;
 +}
 +std::optional<SessionRecord> LanDiscoveryService::Join(const SessionRecord& session,
 +                                                       const SessionMember& member,
 +                                                       uint32_t timeout_ms) {
-+  return Exchange(session, &member, kJoin, impl_->title_id, impl_->port, timeout_ms);
++  impl_->client_exchange = true;
++  auto result = Exchange(session, &member, kJoin, impl_->title_id, impl_->port, timeout_ms,
++                         impl_->client_socket);
++  impl_->client_exchange = false;
++  return result;
 +}
 +std::optional<SessionRecord> LanDiscoveryService::Leave(const SessionRecord& session, uint64_t xuid,
 +                                                        uint32_t timeout_ms) {
 +  SessionMember member;
 +  member.xuid = xuid;
-+  return Exchange(session, &member, kLeave, impl_->title_id, impl_->port, timeout_ms);
++  impl_->client_exchange = true;
++  auto result = Exchange(session, &member, kLeave, impl_->title_id, impl_->port, timeout_ms,
++                         impl_->client_socket);
++  impl_->client_exchange = false;
++  return result;
 +}
 +uint32_t LanDiscoveryService::DetermineLanIpv4() {
 +  const auto& configured = REXCVAR_GET(lan_bind_address);
@@ -4431,10 +4763,10 @@ index 76cc877..57f7661 100644
        // Attempting a commit-only op on an unreserved page.
        // This may be OK.
 diff --git a/src/system/xsocket.cpp b/src/system/xsocket.cpp
-index 2d13ac8..60c4334 100644
+index 2d13ac8..b50c17b 100644
 --- a/src/system/xsocket.cpp
 +++ b/src/system/xsocket.cpp
-@@ -12,6 +12,7 @@
+@@ -12,9 +12,11 @@
  #include <cstring>
  
  #include <rex/kernel/xam/module.h>
@@ -4442,7 +4774,11 @@ index 2d13ac8..60c4334 100644
  #include <rex/platform.h>
  #include <rex/system/kernel_state.h>
  #include <rex/system/xsocket.h>
-@@ -26,6 +27,7 @@
++#include <rex/system/xam/nat_probe.h>
+ // #include <rex/system/xnet.h>
+ 
+ #include <rex/net/socket.h>
+@@ -26,6 +28,7 @@
  #include <WS2tcpip.h>
  #else
  #include <arpa/inet.h>
@@ -4450,7 +4786,7 @@ index 2d13ac8..60c4334 100644
  #include <netinet/in.h>
  #include <netinet/ip.h>
  #include <sys/socket.h>
-@@ -57,10 +59,14 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
+@@ -57,10 +60,15 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
      return X_STATUS_UNSUCCESSFUL;
    }
  
@@ -4462,10 +4798,11 @@ index 2d13ac8..60c4334 100644
  
  X_STATUS XSocket::Close() {
 +  REXSYS_INFO("XSocket::Close: native={}", native_handle_);
++  xam::NatProbeDetach(native_handle_);
    int ret = rex::net::socket_close(native_handle_);
    if (ret != 0) {
      return X_STATUS_UNSUCCESSFUL;
-@@ -77,6 +83,8 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
+@@ -77,6 +85,8 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
    }
  
    int ret = setsockopt(native_handle_, level, optname, (char*)optval_ptr, optlen);
@@ -4474,7 +4811,7 @@ index 2d13ac8..60c4334 100644
    if (ret < 0) {
      // TODO: WSAGetLastError()
      return X_STATUS_UNSUCCESSFUL;
-@@ -100,8 +108,26 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
+@@ -100,8 +110,26 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
    return X_STATUS_SUCCESS;
  }
  
@@ -4501,7 +4838,7 @@ index 2d13ac8..60c4334 100644
    if (ret < 0) {
      return X_STATUS_UNSUCCESSFUL;
    }
-@@ -116,7 +142,25 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
+@@ -116,7 +144,30 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
    }
  
    bound_ = true;
@@ -4515,6 +4852,11 @@ index 2d13ac8..60c4334 100644
 +    bound_port_ = actual_address.sin_port;
 +    REXSYS_INFO("XSocket::Bind: native={} local={:08X}:{}", native_handle_,
 +                ntohl(actual_address.sin_addr.s_addr), ntohs(actual_address.sin_port));
++    if (type_ == Type::X_SOCK_DGRAM &&
++        xam::NatProbeIsGameplayPort(ntohs(actual_address.sin_port))) {
++      xam::NatProbeAttach(native_handle_, xam::NatProbeRole::kGameplay,
++                          {actual_address.sin_addr.s_addr, ntohs(actual_address.sin_port)});
++    }
 +  } else {
 +    bound_port_ = name->sin_port;
 +    REXSYS_ERROR("XSocket::Bind: getsockname failed native={} error={}", native_handle_,
@@ -4528,11 +4870,21 @@ index 2d13ac8..60c4334 100644
  
    return X_STATUS_SUCCESS;
  }
-@@ -190,20 +234,62 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
+@@ -186,24 +237,72 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
+   }
+   */
+ 
++retry_native_receive:
++  xam::NatProbeTick(native_handle_);
+   sockaddr_in nfrom;
    socklen_t nfromlen = sizeof(sockaddr_in);
    int ret = recvfrom(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
                       (sockaddr*)&nfrom, &nfromlen);
 -  if (from) {
++  if (ret > 0 && xam::NatProbeConsume(native_handle_, buf, ret, nfrom.sin_addr.s_addr,
++                                      ntohs(nfrom.sin_port))) {
++    goto retry_native_receive;
++  }
 +  if (ret >= 0 && from) {
      from->sin_family = nfrom.sin_family;
      from->sin_addr = ntohl(nfrom.sin_addr.s_addr);  // BE <- BE
@@ -4594,8 +4946,11 @@ index 2d13ac8..60c4334 100644
  int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
    return send(native_handle_, reinterpret_cast<const char*>(buf), buf_len, flags);
  }
-@@ -223,9 +309,14 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
+@@ -221,11 +320,30 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
+   }
+   */
  
++  xam::NatProbeTick(native_handle_);
    sockaddr_in nto;
    if (to) {
 -    nto.sin_addr.s_addr = to->sin_addr;
@@ -4608,14 +4963,35 @@ index 2d13ac8..60c4334 100644
 +        native_port_ != 0 && uint16_t(to->sin_port) == guest_port_ ? native_port_
 +                                                                   : uint16_t(to->sin_port);
 +    nto.sin_port = htons(destination_port);
++    if (auto peer = xam::NatProbePeer(native_handle_)) {
++      nto.sin_addr.s_addr = peer->ipv4;
++      nto.sin_port = htons(peer->port);
++      if (xam::NatProbeIsClient()) {
++        auto* profile = kernel_state()->user_profile();
++        auto* sessions = kernel_state()->session_manager();
++        if (profile && sessions &&
++            sessions->registry().UpdateRemoteGameplayEndpoint(profile->xuid(), *peer)) {
++          REXSYS_INFO("NAT traversal: mapped gameplay endpoint placed in SessionInfo {:08X}:{}",
++                      peer->ipv4, peer->port);
++        }
++      }
++    }
    }
  
    return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
 diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
-index 7bd264b..da55f46 100644
+index 7bd264b..e96e2d5 100644
 --- a/tests/unit/CMakeLists.txt
 +++ b/tests/unit/CMakeLists.txt
-@@ -15,10 +15,13 @@ add_executable(unit_tests
+@@ -4,6 +4,7 @@ add_executable(unit_tests
+     test_memory.cpp
+     memory/heap_allocation_test.cpp
+     kernel/object_table_test.cpp
++    kernel/xgi_app_test.cpp
+     core/cvar_test.cpp
+     core/fiber_test.cpp
+     core/filesystem_test.cpp
+@@ -15,10 +16,13 @@ add_executable(unit_tests
      system/guest_path_test.cpp
      system/achievement_manager_test.cpp
      system/function_dispatcher_test.cpp
@@ -4629,7 +5005,7 @@ index 7bd264b..da55f46 100644
  )
  
  target_sources(unit_tests PRIVATE
-@@ -35,6 +38,7 @@ target_include_directories(unit_tests PRIVATE
+@@ -35,6 +39,7 @@ target_include_directories(unit_tests PRIVATE
  target_link_libraries(unit_tests PRIVATE
      rexcodegen
      rexruntime
@@ -4852,10 +5228,10 @@ index 88617f2..c82fead 100644
    REQUIRE(dispatcher.SetFunction(kAddr, &ScribbleFn));
 diff --git a/tests/unit/system/session_test.cpp b/tests/unit/system/session_test.cpp
 new file mode 100644
-index 0000000..2c8cf0b
+index 0000000..9dbd204
 --- /dev/null
 +++ b/tests/unit/system/session_test.cpp
-@@ -0,0 +1,290 @@
+@@ -0,0 +1,468 @@
 +#include <catch2/catch_test_macros.hpp>
 +
 +#include <rex/platform.h>
@@ -4867,10 +5243,164 @@ index 0000000..2c8cf0b
 +#endif
 +
 +#include <rex/system/xam/session.h>
++#include <rex/system/xam/nat_probe.h>
 +#include <rex/system/xam/user_profile.h>
 +#include <rex/cvar.h>
 +
 +namespace rex::system::xam {
++
++TEST_CASE("NAT acknowledgement follows the peer endpoint", "[session][network][nat]") {
++  const LanAddress discovery_a{htonl(0xCB007101u), 8006};
++  const LanAddress discovery_b{htonl(0xCB007101u), 8019};
++  const LanAddress discovery_c{htonl(0xCB007101u), 8021};
++  const LanAddress gameplay{htonl(0xCB007101u), 30742};
++  NatProbeEndpointState discovery;
++  NatProbeEndpointState gameplay_state;
++
++  CHECK(discovery.UpdatePeer(discovery_a));
++  CHECK(discovery.Acknowledge(discovery_a));
++  CHECK(discovery.acknowledged());
++  CHECK_FALSE(discovery.UpdatePeer(discovery_a));
++  CHECK(discovery.acknowledged());
++
++  CHECK(gameplay_state.UpdatePeer(gameplay));
++  CHECK(gameplay_state.Acknowledge(gameplay));
++  CHECK(discovery.UpdatePeer(discovery_b));
++  CHECK_FALSE(discovery.acknowledged());
++  CHECK(discovery.peer() == discovery_b);
++  CHECK(gameplay_state.acknowledged());
++
++  CHECK_FALSE(discovery.Acknowledge(discovery_a));
++  CHECK_FALSE(discovery.acknowledged());
++  CHECK(discovery.Acknowledge(discovery_b));
++  CHECK(discovery.acknowledged());
++  CHECK(discovery.UpdatePeer(discovery_c));
++  CHECK_FALSE(discovery.acknowledged());
++  CHECK_FALSE(discovery.UpdatePeer({}));
++  CHECK(discovery.peer() == discovery_c);
++  CHECK_FALSE(discovery.UpdatePeer(discovery_c));
++
++  const LanAddress gameplay_new{htonl(0xCB007101u), 49153};
++  CHECK(gameplay_state.UpdatePeer(gameplay_new));
++  CHECK_FALSE(gameplay_state.acknowledged());
++  CHECK(discovery.peer() == discovery_c);
++}
++
++TEST_CASE("repeated NAT search uses acknowledgement for the newest mapping",
++          "[session][network][nat]") {
++  constexpr uint32_t original_window_ms = 250;
++  const LanAddress client_a{htonl(0xCB007171u), 8006};
++  const LanAddress client_b{htonl(0xCB007171u), 8019};
++  const LanAddress host{htonl(0xC6336401u), 30741};
++  NatProbeEndpointState host_discovery;
++
++  REQUIRE(host_discovery.UpdatePeer(client_a));
++  REQUIRE(host_discovery.Acknowledge(client_a));
++  REQUIRE(host_discovery.acknowledged());
++
++  REQUIRE(host_discovery.UpdatePeer(client_b));
++  CHECK_FALSE(host_discovery.acknowledged());
++  CHECK_FALSE(host_discovery.Acknowledge(client_a));
++  REQUIRE(host_discovery.Acknowledge(client_b));
++  REQUIRE(host_discovery.acknowledged());
++
++  SearchTimingBudget search_two(original_window_ms, true);
++  LateTraversalQueryState late_query(true);
++  REQUIRE(search_two.InNatExtension(962));
++  CHECK(late_query.TakeAcknowledgedPeer(search_two.IsActive(962), host) == host);
++  CHECK_FALSE(late_query.TakeAcknowledgedPeer(search_two.IsActive(963), host));
++}
++
++TEST_CASE("a replacement search retires only the previous discovery generation",
++          "[session][network][nat]") {
++  RetainedDiscoverySearchState discovery;
++  RetainedDiscoverySearchState gameplay;
++
++  discovery.Retain(2);
++  gameplay.Retain(100);
++  REQUIRE(discovery.IsRetained(2));
++
++  CHECK(discovery.Retire() == 2);
++  CHECK_FALSE(discovery.generation());
++  CHECK(gameplay.IsRetained(100));
++
++  discovery.Retain(3);
++  CHECK(discovery.IsRetained(3));
++  CHECK_FALSE(discovery.IsRetained(2));
++  CHECK_FALSE(discovery.Retire() == 2);
++  CHECK_FALSE(discovery.generation());
++  CHECK(gameplay.IsRetained(100));
++}
++
++TEST_CASE("late traversal acknowledgement triggers one bounded discovery query",
++          "[session][network][nat]") {
++  const LanAddress peer{htonl(0xCB007171u), 49152};
++  LateTraversalQueryState state(true);
++
++  CHECK_FALSE(state.TakeAcknowledgedPeer(true, std::nullopt));
++  CHECK(state.TakeAcknowledgedPeer(true, peer) == peer);
++  CHECK_FALSE(state.TakeAcknowledgedPeer(true, peer));
++}
++
++TEST_CASE("late traversal query is suppressed outside the active search window",
++          "[session][network][nat]") {
++  const LanAddress peer{htonl(0xCB007171u), 49152};
++  LateTraversalQueryState expired(true);
++  LateTraversalQueryState lan(false);
++  LateTraversalQueryState initially_ready(true, peer);
++
++  CHECK_FALSE(expired.TakeAcknowledgedPeer(false, peer));
++  CHECK_FALSE(lan.TakeAcknowledgedPeer(true, peer));
++  CHECK_FALSE(initially_ready.TakeAcknowledgedPeer(true, peer));
++}
++
++TEST_CASE("NAT search timing adds a bounded traversal-only grace window",
++          "[session][network][nat]") {
++  constexpr uint32_t original_window_ms = 250;
++  SearchTimingBudget lan(original_window_ms, false);
++  SearchTimingBudget nat(original_window_ms, true);
++
++  CHECK(lan.original_window_ms() == original_window_ms);
++  CHECK(lan.total_window_ms() == original_window_ms);
++  CHECK(lan.IsActive(249));
++  CHECK_FALSE(lan.IsActive(250));
++  CHECK_FALSE(lan.InNatExtension(249));
++
++  CHECK(nat.original_window_ms() == original_window_ms);
++  CHECK(nat.total_window_ms() == original_window_ms + SearchTimingBudget::kNatGraceMs);
++  CHECK(nat.IsActive(249));
++  CHECK(nat.InNatExtension(250));
++  CHECK(nat.InNatExtension(nat.total_window_ms() - 1));
++  CHECK_FALSE(nat.IsActive(nat.total_window_ms()));
++  CHECK_FALSE(nat.InNatExtension(nat.total_window_ms()));
++}
++
++TEST_CASE("late acknowledgement query obeys the NAT extended deadline",
++          "[session][network][nat]") {
++  constexpr uint32_t original_window_ms = 250;
++  const LanAddress peer{htonl(0xCB007171u), 49152};
++  SearchTimingBudget nat(original_window_ms, true);
++
++  SECTION("acknowledgement before original deadline behaves normally") {
++    LateTraversalQueryState query(true);
++    CHECK(query.TakeAcknowledgedPeer(nat.IsActive(200), peer) == peer);
++    CHECK_FALSE(query.TakeAcknowledgedPeer(nat.IsActive(201), peer));
++  }
++
++  SECTION("acknowledgement inside extension triggers exactly once") {
++    LateTraversalQueryState query(true);
++    CHECK(nat.InNatExtension(962));
++    CHECK(query.TakeAcknowledgedPeer(nat.IsActive(962), peer) == peer);
++    CHECK_FALSE(query.TakeAcknowledgedPeer(nat.IsActive(963), peer));
++  }
++
++  SECTION("invalid or post-deadline acknowledgement does not trigger") {
++    LateTraversalQueryState invalid(true);
++    LateTraversalQueryState expired(true);
++    CHECK_FALSE(invalid.TakeAcknowledgedPeer(nat.IsActive(962), std::nullopt));
++    CHECK_FALSE(expired.TakeAcknowledgedPeer(nat.IsActive(nat.total_window_ms()), peer));
++  }
++}
 +
 +TEST_CASE("explicit LAN bind address is the network identity source of truth", "[session][network]") {
 +  auto previous = REXCVAR_GET(lan_bind_address);
@@ -4992,6 +5522,25 @@ index 0000000..2c8cf0b
 +  CHECK(hosted->info.host_address.port == 59395);
 +}
 +
++TEST_CASE("public traversal updates only a discovered remote gameplay endpoint",
++          "[session][network]") {
++  SessionRegistry registry;
++  auto local = registry.Create(0x1001, "DesktopHost", {0xD500000A, 30742}, 1, 6, 0);
++  SessionRecord remote_record;
++  remote_record.info.id = {1, 2, 3, 4, 5, 6, 7, 8};
++  remote_record.info.host_address = {0x1301000A, 30742};
++  remote_record.host_xuid = 0x1002;
++  remote_record.max_public_slots = 6;
++  auto remote_id = remote_record.info.id;
++  registry.UpsertDiscovered(std::move(remote_record));
++
++  const LanAddress mapped{0x710000CB, 49152};
++  CHECK(registry.UpdateRemoteGameplayEndpoint(0x1001, mapped) == 1);
++  CHECK(registry.Find(remote_id)->info.host_address == mapped);
++  CHECK(local->info.host_address == LanAddress{0xD500000A, 30742});
++  CHECK(registry.UpdateRemoteGameplayEndpoint(0x1001, mapped) == 0);
++}
++
 +TEST_CASE("abandoned local session ID cannot be rediscovered through another address",
 +          "[session]") {
 +  SessionRegistry registry;
@@ -5082,9 +5631,14 @@ index 0000000..2c8cf0b
 +  CHECK(results[0].info.id == hosted->info.id);
 +  CHECK(results[0].info.host_address.ipv4 == htonl(INADDR_LOOPBACK));
 +  CHECK(results[0].info.host_address.port == 30742);
++  CHECK(results[0].discovery_address.ipv4 == htonl(INADDR_LOOPBACK));
++  CHECK(results[0].discovery_address.port == discovery_port);
 +
 +  SessionMember client_member{0x1002, "ROGAlly", 0, true, false, false};
-+  auto joined = client.Join(results[0], client_member, 500);
++  // Deliberately use a service configured with a different fallback port.
++  // Join must retain the endpoint that actually answered search.
++  LanDiscoveryService joining_client(title_id, discovery_port + 1);
++  auto joined = joining_client.Join(results[0], client_member, 500);
 +  REQUIRE(joined);
 +  CHECK(joined->info.host_address.ipv4 == htonl(INADDR_LOOPBACK));
 +  CHECK(joined->members.size() == 2);
@@ -5393,3 +5947,389 @@ index 0000000..1a48271
 +}
 +
 +}  // namespace rex::system
+diff --git a/include/rex/system/xam/nat_probe.h b/include/rex/system/xam/nat_probe.h
+new file mode 100644
+index 0000000..c4879ee
+--- /dev/null
++++ b/include/rex/system/xam/nat_probe.h
+@@ -0,0 +1,36 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <optional>
++
++#include <rex/system/xam/session.h>
++
++namespace rex::system::xam {
++
++enum class NatProbeRole : uint8_t { kDiscovery = 0, kGameplay = 1 };
++
++class NatProbeEndpointState {
++ public:
++  bool UpdatePeer(LanAddress peer);
++  bool Acknowledge(LanAddress source);
++  bool acknowledged() const;
++  LanAddress peer() const { return peer_; }
++  std::optional<LanAddress> acknowledged_peer() const { return acknowledged_peer_; }
++
++ private:
++  LanAddress peer_{};
++  std::optional<LanAddress> acknowledged_peer_;
++};
++
++bool NatProbeEnabled();
++bool NatProbeIsClient();
++bool NatProbeIsGameplayPort(uint16_t port);
++void NatProbeAttach(uint64_t socket, NatProbeRole role, LanAddress local);
++void NatProbeDetach(uint64_t socket);
++void NatProbeTick(uint64_t socket);
++bool NatProbeConsume(uint64_t socket, const uint8_t* data, size_t size, uint32_t source_ipv4,
++                     uint16_t source_port);
++std::optional<LanAddress> NatProbePeer(uint64_t socket, bool require_ack = true);
++
++}  // namespace rex::system::xam
+diff --git a/src/system/xam/nat_probe.cpp b/src/system/xam/nat_probe.cpp
+new file mode 100644
+index 0000000..5941c68
+--- /dev/null
++++ b/src/system/xam/nat_probe.cpp
+@@ -0,0 +1,304 @@
++#include <rex/system/xam/nat_probe.h>
++
++#include <array>
++#include <chrono>
++#include <cstring>
++#include <mutex>
++#include <string>
++#include <unordered_map>
++
++#include <rex/cvar.h>
++#include <rex/logging.h>
++#include <rex/platform.h>
++
++#if REX_PLATFORM_WIN32
++#include <winsock2.h>
++#include <ws2tcpip.h>
++#else
++#include <arpa/inet.h>
++#include <sys/socket.h>
++#endif
++
++namespace rex::system::xam {
++
++REXCVAR_DEFINE_STRING(nat_probe_server, "", "Network",
++                      "IPv4 UDP NAT traversal rendezvous server")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_UINT32(nat_probe_port, 30740, "Network", "NAT traversal rendezvous UDP port")
++    .range(1, 65535)
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_STRING(nat_probe_attempt, "", "Network", "32-hex-character NAT traversal attempt ID")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_STRING(nat_probe_credential, "", "Network",
++                      "32-hex-character NAT traversal credential")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_UINT32(nat_probe_participant, 0, "Network",
++                      "NAT traversal participant: 0 host, 1 client")
++    .range(0, 1)
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++
++namespace {
++constexpr uint8_t kVersion = 1;
++constexpr uint8_t kRegister = 1;
++constexpr uint8_t kRegistered = 2;
++constexpr uint8_t kPunch = 3;
++constexpr uint8_t kAck = 4;
++
++#pragma pack(push, 1)
++struct Packet {
++  char magic[4];
++  uint8_t version;
++  uint8_t type;
++  uint8_t participant;
++  uint8_t role;
++  uint8_t attempt[16];
++  uint8_t credential[16];
++  uint32_t observed_ipv4;
++  uint16_t observed_port;
++  uint32_t peer_ipv4;
++  uint16_t peer_port;
++  uint32_t reserved;
++};
++#pragma pack(pop)
++static_assert(sizeof(Packet) == 56);
++
++struct State {
++  NatProbeRole role;
++  LanAddress local;
++  LanAddress observed;
++  NatProbeEndpointState endpoint;
++  std::chrono::steady_clock::time_point attached_at{};
++  uint8_t stability_checkpoints = 0;
++  std::chrono::steady_clock::time_point last_registration{};
++  std::chrono::steady_clock::time_point last_punch{};
++};
++
++std::mutex state_mutex;
++std::unordered_map<uint64_t, State> states;
++
++bool ParseHex(std::string_view text, uint8_t* output) {
++  if (text.size() != 32)
++    return false;
++  auto digit = [](char value) -> int {
++    if (value >= '0' && value <= '9') return value - '0';
++    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
++    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
++    return -1;
++  };
++  for (size_t i = 0; i < 16; ++i) {
++    int high = digit(text[i * 2]);
++    int low = digit(text[i * 2 + 1]);
++    if (high < 0 || low < 0)
++      return false;
++    output[i] = uint8_t((high << 4) | low);
++  }
++  return true;
++}
++
++bool FillIdentity(Packet& packet) {
++  std::memcpy(packet.magic, "HNAT", 4);
++  packet.version = kVersion;
++  packet.participant = uint8_t(REXCVAR_GET(nat_probe_participant));
++  return ParseHex(REXCVAR_GET(nat_probe_attempt), packet.attempt) &&
++         ParseHex(REXCVAR_GET(nat_probe_credential), packet.credential);
++}
++
++bool ValidIdentity(const Packet& packet) {
++  Packet expected{};
++  if (!FillIdentity(expected))
++    return false;
++  return std::memcmp(packet.magic, expected.magic, 4) == 0 && packet.version == kVersion &&
++         std::memcmp(packet.attempt, expected.attempt, 16) == 0 &&
++         std::memcmp(packet.credential, expected.credential, 16) == 0;
++}
++
++void Send(uint64_t socket, Packet packet, LanAddress target) {
++  sockaddr_in address{};
++  address.sin_family = AF_INET;
++  address.sin_addr.s_addr = target.ipv4;
++  address.sin_port = htons(target.port);
++#if REX_PLATFORM_WIN32
++  auto native_socket = static_cast<SOCKET>(socket);
++#else
++  auto native_socket = static_cast<int>(socket);
++#endif
++  sendto(native_socket, reinterpret_cast<const char*>(&packet), sizeof(packet), 0,
++         reinterpret_cast<sockaddr*>(&address), sizeof(address));
++}
++
++std::optional<LanAddress> ServerAddress() {
++  in_addr address{};
++  const auto server = REXCVAR_GET(nat_probe_server);
++  if (server.empty() || inet_pton(AF_INET, server.c_str(), &address) != 1)
++    return std::nullopt;
++  return LanAddress{address.s_addr, uint16_t(REXCVAR_GET(nat_probe_port))};
++}
++}  // namespace
++
++bool NatProbeEndpointState::UpdatePeer(LanAddress peer) {
++  if (!peer.ipv4 || !peer.port || peer_ == peer) return false;
++  peer_ = peer;
++  acknowledged_peer_.reset();
++  return true;
++}
++
++bool NatProbeEndpointState::Acknowledge(LanAddress source) {
++  if (source != peer_) return false;
++  acknowledged_peer_ = source;
++  return true;
++}
++
++bool NatProbeEndpointState::acknowledged() const {
++  return acknowledged_peer_.has_value() && *acknowledged_peer_ == peer_;
++}
++
++bool NatProbeEnabled() {
++  Packet packet{};
++  return ServerAddress().has_value() && FillIdentity(packet);
++}
++
++bool NatProbeIsClient() { return REXCVAR_GET(nat_probe_participant) == 1; }
++
++bool NatProbeIsGameplayPort(uint16_t port) {
++  const uint32_t configured = REXCVAR_GET(lan_gameplay_port);
++  return port == (configured ? configured : 30742);
++}
++
++void NatProbeAttach(uint64_t socket, NatProbeRole role, LanAddress local) {
++  if (!NatProbeEnabled())
++    return;
++  std::lock_guard lock(state_mutex);
++  State state{};
++  state.role = role;
++  state.local = local;
++  state.attached_at = std::chrono::steady_clock::now();
++  states.insert_or_assign(socket, state);
++  REXSYS_INFO("NAT traversal: attached {} socket={} local={:08X}:{}",
++              role == NatProbeRole::kDiscovery ? "discovery" : "gameplay", socket, local.ipv4,
++              local.port);
++}
++
++void NatProbeDetach(uint64_t socket) {
++  std::lock_guard lock(state_mutex);
++  states.erase(socket);
++}
++
++void NatProbeTick(uint64_t socket) {
++  auto server = ServerAddress();
++  if (!server)
++    return;
++  std::lock_guard lock(state_mutex);
++  auto found = states.find(socket);
++  if (found == states.end())
++    return;
++  auto& state = found->second;
++  auto now = std::chrono::steady_clock::now();
++  constexpr std::array checkpoints{std::chrono::seconds(5), std::chrono::seconds(15),
++                                   std::chrono::seconds(30)};
++  for (size_t i = 0; i < checkpoints.size(); ++i) {
++    const uint8_t bit = uint8_t(1u << i);
++    if (state.observed.port && !(state.stability_checkpoints & bit) &&
++        now - state.attached_at >= checkpoints[i]) {
++      state.stability_checkpoints |= bit;
++      REXSYS_INFO("NAT traversal: role={} mapping stable at {}s public={:08X}:{}",
++                  uint8_t(state.role), checkpoints[i].count(), state.observed.ipv4,
++                  state.observed.port);
++    }
++  }
++  if (now - state.last_registration >= std::chrono::seconds(1)) {
++    Packet packet{};
++    FillIdentity(packet);
++    packet.type = kRegister;
++    packet.role = uint8_t(state.role);
++    Send(socket, packet, *server);
++    state.last_registration = now;
++  }
++  const auto peer = state.endpoint.peer();
++  if (peer.port && !state.endpoint.acknowledged() &&
++      now - state.last_punch >= std::chrono::milliseconds(100)) {
++    Packet packet{};
++    FillIdentity(packet);
++    packet.type = kPunch;
++    packet.role = uint8_t(state.role);
++    Send(socket, packet, peer);
++    state.last_punch = now;
++    REXSYS_INFO("NAT traversal: {} punch sent socket={} peer={:08X}:{}",
++                state.role == NatProbeRole::kDiscovery ? "discovery" : "gameplay", socket,
++                peer.ipv4, peer.port);
++  }
++}
++
++bool NatProbeConsume(uint64_t socket, const uint8_t* data, size_t size, uint32_t source_ipv4,
++                     uint16_t source_port) {
++  if (size != sizeof(Packet))
++    return false;
++  Packet packet{};
++  std::memcpy(&packet, data, sizeof(packet));
++  if (!ValidIdentity(packet))
++    return false;
++  std::lock_guard lock(state_mutex);
++  auto found = states.find(socket);
++  if (found == states.end() || packet.role != uint8_t(found->second.role))
++    return false;
++  auto& state = found->second;
++  if (packet.type == kRegistered && packet.participant == REXCVAR_GET(nat_probe_participant)) {
++    LanAddress observed{packet.observed_ipv4, ntohs(packet.observed_port)};
++    LanAddress peer{packet.peer_ipv4, ntohs(packet.peer_port)};
++    if (state.observed.port && state.observed != observed)
++      REXSYS_WARN("NAT traversal: mapping changed role={} old={:08X}:{} new={:08X}:{}",
++                  uint8_t(state.role), state.observed.ipv4, state.observed.port, observed.ipv4,
++                  observed.port);
++    if (state.observed != observed) {
++      state.observed = observed;
++      REXSYS_INFO("NAT traversal: role={} observed public={:08X}:{}", uint8_t(state.role),
++                  observed.ipv4, observed.port);
++    }
++    const auto old_peer = state.endpoint.peer();
++    if (state.endpoint.UpdatePeer(peer)) {
++      if (old_peer.port) {
++        REXSYS_INFO(
++            "NAT traversal: role={} peer endpoint changed old={:08X}:{} new={:08X}:{}; "
++            "old acknowledgement invalidated",
++            uint8_t(state.role), old_peer.ipv4, old_peer.port, peer.ipv4, peer.port);
++      } else {
++        REXSYS_INFO("NAT traversal: role={} peer endpoint={:08X}:{}", uint8_t(state.role), peer.ipv4,
++                    peer.port);
++      }
++      state.last_punch = {};
++    }
++    return true;
++  }
++  if (packet.participant == REXCVAR_GET(nat_probe_participant))
++    return false;
++  if (packet.type == kPunch) {
++    const LanAddress source{source_ipv4, source_port};
++    if (!state.endpoint.peer().port) state.endpoint.UpdatePeer(source);
++    if (state.endpoint.peer() != source) return true;
++    Packet response{};
++    FillIdentity(response);
++    response.type = kAck;
++    response.role = uint8_t(state.role);
++    Send(socket, response, source);
++    REXSYS_INFO("NAT traversal: role={} punch received and acknowledged from {:08X}:{}",
++                uint8_t(state.role), source_ipv4, source_port);
++    return true;
++  }
++  if (packet.type == kAck &&
++      state.endpoint.Acknowledge(LanAddress{source_ipv4, source_port})) {
++    REXSYS_INFO("NAT traversal: role={} acknowledgement received from {:08X}:{}",
++                uint8_t(state.role), source_ipv4, source_port);
++    return true;
++  }
++  return false;
++}
++
++std::optional<LanAddress> NatProbePeer(uint64_t socket, bool require_ack) {
++  std::lock_guard lock(state_mutex);
++  auto found = states.find(socket);
++  if (found == states.end() || !found->second.endpoint.peer().port ||
++      (require_ack && !found->second.endpoint.acknowledged()))
++    return std::nullopt;
++  return found->second.endpoint.peer();
++}
++
++}  // namespace rex::system::xam
+diff --git a/tests/unit/kernel/xgi_app_test.cpp b/tests/unit/kernel/xgi_app_test.cpp
+new file mode 100644
+index 0000000..81b3b83
+--- /dev/null
++++ b/tests/unit/kernel/xgi_app_test.cpp
+@@ -0,0 +1,28 @@
++#include <algorithm>
++#include <array>
++
++#include <catch2/catch_test_macros.hpp>
++
++#include <rex/kernel/xam/apps/xgi_app.h>
++
++namespace rex::kernel::xam::apps {
++
++TEST_CASE("XUserReadStats initializes a valid empty result", "[xam][xgi][stats]") {
++  std::array<uint8_t, 76> results;
++  results.fill(0xA5);
++
++  REQUIRE(InitializeEmptyStatsReadResults(results));
++  CHECK(results[0] == 0);
++  CHECK(results[4] == 0);
++  CHECK(std::all_of(results.begin(), results.end(), [](uint8_t value) { return value == 0; }));
++}
++
++TEST_CASE("XUserReadStats rejects an undersized result header", "[xam][xgi][stats]") {
++  std::array<uint8_t, 7> results;
++  results.fill(0xA5);
++
++  CHECK_FALSE(InitializeEmptyStatsReadResults(results));
++  CHECK(std::all_of(results.begin(), results.end(), [](uint8_t value) { return value == 0xA5; }));
++}
++
++}  // namespace rex::kernel::xam::apps

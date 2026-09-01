@@ -11,6 +11,8 @@ import argparse
 import ipaddress
 import json
 import secrets
+import socket
+import struct
 import threading
 import time
 import urllib.parse
@@ -25,6 +27,13 @@ MAX_SERVER_NAME = 48
 MAX_BUILD_ID = 64
 MAX_CANDIDATES = 4
 DEFAULT_TTL_SECONDS = 45
+RENDEZVOUS_MAGIC = b"HNAT"
+RENDEZVOUS_VERSION = 1
+RENDEZVOUS_REGISTER = 1
+RENDEZVOUS_REGISTERED = 2
+RENDEZVOUS_PACKET = struct.Struct("!4sBBBB16s16s4sH4sH4x")
+RENDEZVOUS_MIN_INTERVAL_SECONDS = 0.1
+MAX_RENDEZVOUS_ATTEMPTS = 1024
 
 
 class ValidationError(ValueError):
@@ -270,21 +279,128 @@ class DirectoryServer(ThreadingHTTPServer):
         self.registry = registry
 
 
+@dataclass
+class RendezvousAttempt:
+    credential: bytes
+    last_seen: float
+    endpoints: dict[tuple[int, int], tuple[str, int]]
+    endpoint_seen: dict[tuple[int, int], float]
+
+
+class RendezvousRegistry:
+    """Short-lived, credential-bound NAT traversal endpoint observations."""
+
+    def __init__(self, ttl_seconds: int = DEFAULT_TTL_SECONDS, clock=time.monotonic):
+        self.ttl_seconds = ttl_seconds
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._attempts: dict[bytes, RendezvousAttempt] = {}
+
+    def register(
+        self, attempt_id: bytes, credential: bytes, participant: int, role: int,
+        source: tuple[str, int],
+    ) -> tuple[tuple[str, int], tuple[str, int] | None] | None:
+        if participant not in (0, 1) or role not in (0, 1):
+            return None
+        now = self.clock()
+        key = (participant, role)
+        with self._lock:
+            self._attempts = {
+                value_id: value for value_id, value in self._attempts.items()
+                if now - value.last_seen < self.ttl_seconds
+            }
+            attempt = self._attempts.get(attempt_id)
+            if attempt is None:
+                if len(self._attempts) >= MAX_RENDEZVOUS_ATTEMPTS:
+                    return None
+                attempt = RendezvousAttempt(credential, now, {}, {})
+                self._attempts[attempt_id] = attempt
+            elif not secrets.compare_digest(attempt.credential, credential):
+                return None
+            previous = attempt.endpoint_seen.get(key)
+            if previous is not None and now - previous < RENDEZVOUS_MIN_INTERVAL_SECONDS:
+                return None
+            attempt.last_seen = now
+            attempt.endpoints[key] = source
+            attempt.endpoint_seen[key] = now
+            return source, attempt.endpoints.get((1 - participant, role))
+
+
+class RendezvousServer:
+    def __init__(self, address: tuple[str, int], registry: RendezvousRegistry):
+        self.registry = registry
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(address)
+        self.address = self.socket.getsockname()
+        self._stopping = threading.Event()
+
+    def serve_forever(self) -> None:
+        self.socket.settimeout(0.25)
+        while not self._stopping.is_set():
+            try:
+                packet, source = self.socket.recvfrom(RENDEZVOUS_PACKET.size + 1)
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+            if len(packet) != RENDEZVOUS_PACKET.size:
+                continue
+            (magic, version, message_type, participant, role, attempt_id, credential,
+             _observed_ip, _observed_port, _peer_ip, _peer_port) = RENDEZVOUS_PACKET.unpack(packet)
+            if magic != RENDEZVOUS_MAGIC or version != RENDEZVOUS_VERSION:
+                continue
+            if message_type != RENDEZVOUS_REGISTER:
+                continue
+            result = self.registry.register(attempt_id, credential, participant, role, source)
+            if result is None:
+                continue
+            observed, peer = result
+            peer = peer or ("0.0.0.0", 0)
+            response = RENDEZVOUS_PACKET.pack(
+                RENDEZVOUS_MAGIC, RENDEZVOUS_VERSION, RENDEZVOUS_REGISTERED,
+                participant, role, attempt_id, credential,
+                socket.inet_aton(observed[0]), observed[1],
+                socket.inet_aton(peer[0]), peer[1],
+            )
+            self.socket.sendto(response, source)
+
+    def shutdown(self) -> None:
+        self._stopping.set()
+        self.socket.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="HarmonyRecomp discovery-only session directory")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--ttl", type=int, default=DEFAULT_TTL_SECONDS)
+    parser.add_argument("--rendezvous-host", default="")
+    parser.add_argument("--rendezvous-port", type=int, default=30740)
     args = parser.parse_args()
-    if not 1 <= args.port <= 65535 or not 5 <= args.ttl <= 3600:
+    if (not 1 <= args.port <= 65535 or not 1 <= args.rendezvous_port <= 65535 or
+            not 5 <= args.ttl <= 3600):
         parser.error("port or ttl is out of range")
     server = DirectoryServer((args.host, args.port), SessionRegistry(args.ttl))
+    rendezvous = None
+    rendezvous_thread = None
+    if args.rendezvous_host:
+        rendezvous = RendezvousServer(
+            (args.rendezvous_host, args.rendezvous_port), RendezvousRegistry(args.ttl)
+        )
+        rendezvous_thread = threading.Thread(target=rendezvous.serve_forever, daemon=True)
+        rendezvous_thread.start()
+        print(f"Harmony rendezvous listening on udp://{rendezvous.address[0]}:"
+              f"{rendezvous.address[1]} (ttl={args.ttl}s)")
     print(f"Harmony directory listening on http://{args.host}:{args.port} (ttl={args.ttl}s)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if rendezvous is not None:
+            rendezvous.shutdown()
+        if rendezvous_thread is not None:
+            rendezvous_thread.join()
         server.server_close()
     return 0
 

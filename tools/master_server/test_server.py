@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import socket
 import threading
 import unittest
 
-from tools.master_server.server import DirectoryServer, SessionRegistry, ValidationError, validate_registration
+from tools.master_server.server import (
+    DirectoryServer, RENDEZVOUS_MAGIC, RENDEZVOUS_PACKET, RENDEZVOUS_REGISTER,
+    RENDEZVOUS_REGISTERED, RENDEZVOUS_VERSION, RendezvousRegistry, RendezvousServer,
+    SessionRegistry, ValidationError, validate_registration,
+)
 
 
 def payload(**updates):
@@ -104,6 +110,68 @@ class HttpTests(unittest.TestCase):
             "DELETE", f"/sessions/{created['session_id']}", token=created["registration_token"]
         )
         self.assertEqual(204, status)
+
+
+class RendezvousTests(unittest.TestCase):
+    def setUp(self):
+        self.server = RendezvousServer(("127.0.0.1", 0), RendezvousRegistry())
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.thread.join()
+
+    @staticmethod
+    def packet(attempt_id, credential, participant, role):
+        return RENDEZVOUS_PACKET.pack(
+            RENDEZVOUS_MAGIC, RENDEZVOUS_VERSION, RENDEZVOUS_REGISTER,
+            participant, role, attempt_id, credential,
+            b"\0" * 4, 0, b"\0" * 4, 0,
+        )
+
+    def register(self, client, attempt_id, credential, participant, role):
+        client.sendto(self.packet(attempt_id, credential, participant, role), self.server.address)
+        response, _ = client.recvfrom(RENDEZVOUS_PACKET.size)
+        return RENDEZVOUS_PACKET.unpack(response)
+
+    def test_pairs_only_matching_attempt_credentials_and_roles(self):
+        attempt_id = os.urandom(16)
+        credential = os.urandom(16)
+        host = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        host.bind(("127.0.0.1", 0))
+        client.bind(("127.0.0.1", 0))
+        host.settimeout(1)
+        client.settimeout(1)
+        first = self.register(host, attempt_id, credential, 0, 0)
+        self.assertEqual(RENDEZVOUS_REGISTERED, first[2])
+        self.assertEqual(0, first[10])
+        second = self.register(client, attempt_id, credential, 1, 0)
+        self.assertEqual(host.getsockname()[1], second[10])
+        # Re-registering returns the peer without sending anything to that peer.
+        threading.Event().wait(0.11)
+        paired = self.register(host, attempt_id, credential, 0, 0)
+        self.assertEqual(client.getsockname()[1], paired[10])
+        host.close()
+        client.close()
+
+    def test_rejects_wrong_credential_and_malformed_packets_without_reply(self):
+        attempt_id = os.urandom(16)
+        credential = os.urandom(16)
+        good = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        bad = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        good.settimeout(1)
+        bad.settimeout(0.2)
+        self.register(good, attempt_id, credential, 0, 1)
+        bad.sendto(self.packet(attempt_id, os.urandom(16), 1, 1), self.server.address)
+        with self.assertRaises(TimeoutError):
+            bad.recvfrom(RENDEZVOUS_PACKET.size)
+        bad.sendto(b"short", self.server.address)
+        with self.assertRaises(TimeoutError):
+            bad.recvfrom(RENDEZVOUS_PACKET.size)
+        good.close()
+        bad.close()
 
 
 if __name__ == "__main__":

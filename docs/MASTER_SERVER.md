@@ -211,3 +211,36 @@ by both PCs.
 
 Do not expose the service's loopback HTTP port directly to the internet. Caddy
 terminates HTTPS for directory metadata only; it is not a UDP proxy or relay.
+
+## UDP rendezvous for public online play
+
+The same process can optionally expose a UDP rendezvous listener:
+
+```text
+python tools/master_server/server.py --host 127.0.0.1 --port 8080 \
+  --rendezvous-host 0.0.0.0 --rendezvous-port 30740
+```
+
+Only UDP 30740 must be exposed for rendezvous. Caddy continues to proxy only
+the HTTPS directory API; it does not proxy UDP or gameplay. Apply host/provider
+rate limiting to UDP 30740 for an internet deployment.
+
+The listener records only source endpoints observed by `recvfrom()`. It accepts
+no client-selected destination and forwards no gameplay. Packets are fixed
+size, replies are no larger than requests, attempts have a short TTL and global
+cap, and each participant/role registration is rate bounded. Host/client and
+discovery/gameplay roles remain distinct.
+
+Each public attempt requires a random 16-byte attempt ID and random 16-byte
+credential shared only with its two participants. The deployment must issue
+these through an authenticated/authorized directory workflow and set the
+matching client traversal options. Never place credentials in source, release
+launchers, logs, or long-lived configuration. This repository contains the
+rendezvous transport but no production credential-issuance service; that is a
+separate operational integration step.
+
+Both clients punch from their actual discovery and gameplay sockets. Search
+retains the responding mapped discovery endpoint through Join, while gameplay
+continues over Harmony's existing peer-to-peer UDP path. No relay is
+implemented. Restrictive NAT/firewall configurations may still fail, and users
+can retry Search after a bounded miss.
