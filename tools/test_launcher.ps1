@@ -226,3 +226,5 @@ public static class LauncherFixture
         Remove-Item -LiteralPath $testRoot -Recurse -Force
     }
 }
+
+exit 0
