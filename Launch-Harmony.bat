@@ -16,4 +16,11 @@ if /i "%~1"=="--setup" (
 powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass ^
   -File "%HARMONY_ROOT%Setup-Harmony.ps1" %HARMONY_SETUP_ARG%
 
-exit /b %ERRORLEVEL%
+set "HARMONY_EXIT_CODE=%ERRORLEVEL%"
+if not "%HARMONY_EXIT_CODE%"=="0" (
+  echo.
+  echo HarmonyRecomp setup or launch failed with exit code %HARMONY_EXIT_CODE%.
+  if not defined HARMONY_NO_PAUSE pause
+)
+
+exit /b %HARMONY_EXIT_CODE%

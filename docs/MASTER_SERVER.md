@@ -1,4 +1,4 @@
-# HarmonyRecomp session directory prototype
+# HarmonyRecomp session directory and rendezvous service
 
 ## Scope
 
@@ -27,7 +27,8 @@ python3 -m unittest tools.master_server.test_server -v
 
 The registry is intentionally in memory. Restarting the process clears all
 sessions. A session expires 45 seconds after its last successful registration
-or heartbeat by default.
+or heartbeat by default. The production `hod.dojutsu.net` deployment uses a
+120-second TTL.
 
 ## API
 
@@ -42,13 +43,13 @@ or heartbeat by default.
   "max_players": 6,
   "title_id": "58410A7A",
   "protocol_version": 1,
-  "build_id": "harmony-0.0.1.4-p1",
+  "build_id": "harmony-0.0.2.4-p1",
   "host_instance_id": "<opaque per-Host-Game ID>",
   "host_instance_token": "<secret recovery proof>",
   "connectivity_candidates": [
     {
-      "type": "tailscale",
-      "address": "100.64.0.10",
+      "type": "public",
+      "address": "",
       "discovery_port": 30741,
       "gameplay_port": 30742
     }
@@ -92,7 +93,7 @@ does not fall through into creation of another lobby.
 
 ### List
 
-`GET /sessions?title_id=58410A7A&protocol_version=1&build_id=harmony-0.0.1.4-p1`
+`GET /sessions?title_id=58410A7A&protocol_version=1&build_id=harmony-0.0.2.4-p1`
 
 The response is `{ "sessions": [...] }`. Clients must still validate and
 filter title ID, protocol version, build ID, candidate type, IPv4 literal, and
@@ -113,15 +114,18 @@ immediately. Missing deletes are harmless because stale records expire.
 - Build IDs are limited to 64 characters.
 - Counts, ports, protocol versions, title IDs, and candidate types are checked.
 - At most four candidates are accepted.
-- Loopback, multicast, and unspecified addresses are rejected.
+- Loopback, multicast, and unspecified client-supplied addresses are rejected.
+  A `public` candidate supplies no address; the server substitutes the IPv4
+  address observed through its loopback-trusted HTTPS proxy.
 - XUIDs, XGI session keys, player names, game data, packets, and private files
   are not part of the public schema.
 - As with any HTTPS request, the directory operator and reverse proxy can
   observe the connecting machine's source IP and request timing even though
   neither is a JSON field. Avoid enabling access logs unless they are needed,
   and set an appropriate retention policy when they are enabled.
-- Hosts must explicitly choose the address they publish. The runtime must not
-  silently infer and upload a local adapter address.
+- Non-public candidates must explicitly choose the address they publish. A
+  public candidate never uploads a guessed adapter address; the server uses its
+  externally observed source IPv4.
 - Registration and host-instance tokens are random process-local capabilities,
   not user accounts. Production use is restricted to HTTPS (with loopback HTTP
   retained only for local testing); tokens are compared in constant time,
@@ -134,9 +138,8 @@ Caddy terminates HTTPS and forwards only HTTP API traffic to the loopback-bound
 service:
 
 ```caddyfile
-harmony-directory.example.com {
-    encode zstd gzip
-    reverse_proxy 127.0.0.1:8080
+hod.dojutsu.net {
+    reverse_proxy 127.0.0.1:18080
 }
 ```
 
@@ -145,8 +148,9 @@ as a UDP 30741/30742 proxy or gameplay relay.
 
 ## Runtime integration
 
-The opt-in Windows runtime client lives beside `SessionRecord` and
-`LanDiscoveryService` in ReXGlue:
+The generic Windows runtime client remains configuration-controlled beside
+`SessionRecord` and `LanDiscoveryService` in ReXGlue. HarmonyRecomp's canonical
+Windows launcher supplies the production configuration automatically:
 
 1. Host `XGISessionCreateImpl` creates and advertises the normal LAN session.
 2. A background directory client registers a copy of safe metadata and sends
@@ -166,11 +170,13 @@ The opt-in Windows runtime client lives beside `SessionRecord` and
 
 Automatic registration and queries are disabled unless
 `--session_directory_url` is configured. Production URLs must use HTTPS;
-loopback HTTP is accepted only for local testing. The Harmony build pins the
-compatibility identifier to `harmony-0.0.1.4-p1` unless an explicit config or
-command-line value overrides it.
+loopback HTTP is accepted only for local testing. The canonical launcher uses
+`https://hod.dojutsu.net` with candidate type `public`. The Harmony build pins
+the compatibility identifier to `harmony-0.0.2.4-p1`, so the launcher does not
+duplicate it.
 
-Hosting additionally requires an explicit publish address. This is deliberate:
+Non-public hosting additionally requires an explicit publish address. Public
+hosting intentionally omits one and relies on server-side endpoint observation;
 the runtime never guesses which adapter address to disclose. While a session is
 advertised, the host creates one logical registration, refreshes it every 15
 seconds, and attempts deletion when hosting stops. Lost requests or responses
@@ -246,7 +252,7 @@ The same process can optionally expose a UDP rendezvous listener:
 
 ```text
 python tools/master_server/server.py --host 127.0.0.1 --port 8080 \
-  --rendezvous-host 0.0.0.0 --rendezvous-public-host rendezvous.example.com \
+  --rendezvous-host 0.0.0.0 --rendezvous-public-host hod.dojutsu.net \
   --rendezvous-port 30740
 ```
 
@@ -285,8 +291,7 @@ For automatic public traversal configure both builds with the normal directory
 settings only:
 
 ```text
---session_directory_url=https://<directory-host>
---session_directory_build_id=<compatible-build-id>
+--session_directory_url=https://hod.dojutsu.net
 --session_directory_candidate_type=public
 ```
 

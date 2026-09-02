@@ -179,6 +179,12 @@ jobs:
             throw 'Importer unexpectedly accepted a missing installation.'
           }
 
+      - name: Test canonical Windows launcher
+        shell: powershell
+        run: |
+          & .\tools\test_launcher.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Package explicit redistributable allowlist
         shell: pwsh
         run: |

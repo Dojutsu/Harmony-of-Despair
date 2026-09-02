@@ -5,8 +5,9 @@ Despair*. This repository and its releases do not include the original game.
 
 ## Public online multiplayer
 
-HarmonyRecomp can use its session directory and UDP rendezvous service to
-establish a direct peer-to-peer connection between ordinary home networks. The
+The canonical Windows launcher configures HarmonyRecomp's production session
+directory and UDP rendezvous service automatically. It can establish a direct
+peer-to-peer connection between ordinary home networks. The
 in-game flow remains unchanged: the host creates a team, and the client uses
 Multiplayer Search, selects the host, and joins. Rendezvous coordinates the
 public discovery and gameplay endpoints; Harmony's existing UDP transport
@@ -18,13 +19,14 @@ Harmony's UDP 30741/30742 ports. There is currently no relay fallback, so highly
 restrictive NAT or firewall configurations can still fail. A public Search may
 occasionally miss while mappings are established; retrying Search is safe.
 
-The directory now issues short-lived, role-specific rendezvous capabilities
-automatically. With a production directory URL and `public` candidate type,
-Host and Search obtain their own capabilities without attempt IDs or secrets in
-launchers or configuration. Test credentials, server secrets, and
-machine-specific addresses are never included in release artifacts. Public
-online remains operator-configured until a stable production service location
-is selected; it is separate from first-run game-data setup.
+The production directory is `https://hod.dojutsu.net`. It issues short-lived,
+role-specific rendezvous capabilities automatically. Host and Search obtain
+their own capabilities without attempt IDs, manual credentials, or networking
+edits. Test credentials, server secrets, and machine-specific addresses are
+never included in release artifacts. The directory/rendezvous server does not
+relay gameplay. Some carrier, hotspot, NAT, and firewall combinations can block
+direct peer traffic even when rendezvous succeeds; relay support is not
+currently implemented.
 
 ## Bring your own game
 
@@ -44,7 +46,8 @@ already-extracted TU2 directory as an advanced fallback.
    metadata, extracts them transactionally into
    `%LOCALAPPDATA%\HarmonyRecomp\game-data`, and installs detected DLC.
 5. The game starts. Future launches reuse that managed local installation and
-   require no folder selection or command line.
+   require no folder selection or command line. The same launcher supports
+   single-player, LAN multiplayer, and automatic public multiplayer.
 
 The source folder must contain the owned base Arcade package and its matching
 TU2 installer package. DLC is optional and never prevents base/TU2 setup.
@@ -63,6 +66,13 @@ The optional `harmonyrecomp-user.example.cfg` contains advanced runtime
 settings only. Ordinary setup does not require copying or editing a config.
 `harmonyrecomp-user.cfg` remains ignored by Git because it may contain local
 identity settings.
+
+On first launch, a random non-secret player XUID is stored in
+`%LOCALAPPDATA%\HarmonyRecomp\launcher-profile.cfg`. It remains stable across
+normal launches, reimports, and package updates so independent installations do
+not share one default multiplayer identity. It is not derived from a username,
+machine identifier, network address, or hardware identifier. An explicit
+`HARMONY_USER_XUID` environment value or advanced user config overrides it.
 
 ### Advanced import
 

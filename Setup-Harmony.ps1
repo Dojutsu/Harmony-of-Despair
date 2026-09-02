@@ -16,6 +16,8 @@ if (-not $env:LOCALAPPDATA) {
 }
 
 $managedRoot = Join-Path $env:LOCALAPPDATA 'HarmonyRecomp\game-data'
+$profileRoot = Join-Path $env:LOCALAPPDATA 'HarmonyRecomp'
+$profilePath = Join-Path $profileRoot 'launcher-profile.cfg'
 
 function Show-SetupMessage([string]$message, [string]$title = 'HarmonyRecomp Setup') {
     Write-Host $message
@@ -41,6 +43,72 @@ function Invoke-Importer([string[]]$arguments) {
 function Test-Tu2Installation([string]$path) {
     $result = Invoke-Importer @('--verify-tu2', $path)
     return $result.ExitCode -eq 0
+}
+
+function Test-HarmonyXuid([string]$value) {
+    if ($value -notmatch '^\d+$') {
+        return $false
+    }
+    $parsed = [uint64]0
+    if (-not [uint64]::TryParse(
+            $value,
+            [Globalization.NumberStyles]::Integer,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [ref]$parsed)) {
+        return $false
+    }
+    return $parsed -ne 0 -and ($parsed -band [uint64]0x00C0000000000000) -eq 0
+}
+
+function New-HarmonyXuid {
+    $bytes = New-Object byte[] 8
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        do {
+            $rng.GetBytes($bytes)
+            # Harmony rejects XUIDs with either of bits 54 or 55 set.
+            $bytes[6] = [byte]($bytes[6] -band 0x3F)
+            $value = [BitConverter]::ToUInt64($bytes, 0)
+        } while ($value -eq 0)
+    } finally {
+        $rng.Dispose()
+    }
+    return $value.ToString([Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-OrCreateLauncherXuid {
+    try {
+        if (Test-Path -LiteralPath $profilePath -PathType Leaf) {
+            foreach ($line in Get-Content -LiteralPath $profilePath) {
+                if ($line -match '^\s*HARMONY_USER_XUID=(\d+)\s*$') {
+                    if (Test-HarmonyXuid $Matches[1]) {
+                        return $Matches[1]
+                    }
+                    break
+                }
+            }
+            throw "The launcher profile does not contain a valid HARMONY_USER_XUID: $profilePath"
+        }
+
+        [void](New-Item -ItemType Directory -Path $profileRoot -Force)
+        $xuid = New-HarmonyXuid
+        $temporaryProfile = "$profilePath.$([Guid]::NewGuid().ToString('N')).tmp"
+        try {
+            [IO.File]::WriteAllText(
+                $temporaryProfile,
+                "# Generated per-install player identity. This value is not a credential.`r`nHARMONY_USER_XUID=$xuid`r`n",
+                [Text.UTF8Encoding]::new($false))
+            Move-Item -LiteralPath $temporaryProfile -Destination $profilePath
+        } finally {
+            if (Test-Path -LiteralPath $temporaryProfile -PathType Leaf) {
+                Remove-Item -LiteralPath $temporaryProfile -Force
+            }
+        }
+        return $xuid
+    } catch {
+        Write-Warning ("Persistent player identity is unavailable; HarmonyRecomp will use its runtime fallback for this launch. " + $_.Exception.Message)
+        return ''
+    }
 }
 
 if (-not (Test-Path -LiteralPath $importer -PathType Leaf)) {
@@ -88,18 +156,19 @@ if ($needsSetup) {
     Write-Host "HarmonyRecomp game data was imported to: $managedRoot"
 }
 
-if ($NoLaunch) {
-    exit 0
-}
-
 $settings = @{
     HARMONY_GPU_PLUGIN = 'xenos'
     HARMONY_MNK_MODE = 'true'
     HARMONY_LICENSE_MASK = '1'
-    HARMONY_USER_XUID = ''
+    HARMONY_USER_XUID = Get-OrCreateLauncherXuid
     HARMONY_USER_NAME = ''
     HARMONY_LOG_LEVEL = 'info'
     HARMONY_LOG_NOISY = 'false'
+    HARMONY_LAN_ONLINE = 'true'
+    HARMONY_LAN_DISCOVERY_PORT = '30741'
+    HARMONY_LAN_GAMEPLAY_PORT = '30742'
+    HARMONY_SESSION_DIRECTORY_URL = 'https://hod.dojutsu.net'
+    HARMONY_SESSION_DIRECTORY_CANDIDATE_TYPE = 'public'
 }
 $config = Join-Path $root 'harmonyrecomp-user.cfg'
 if (Test-Path -LiteralPath $config -PathType Leaf) {
@@ -110,6 +179,23 @@ if (Test-Path -LiteralPath $config -PathType Leaf) {
     }
 }
 
+# A process-scoped environment value is the most explicit launcher override.
+foreach ($name in @($settings.Keys)) {
+    $environmentValue = [Environment]::GetEnvironmentVariable($name, 'Process')
+    if (-not [string]::IsNullOrEmpty($environmentValue)) {
+        $settings[$name] = $environmentValue
+    }
+}
+
+if ($settings.HARMONY_USER_XUID -and -not (Test-HarmonyXuid $settings.HARMONY_USER_XUID)) {
+    Show-SetupMessage 'HARMONY_USER_XUID must be a nonzero unsigned decimal 64-bit value with bits 54 and 55 clear.'
+    exit 25
+}
+
+if ($NoLaunch) {
+    exit 0
+}
+
 $arguments = @(
     "--game_data_root=$managedRoot"
     "--update_data_root=$managedRoot"
@@ -118,6 +204,11 @@ $arguments = @(
     "--license_mask=$($settings.HARMONY_LICENSE_MASK)"
     "--log_level=$($settings.HARMONY_LOG_LEVEL)"
     "--log_noisy=$($settings.HARMONY_LOG_NOISY)"
+    "--lan_online=$($settings.HARMONY_LAN_ONLINE)"
+    "--lan_discovery_port=$($settings.HARMONY_LAN_DISCOVERY_PORT)"
+    "--lan_gameplay_port=$($settings.HARMONY_LAN_GAMEPLAY_PORT)"
+    "--session_directory_url=$($settings.HARMONY_SESSION_DIRECTORY_URL)"
+    "--session_directory_candidate_type=$($settings.HARMONY_SESSION_DIRECTORY_CANDIDATE_TYPE)"
 )
 if ($settings.HARMONY_USER_XUID) { $arguments += "--user_xuid=$($settings.HARMONY_USER_XUID)" }
 if ($settings.HARMONY_USER_NAME) { $arguments += "--user_name=$($settings.HARMONY_USER_NAME)" }

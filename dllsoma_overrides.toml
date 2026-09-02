@@ -1,10 +1,12 @@
-# Indirect player-code target observed during Chapter 1 startup. Automatic
-# discovery left the exact 0x30-byte gap before the next known function.
+# Indirect player-code target observed during Chapter 1 startup. It resumes
+# inside the surrounding function with that parent's live register state and
+# shares the parent's control-flow tail/epilogue.
 
 [functions]
 0x830B9DC8 = { end = 0x830B9DF8 }
 0x830A19B8 = { end = 0x830A19C0 }
-0x830A2370 = { end = 0x830A2378 }
+0x830A22E0 = { end = 0x830A2400 }
+0x830A2370 = { parent = 0x830A22E0, end = 0x830A2400, share_registers = true }
 
 # Static callable targets referenced by mapped non-executable data tables.
 # data refs=1, first reference=0x830932D8
