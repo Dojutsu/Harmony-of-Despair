@@ -49,6 +49,27 @@ already-extracted TU2 directory as an advanced fallback.
    require no folder selection or command line. The same launcher supports
    single-player, LAN multiplayer, and automatic public multiplayer.
 
+First launch also asks for a player name. Harmony stores the 1-15 character
+name beside the persistent player XUID in
+`%LOCALAPPDATA%\HarmonyRecomp\launcher-profile.cfg`. Change it later without
+changing the XUID by running:
+
+```text
+Launch-Harmony.bat --configure
+```
+
+To join a friend's hosted session using its six-character invite code, run:
+
+```text
+Launch-Harmony.bat --join-code
+```
+
+The launcher validates the code and then uses the normal Harmony Search,
+rendezvous, NAT traversal, and join path. A host can display the active code in
+a separate launcher message with `Launch-Harmony.bat --show-invite`. This
+reports `No active hosted session` until public directory registration has
+completed.
+
 The source folder must contain the owned base Arcade package and its matching
 TU2 installer package. DLC is optional and never prevents base/TU2 setup.
 Package filenames do not matter: identification uses Xbox content type, Title

@@ -8,8 +8,14 @@ if /i "%~1"=="--setup" (
   set "HARMONY_SETUP_ARG=-Setup"
 ) else if /i "%~1"=="--reimport" (
   set "HARMONY_SETUP_ARG=-Setup"
+) else if /i "%~1"=="--configure" (
+  set "HARMONY_SETUP_ARG=-Configure"
+) else if /i "%~1"=="--join-code" (
+  set "HARMONY_SETUP_ARG=-JoinByInviteCode"
+) else if /i "%~1"=="--show-invite" (
+  set "HARMONY_SETUP_ARG=-ShowInviteCode"
 ) else if not "%~1"=="" (
-  echo Usage: Launch-Harmony.bat [--setup]
+  echo Usage: Launch-Harmony.bat [--setup^|--configure^|--join-code^|--show-invite]
   exit /b 2
 )
 

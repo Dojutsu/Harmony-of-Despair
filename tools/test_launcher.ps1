@@ -46,8 +46,15 @@ function Invoke-Setup(
         '-File', (Join-Path $artifactRoot 'Setup-Harmony.ps1'),
         '-NoDialogs'
     ) + $extraArguments
-    $output = @(& powershell.exe @command 2>&1)
-    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = @(& powershell.exe @command 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    return [pscustomobject]@{ ExitCode = $exitCode; Output = $output }
 }
 
 function Get-ProfileXuid([string]$localAppData) {
@@ -55,6 +62,14 @@ function Get-ProfileXuid([string]$localAppData) {
     Assert-True (Test-Path -LiteralPath $profile -PathType Leaf) "profile was not created at $profile"
     $line = Get-Content -LiteralPath $profile | Where-Object { $_ -match '^HARMONY_USER_XUID=' }
     Assert-True ($null -ne $line) 'profile has no XUID entry'
+    return ($line -split '=', 2)[1]
+}
+
+function Get-ProfileName([string]$localAppData) {
+    $profile = Join-Path $localAppData 'HarmonyRecomp\launcher-profile.cfg'
+    Assert-True (Test-Path -LiteralPath $profile -PathType Leaf) "profile was not created at $profile"
+    $line = Get-Content -LiteralPath $profile | Where-Object { $_ -match '^HARMONY_USER_NAME=' }
+    Assert-True ($null -ne $line) 'profile has no player-name entry'
     return ($line -split '=', 2)[1]
 }
 
@@ -114,13 +129,14 @@ public static class LauncherFixture
     $firstLocal = Join-Path $testRoot 'First Local AppData'
     $firstArguments = Join-Path $testRoot 'first arguments.txt'
     $env:HARMONY_TEST_ARGUMENTS_PATH = $firstArguments
-    $first = Invoke-Setup $firstLocal
+    $first = Invoke-Setup $firstLocal @('-PlayerName', 'Alice')
     Assert-True ($first.ExitCode -eq 0) "first launch exited $($first.ExitCode)"
     $firstXuid = Get-ProfileXuid $firstLocal
     Assert-True ($firstXuid -match '^\d+$') 'generated XUID is not unsigned decimal'
     $firstValue = [uint64]::Parse($firstXuid, [Globalization.CultureInfo]::InvariantCulture)
     Assert-True ($firstValue -ne 0) 'generated XUID is zero'
     Assert-True (($firstValue -band [uint64]0x00C0000000000000) -eq 0) 'generated XUID has a prohibited bit set'
+    Assert-True ((Get-ProfileName $firstLocal) -eq 'Alice') 'first launch did not persist the player name'
 
     $arguments = Get-GameArguments $firstArguments
     foreach ($required in @(
@@ -130,6 +146,7 @@ public static class LauncherFixture
         '--session_directory_url=https://hod.dojutsu.net',
         '--session_directory_candidate_type=public',
         "--user_xuid=$firstXuid"
+        '--user_name=Alice'
     )) {
         Assert-True ($required -in $arguments) "missing launch argument $required"
     }
@@ -154,19 +171,52 @@ public static class LauncherFixture
     Assert-True ($second.ExitCode -eq 0) "second launch exited $($second.ExitCode)"
     Assert-True ((Get-ProfileXuid $firstLocal) -eq $firstXuid) 'second launch changed the persistent XUID'
     Assert-True ("--user_xuid=$firstXuid" -in (Get-GameArguments $secondArguments)) 'second launch did not use the persistent XUID'
+    Assert-True ('--user_name=Alice' -in (Get-GameArguments $secondArguments)) 'second launch did not reuse the player name'
 
     $reimportArguments = Join-Path $testRoot 'reimport arguments.txt'
     $env:HARMONY_TEST_ARGUMENTS_PATH = $reimportArguments
     $reimport = Invoke-Setup $firstLocal @('-Setup', '-Source', $sourceRoot)
     Assert-True ($reimport.ExitCode -eq 0) "reimport launch exited $($reimport.ExitCode)"
     Assert-True ((Get-ProfileXuid $firstLocal) -eq $firstXuid) 'reimport changed the persistent XUID'
+    Assert-True ((Get-ProfileName $firstLocal) -eq 'Alice') 'reimport changed the player name'
 
     $secondLocal = Join-Path $testRoot 'Independent Local AppData'
     $independentArguments = Join-Path $testRoot 'independent arguments.txt'
     $env:HARMONY_TEST_ARGUMENTS_PATH = $independentArguments
-    $independent = Invoke-Setup $secondLocal
+    $independent = Invoke-Setup $secondLocal @('-PlayerName', 'Alice')
     Assert-True ($independent.ExitCode -eq 0) "independent launch exited $($independent.ExitCode)"
     Assert-True ((Get-ProfileXuid $secondLocal) -ne $firstXuid) 'independent profile generated the same XUID'
+    Assert-True ((Get-ProfileName $secondLocal) -eq 'Alice') 'duplicate display name was not preserved'
+
+    $xuidOnlyLocal = Join-Path $testRoot 'XUID Only Local AppData'
+    $xuidOnlyProfileRoot = Join-Path $xuidOnlyLocal 'HarmonyRecomp'
+    [void](New-Item -ItemType Directory -Path $xuidOnlyProfileRoot -Force)
+    Set-Content -LiteralPath (Join-Path $xuidOnlyProfileRoot 'launcher-profile.cfg') -Encoding ASCII -Value 'HARMONY_USER_XUID=2002'
+    $xuidOnlyArguments = Join-Path $testRoot 'xuid-only arguments.txt'
+    $env:HARMONY_TEST_ARGUMENTS_PATH = $xuidOnlyArguments
+    $xuidOnly = Invoke-Setup $xuidOnlyLocal @('-PlayerName', 'LegacyUser')
+    Assert-True ($xuidOnly.ExitCode -eq 0) "XUID-only profile launch exited $($xuidOnly.ExitCode)"
+    Assert-True ((Get-ProfileXuid $xuidOnlyLocal) -eq '2002') 'name prompt changed XUID-only profile identity'
+    Assert-True ((Get-ProfileName $xuidOnlyLocal) -eq 'LegacyUser') 'XUID-only profile did not persist prompted name'
+
+    $configureArguments = Join-Path $testRoot 'configure should not launch.txt'
+    $env:HARMONY_TEST_ARGUMENTS_PATH = $configureArguments
+    $configured = Invoke-Setup $firstLocal @('-Configure', '-PlayerName', 'Bob')
+    Assert-True ($configured.ExitCode -eq 0) "configure exited $($configured.ExitCode)"
+    Assert-True ((Get-ProfileXuid $firstLocal) -eq $firstXuid) 'configure changed the persistent XUID'
+    Assert-True ((Get-ProfileName $firstLocal) -eq 'Bob') 'configure did not update the player name'
+    Assert-True (-not (Test-Path -LiteralPath $configureArguments)) 'configure launched the game'
+
+    foreach ($invalidName in @('   ', '0123456789ABCDEF', "Bad`nName")) {
+        $invalidLocal = Join-Path $testRoot ("Invalid Name " + [Guid]::NewGuid().ToString('N'))
+        $invalidNameResult = Invoke-Setup $invalidLocal @('-PlayerName', $invalidName)
+        Assert-True ($invalidNameResult.ExitCode -eq 27) "invalid player name was accepted: length=$($invalidName.Length) exit=$($invalidNameResult.ExitCode)"
+    }
+
+    $printableLocal = Join-Path $testRoot 'Printable Name Local AppData'
+    $printable = Invoke-Setup $printableLocal @('-PlayerName', '  A-B_2  ', '-NoLaunch')
+    Assert-True ($printable.ExitCode -eq 0) 'printable ASCII player name was rejected'
+    Assert-True ((Get-ProfileName $printableLocal) -eq 'A-B_2') 'player-name whitespace was not trimmed'
 
     Set-Content -LiteralPath (Join-Path $artifactRoot 'harmonyrecomp-user.cfg') -Encoding ASCII -Value @(
         'HARMONY_USER_XUID=2001',
@@ -201,6 +251,27 @@ public static class LauncherFixture
     Assert-True ('--session_directory_invite_code=AB7K2Q' -in
         (Get-GameArguments $inviteArguments)) 'invite code was not forwarded to Harmony'
     Remove-Item -LiteralPath (Join-Path $artifactRoot 'harmonyrecomp-user.cfg')
+
+    $joinArguments = Join-Path $testRoot 'join-code arguments.txt'
+    $env:HARMONY_TEST_ARGUMENTS_PATH = $joinArguments
+    $joinCode = Invoke-Setup $firstLocal @('-JoinByInviteCode', '-InviteCode', 'cd8m3r')
+    Assert-True ($joinCode.ExitCode -eq 0) "join-code action exited $($joinCode.ExitCode)"
+    Assert-True ('--session_directory_invite_code=CD8M3R' -in
+        (Get-GameArguments $joinArguments)) 'join-code action did not normalize and forward the code'
+    foreach ($invalidCode in @('BAD', 'ABC10O', 'ABCDEF7')) {
+        $invalidJoin = Invoke-Setup $firstLocal @('-JoinByInviteCode', '-InviteCode', $invalidCode)
+        Assert-True ($invalidJoin.ExitCode -eq 26) "invalid join code was accepted: $invalidCode"
+    }
+
+    $inviteStateRoot = Join-Path $firstLocal 'HarmonyRecomp'
+    $inviteStatePath = Join-Path $inviteStateRoot 'active-invite-code.txt'
+    [IO.File]::WriteAllText($inviteStatePath, 'EF7K2Q', [Text.UTF8Encoding]::new($false))
+    $shown = Invoke-Setup $firstLocal @('-ShowInviteCode')
+    Assert-True ($shown.ExitCode -eq 0) 'show-invite action failed with active state'
+    Assert-True (($shown.Output | Out-String) -match 'Invite Code: EF7K2Q') 'show-invite did not display the active code'
+    Remove-Item -LiteralPath $inviteStatePath
+    $notShown = Invoke-Setup $firstLocal @('-ShowInviteCode')
+    Assert-True (($notShown.Output | Out-String) -match 'No active hosted session') 'show-invite did not report inactive hosting'
 
     $env:HARMONY_TEST_FAIL_OPERATION = '--aggregate'
     $failedImport = Invoke-Setup $firstLocal @('-Setup', '-Source', $sourceRoot)

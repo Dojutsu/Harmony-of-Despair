@@ -620,12 +620,13 @@ index 0000000..a5931c6
 +}  // namespace rex::system
 diff --git a/include/rex/system/xam/session_directory.h b/include/rex/system/xam/session_directory.h
 new file mode 100644
-index 0000000..a521278
+index 0000000..b309f7a
 --- /dev/null
 +++ b/include/rex/system/xam/session_directory.h
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,92 @@
 +#pragma once
 +
++#include <filesystem>
 +#include <cstdint>
 +#include <memory>
 +#include <optional>
@@ -685,6 +686,8 @@ index 0000000..a521278
 +DirectoryHeartbeatDisposition ClassifyDirectoryHeartbeatResponse(std::optional<uint32_t> status,
 +                                                                 bool valid_session_id);
 +std::optional<std::string> NormalizeDirectoryInviteCode(std::string_view value);
++bool WriteActiveInviteCodeFile(const std::filesystem::path& path, std::string_view code);
++void RemoveActiveInviteCodeFile(const std::filesystem::path& path);
 +std::optional<DirectorySession> ParseInviteCodeSessionResponse(std::string_view body,
 +                                                               uint32_t title_id,
 +                                                               std::string_view build_id);
@@ -5096,16 +5099,19 @@ index 0000000..86bc148
 +}  // namespace rex::system::xam
 diff --git a/src/system/xam/session_directory.cpp b/src/system/xam/session_directory.cpp
 new file mode 100644
-index 0000000..a3123b3
+index 0000000..0685729
 --- /dev/null
 +++ b/src/system/xam/session_directory.cpp
-@@ -0,0 +1,733 @@
+@@ -0,0 +1,791 @@
 +#include <rex/system/xam/session_directory.h>
 +
 +#include <algorithm>
 +#include <cctype>
 +#include <chrono>
 +#include <condition_variable>
++#include <cstdlib>
++#include <filesystem>
++#include <fstream>
 +#include <future>
 +#include <iomanip>
 +#include <mutex>
@@ -5202,6 +5208,15 @@ index 0000000..a3123b3
 +
 +bool IsInviteCodeSetting(std::string_view value) {
 +  return value.empty() || NormalizeInviteCode(value).has_value();
++}
++
++std::optional<std::filesystem::path> ActiveInviteCodePath() {
++#if REX_PLATFORM_WIN32
++  const char* local_app_data = std::getenv("LOCALAPPDATA");
++  if (local_app_data && *local_app_data)
++    return std::filesystem::path(local_app_data) / "HarmonyRecomp" / "active-invite-code.txt";
++#endif
++  return std::nullopt;
 +}
 +
 +std::optional<DirectorySession> ParseDirectorySession(const nlohmann::json& item,
@@ -5496,6 +5511,45 @@ index 0000000..a3123b3
 +  return DirectoryHeartbeatDisposition::kRetrySameRegistration;
 +}
 +
++bool WriteActiveInviteCodeFile(const std::filesystem::path& path, std::string_view code) {
++  auto normalized = NormalizeInviteCode(code);
++  if (!normalized)
++    return false;
++  std::error_code error;
++  std::filesystem::create_directories(path.parent_path(), error);
++  if (error)
++    return false;
++  auto temporary = path;
++  temporary += ".tmp";
++  {
++    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
++    if (!output || !output.write(normalized->data(), normalized->size()))
++      return false;
++  }
++#if REX_PLATFORM_WIN32
++  if (!MoveFileExW(temporary.c_str(), path.c_str(),
++                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
++    std::filesystem::remove(temporary, error);
++    return false;
++  }
++#else
++  std::filesystem::rename(temporary, path, error);
++  if (error) {
++    std::filesystem::remove(temporary, error);
++    return false;
++  }
++#endif
++  return true;
++}
++
++void RemoveActiveInviteCodeFile(const std::filesystem::path& path) {
++  std::error_code error;
++  std::filesystem::remove(path, error);
++  auto temporary = path;
++  temporary += ".tmp";
++  std::filesystem::remove(temporary, error);
++}
++
 +class SessionDirectoryClient::Impl {
 + public:
 +  ~Impl() {
@@ -5539,6 +5593,8 @@ index 0000000..a3123b3
 +      worker.join();
 +    }
 +    hosted.reset();
++    if (auto path = ActiveInviteCodePath())
++      RemoveActiveInviteCodeFile(*path);
 +  }
 +
 +  std::vector<DirectorySession> List(uint32_t value_title_id) const {
@@ -5697,6 +5753,9 @@ index 0000000..a3123b3
 +                REXSYS_INFO("Session directory: registered '{}' as {}", hosted->host_name,
 +                            session_id);
 +              REXSYS_INFO("Harmony invite code: {}", candidate_invite_code);
++              if (auto path = ActiveInviteCodePath();
++                  path && !WriteActiveInviteCodeFile(*path, candidate_invite_code))
++                REXSYS_WARN("Harmony invite code: could not publish launcher state");
 +            }
 +          }
 +        }
@@ -5785,6 +5844,8 @@ index 0000000..a3123b3
 +      NatProbeRetireIdentity(attempt);
 +    if (!session_id.empty())
 +      Request(REXCVAR_GET(session_directory_url), L"DELETE", "/sessions/" + session_id, "", token);
++    if (auto path = ActiveInviteCodePath())
++      RemoveActiveInviteCodeFile(*path);
 +  }
 +
 +  std::shared_ptr<SessionRecord> hosted;
@@ -6516,11 +6577,15 @@ index 88617f2..c82fead 100644
    REQUIRE(dispatcher.SetFunction(kAddr, &ScribbleFn));
 diff --git a/tests/unit/system/session_test.cpp b/tests/unit/system/session_test.cpp
 new file mode 100644
-index 0000000..560a930
+index 0000000..081907b
 --- /dev/null
 +++ b/tests/unit/system/session_test.cpp
-@@ -0,0 +1,585 @@
+@@ -0,0 +1,621 @@
 +#include <catch2/catch_test_macros.hpp>
++
++#include <chrono>
++#include <filesystem>
++#include <fstream>
 +
 +#include <rex/platform.h>
 +
@@ -7085,6 +7150,38 @@ index 0000000..560a930
 +  CHECK_FALSE(ParseInviteCodeSessionResponse(unsafe_candidate, title_id, build_id));
 +  CHECK_FALSE(ParseInviteCodeSessionResponse("{}", title_id, build_id));
 +  CHECK_FALSE(ParseInviteCodeSessionResponse("not-json", title_id, build_id));
++}
++
++TEST_CASE("active invite code launcher state is bounded and follows hosting lifecycle",
++          "[session][directory]") {
++  auto root = std::filesystem::temp_directory_path() /
++              ("harmony-invite-state-" +
++               std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
++  auto path = root / "active-invite-code.txt";
++  struct Cleanup {
++    std::filesystem::path root;
++    ~Cleanup() {
++      std::error_code error;
++      std::filesystem::remove_all(root, error);
++    }
++  } cleanup{root};
++
++  REQUIRE(WriteActiveInviteCodeFile(path, "ab7k2q"));
++  {
++    std::ifstream input(path, std::ios::binary);
++    std::string value((std::istreambuf_iterator<char>(input)), {});
++    CHECK(value == "AB7K2Q");
++  }
++  REQUIRE(WriteActiveInviteCodeFile(path, "CD8M3R"));
++  {
++    std::ifstream input(path, std::ios::binary);
++    std::string value((std::istreambuf_iterator<char>(input)), {});
++    CHECK(value == "CD8M3R");
++  }
++  CHECK_FALSE(WriteActiveInviteCodeFile(path, "BAD"));
++  CHECK_FALSE(std::filesystem::exists(path.string() + ".tmp"));
++  RemoveActiveInviteCodeFile(path);
++  CHECK_FALSE(std::filesystem::exists(path));
 +}
 +
 +TEST_CASE("stopping a LAN advertisement removes the hosted session", "[session][network]") {

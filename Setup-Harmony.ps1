@@ -1,6 +1,11 @@
 param(
     [switch]$Setup,
     [string]$Source,
+    [switch]$Configure,
+    [switch]$JoinByInviteCode,
+    [switch]$ShowInviteCode,
+    [string]$PlayerName,
+    [string]$InviteCode,
     [switch]$NoLaunch,
     [switch]$NoDialogs
 )
@@ -18,6 +23,7 @@ if (-not $env:LOCALAPPDATA) {
 $managedRoot = Join-Path $env:LOCALAPPDATA 'HarmonyRecomp\game-data'
 $profileRoot = Join-Path $env:LOCALAPPDATA 'HarmonyRecomp'
 $profilePath = Join-Path $profileRoot 'launcher-profile.cfg'
+$activeInvitePath = Join-Path $profileRoot 'active-invite-code.txt'
 
 function Show-SetupMessage([string]$message, [string]$title = 'HarmonyRecomp Setup') {
     Write-Host $message
@@ -76,39 +82,64 @@ function New-HarmonyXuid {
     return $value.ToString([Globalization.CultureInfo]::InvariantCulture)
 }
 
-function Get-OrCreateLauncherXuid {
-    try {
-        if (Test-Path -LiteralPath $profilePath -PathType Leaf) {
-            foreach ($line in Get-Content -LiteralPath $profilePath) {
-                if ($line -match '^\s*HARMONY_USER_XUID=(\d+)\s*$') {
-                    if (Test-HarmonyXuid $Matches[1]) {
-                        return $Matches[1]
-                    }
-                    break
-                }
-            }
-            throw "The launcher profile does not contain a valid HARMONY_USER_XUID: $profilePath"
-        }
+function Test-HarmonyPlayerName([string]$value) {
+    if ($null -eq $value) { return $false }
+    $trimmed = $value.Trim()
+    return $trimmed -match '^[\x20-\x7E]{1,15}$'
+}
 
-        [void](New-Item -ItemType Directory -Path $profileRoot -Force)
-        $xuid = New-HarmonyXuid
-        $temporaryProfile = "$profilePath.$([Guid]::NewGuid().ToString('N')).tmp"
-        try {
-            [IO.File]::WriteAllText(
-                $temporaryProfile,
-                "# Generated per-install player identity. This value is not a credential.`r`nHARMONY_USER_XUID=$xuid`r`n",
-                [Text.UTF8Encoding]::new($false))
-            Move-Item -LiteralPath $temporaryProfile -Destination $profilePath
-        } finally {
-            if (Test-Path -LiteralPath $temporaryProfile -PathType Leaf) {
-                Remove-Item -LiteralPath $temporaryProfile -Force
+function Read-LauncherProfile {
+    $profile = @{ Xuid = ''; Name = '' }
+    if (Test-Path -LiteralPath $profilePath -PathType Leaf) {
+        foreach ($line in Get-Content -LiteralPath $profilePath) {
+            if ($line -match '^\s*HARMONY_USER_XUID=(\d+)\s*$') {
+                $profile.Xuid = $Matches[1]
+            } elseif ($line -match '^\s*HARMONY_USER_NAME=(.*)$') {
+                $profile.Name = $Matches[1].Trim()
             }
         }
-        return $xuid
-    } catch {
-        Write-Warning ("Persistent player identity is unavailable; HarmonyRecomp will use its runtime fallback for this launch. " + $_.Exception.Message)
-        return ''
     }
+    return $profile
+}
+
+function Write-LauncherProfile([string]$xuid, [string]$name) {
+    [void](New-Item -ItemType Directory -Path $profileRoot -Force)
+    $temporaryProfile = "$profilePath.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        $contents = @(
+            '# Generated per-install player identity. These values are not credentials.'
+            "HARMONY_USER_XUID=$xuid"
+            "HARMONY_USER_NAME=$name"
+            ''
+        ) -join "`r`n"
+        [IO.File]::WriteAllText($temporaryProfile, $contents, [Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $temporaryProfile -Destination $profilePath -Force
+    } finally {
+        if (Test-Path -LiteralPath $temporaryProfile -PathType Leaf) {
+            Remove-Item -LiteralPath $temporaryProfile -Force
+        }
+    }
+}
+
+function Read-PlayerInput([string]$title, [string]$prompt, [string]$defaultValue,
+                          [string]$providedValue) {
+    if ($providedValue) { return $providedValue }
+    if ($NoDialogs -or -not [Environment]::UserInteractive) { return '' }
+    Add-Type -AssemblyName Microsoft.VisualBasic
+    return [Microsoft.VisualBasic.Interaction]::InputBox($prompt, $title, $defaultValue)
+}
+
+if ($ShowInviteCode) {
+    $activeCode = ''
+    if (Test-Path -LiteralPath $activeInvitePath -PathType Leaf) {
+        $activeCode = ([IO.File]::ReadAllText($activeInvitePath)).Trim()
+    }
+    if ($activeCode -match '^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$') {
+        Show-SetupMessage "Invite Code: $activeCode" 'HarmonyRecomp Invite Code'
+    } else {
+        Show-SetupMessage 'No active hosted session.' 'HarmonyRecomp Invite Code'
+    }
+    exit 0
 }
 
 if (-not (Test-Path -LiteralPath $importer -PathType Leaf)) {
@@ -156,12 +187,25 @@ if ($needsSetup) {
     Write-Host "HarmonyRecomp game data was imported to: $managedRoot"
 }
 
+$launcherProfile = Read-LauncherProfile
+try {
+    if (-not $launcherProfile.Xuid) {
+        $launcherProfile.Xuid = New-HarmonyXuid
+        Write-LauncherProfile $launcherProfile.Xuid $launcherProfile.Name
+    } elseif (-not (Test-HarmonyXuid $launcherProfile.Xuid)) {
+        throw "The launcher profile does not contain a valid HARMONY_USER_XUID: $profilePath"
+    }
+} catch {
+    Write-Warning ("Persistent player identity is unavailable; HarmonyRecomp will use its runtime fallback for this launch. " + $_.Exception.Message)
+    $launcherProfile.Xuid = ''
+}
+
 $settings = @{
     HARMONY_GPU_PLUGIN = 'xenos'
     HARMONY_MNK_MODE = 'true'
     HARMONY_LICENSE_MASK = '1'
-    HARMONY_USER_XUID = Get-OrCreateLauncherXuid
-    HARMONY_USER_NAME = ''
+    HARMONY_USER_XUID = $launcherProfile.Xuid
+    HARMONY_USER_NAME = $launcherProfile.Name
     HARMONY_LOG_LEVEL = 'info'
     HARMONY_LOG_NOISY = 'false'
     HARMONY_LAN_ONLINE = 'true'
@@ -172,10 +216,14 @@ $settings = @{
     HARMONY_SESSION_DIRECTORY_INVITE_CODE = ''
 }
 $config = Join-Path $root 'harmonyrecomp-user.cfg'
+$explicitUserName = $false
 if (Test-Path -LiteralPath $config -PathType Leaf) {
     foreach ($line in Get-Content -LiteralPath $config) {
         if ($line -match '^\s*([A-Z_]+)=(.*)$' -and $settings.ContainsKey($Matches[1])) {
             $settings[$Matches[1]] = $Matches[2]
+            if ($Matches[1] -eq 'HARMONY_USER_NAME' -and $Matches[2]) {
+                $explicitUserName = $true
+            }
         }
     }
 }
@@ -185,12 +233,55 @@ foreach ($name in @($settings.Keys)) {
     $environmentValue = [Environment]::GetEnvironmentVariable($name, 'Process')
     if (-not [string]::IsNullOrEmpty($environmentValue)) {
         $settings[$name] = $environmentValue
+        if ($name -eq 'HARMONY_USER_NAME') { $explicitUserName = $true }
     }
 }
 
 if ($settings.HARMONY_USER_XUID -and -not (Test-HarmonyXuid $settings.HARMONY_USER_XUID)) {
     Show-SetupMessage 'HARMONY_USER_XUID must be a nonzero unsigned decimal 64-bit value with bits 54 and 55 clear.'
     exit 25
+}
+
+if ($Configure) {
+    if (-not $launcherProfile.Xuid) {
+        Show-SetupMessage 'A persistent player identity is required before the player name can be changed.'
+        exit 27
+    }
+    $configuredName = Read-PlayerInput 'HarmonyRecomp Player Name' 'Enter a player name (1-15 printable ASCII characters):' $launcherProfile.Name $PlayerName
+    $configuredName = $configuredName.Trim()
+    if (-not $configuredName) { exit 0 }
+    if (-not (Test-HarmonyPlayerName $configuredName)) {
+        Show-SetupMessage 'Player name must contain 1-15 printable ASCII characters.'
+        exit 27
+    }
+    Write-LauncherProfile $launcherProfile.Xuid $configuredName
+    Show-SetupMessage "Player name saved as: $configuredName"
+    exit 0
+}
+
+if (-not $explicitUserName -and -not (Test-HarmonyPlayerName $settings.HARMONY_USER_NAME)) {
+    $selectedName = Read-PlayerInput 'HarmonyRecomp Player Name' 'Choose a player name (1-15 printable ASCII characters):' '' $PlayerName
+    $selectedName = $selectedName.Trim()
+    if (-not (Test-HarmonyPlayerName $selectedName)) {
+        Show-SetupMessage 'A player name containing 1-15 printable ASCII characters is required.'
+        exit 27
+    }
+    if ($launcherProfile.Xuid) {
+        Write-LauncherProfile $launcherProfile.Xuid $selectedName
+        $launcherProfile.Name = $selectedName
+    }
+    $settings.HARMONY_USER_NAME = $selectedName
+} elseif ($settings.HARMONY_USER_NAME -and -not (Test-HarmonyPlayerName $settings.HARMONY_USER_NAME)) {
+    Show-SetupMessage 'HARMONY_USER_NAME must contain 1-15 printable ASCII characters.'
+    exit 27
+} else {
+    $settings.HARMONY_USER_NAME = $settings.HARMONY_USER_NAME.Trim()
+}
+
+if ($JoinByInviteCode) {
+    $selectedCode = Read-PlayerInput 'HarmonyRecomp Invite Code' 'Enter the six-character invite code:' '' $InviteCode
+    $settings.HARMONY_SESSION_DIRECTORY_INVITE_CODE = $selectedCode.Trim().ToUpperInvariant()
+    if (-not $settings.HARMONY_SESSION_DIRECTORY_INVITE_CODE) { exit 0 }
 }
 
 if ($NoLaunch) {
