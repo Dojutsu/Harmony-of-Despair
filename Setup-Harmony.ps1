@@ -169,6 +169,7 @@ $settings = @{
     HARMONY_LAN_GAMEPLAY_PORT = '30742'
     HARMONY_SESSION_DIRECTORY_URL = 'https://hod.dojutsu.net'
     HARMONY_SESSION_DIRECTORY_CANDIDATE_TYPE = 'public'
+    HARMONY_SESSION_DIRECTORY_INVITE_CODE = ''
 }
 $config = Join-Path $root 'harmonyrecomp-user.cfg'
 if (Test-Path -LiteralPath $config -PathType Leaf) {
@@ -212,6 +213,15 @@ $arguments = @(
 )
 if ($settings.HARMONY_USER_XUID) { $arguments += "--user_xuid=$($settings.HARMONY_USER_XUID)" }
 if ($settings.HARMONY_USER_NAME) { $arguments += "--user_name=$($settings.HARMONY_USER_NAME)" }
+if ($settings.HARMONY_SESSION_DIRECTORY_INVITE_CODE) {
+    $inviteCode = $settings.HARMONY_SESSION_DIRECTORY_INVITE_CODE.ToUpperInvariant()
+    if ($inviteCode -notmatch
+            '^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$') {
+        Show-SetupMessage 'HARMONY_SESSION_DIRECTORY_INVITE_CODE must contain six invite-code characters.'
+        exit 26
+    }
+    $arguments += "--session_directory_invite_code=$inviteCode"
+}
 
 & $game @arguments
 exit $LASTEXITCODE

@@ -8,7 +8,9 @@ import threading
 import unittest
 
 from tools.master_server.server import (
-    AuthenticationError, DirectoryServer, RENDEZVOUS_MAGIC, RENDEZVOUS_PACKET, RENDEZVOUS_REGISTER,
+    AuthenticationError, DirectoryServer, INVITE_CODE_ALPHABET, INVITE_CODE_LENGTH,
+    InviteLookupLimiter,
+    MAX_INVITE_LOOKUPS_PER_WINDOW, RENDEZVOUS_MAGIC, RENDEZVOUS_PACKET, RENDEZVOUS_REGISTER,
     RENDEZVOUS_REGISTERED, RENDEZVOUS_VERSION, RendezvousRegistry, RendezvousServer,
     SessionRegistry, ValidationError, observed_client_ip, validate_registration,
 )
@@ -36,6 +38,45 @@ def payload(**updates):
 
 
 class RegistryTests(unittest.TestCase):
+    def test_invite_lookup_limiter_expires_and_bounds_source_state(self):
+        now = [1000.0]
+        limiter = InviteLookupLimiter(clock=lambda: now[0])
+        for index in range(5000):
+            self.assertTrue(limiter.allow(f"198.51.100.{index}"))
+        self.assertLessEqual(len(limiter._sources), 4096)
+
+        now[0] += 11.0
+        self.assertTrue(limiter.allow("203.0.113.1"))
+        self.assertEqual(1, len(limiter._sources))
+
+    def test_invite_code_lifecycle_collision_and_case_insensitive_lookup(self):
+        now = [1000.0]
+        candidates = iter(["AB7K2Q", "AB7K2Q", "CD8M3R"])
+        registry = SessionRegistry(45, lambda: now[0], invite_code_factory=lambda: next(candidates))
+        first = registry.create(payload(
+            host_instance_id="logical-host-1", host_instance_token="host-proof-1"))
+        self.assertEqual(INVITE_CODE_LENGTH, len(first.invite_code))
+        self.assertTrue(all(ch in INVITE_CODE_ALPHABET for ch in first.invite_code))
+        self.assertEqual(first.session_id, registry.lookup_code("ab7k2q")["session_id"])
+
+        replayed = registry.create(payload(
+            host_instance_id="logical-host-1", host_instance_token="host-proof-1",
+            player_count=2))
+        self.assertEqual(first.invite_code, replayed.invite_code)
+        self.assertEqual(first.invite_code, registry.heartbeat(
+            first.session_id, first.registration_token, payload(player_count=3)).invite_code)
+
+        second = registry.create(payload())
+        self.assertEqual("CD8M3R", second.invite_code)
+        self.assertNotEqual(first.invite_code, second.invite_code)
+        self.assertTrue(registry.delete(first.session_id, first.registration_token))
+        self.assertIsNone(registry.lookup_code(first.invite_code))
+        self.assertEqual(second.session_id, registry.lookup_code(second.invite_code)["session_id"])
+
+        now[0] += 46
+        self.assertIsNone(registry.lookup_code(second.invite_code))
+        self.assertEqual({}, registry._invite_codes)
+
     def test_proxy_observed_ipv4_requires_loopback_peer(self):
         self.assertEqual(
             "203.0.113.9", observed_client_ip("127.0.0.1", "198.51.100.2, 203.0.113.9"))
@@ -178,6 +219,7 @@ class HttpTests(unittest.TestCase):
     def test_full_http_lifecycle(self):
         status, created = self.request("POST", "/sessions", payload())
         self.assertEqual(201, status)
+        self.assertEqual(INVITE_CODE_LENGTH, len(created["invite_code"]))
         status, listed = self.request(
             "GET", "/sessions?title_id=58410A7A&protocol_version=1&build_id=harmony-0.0.1.4-p1"
         )
@@ -192,6 +234,37 @@ class HttpTests(unittest.TestCase):
             "DELETE", f"/sessions/{created['session_id']}", token=created["registration_token"]
         )
         self.assertEqual(204, status)
+
+    def test_invite_lookup_returns_only_public_session_data(self):
+        status, created = self.request("POST", "/sessions", payload())
+        self.assertEqual(201, status)
+        status, resolved = self.request(
+            "GET", f"/sessions/by-code/{created['invite_code'].lower()}")
+        self.assertEqual(200, status)
+        self.assertEqual(created["session_id"], resolved["session"]["session_id"])
+        for secret in ("registration_token", "host_instance_id", "host_instance_token",
+                       "invite_code"):
+            self.assertNotIn(secret, resolved["session"])
+
+        status, _ = self.request("GET", "/sessions/by-code/BAD")
+        self.assertEqual(404, status)
+        status, _ = self.request("GET", "/sessions/by-code/AAAAAA")
+        self.assertEqual(404, status)
+
+        status, _ = self.request(
+            "DELETE", f"/sessions/{created['session_id']}", token=created["registration_token"])
+        self.assertEqual(204, status)
+        status, _ = self.request("GET", f"/sessions/by-code/{created['invite_code']}")
+        self.assertEqual(404, status)
+
+    def test_invite_lookup_rate_limit_is_per_source_and_bounded(self):
+        _, created = self.request("POST", "/sessions", payload())
+        path = f"/sessions/by-code/{created['invite_code']}"
+        for _ in range(MAX_INVITE_LOOKUPS_PER_WINDOW):
+            status, _ = self.request("GET", path)
+            self.assertEqual(200, status)
+        status, _ = self.request("GET", path)
+        self.assertEqual(429, status)
 
     def test_heartbeat_distinguishes_missing_session_from_bad_token(self):
         status, created = self.request("POST", "/sessions", payload())

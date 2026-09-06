@@ -18,6 +18,7 @@ $recognizedEnvironment = @(
     'HARMONY_LAN_GAMEPLAY_PORT',
     'HARMONY_SESSION_DIRECTORY_URL',
     'HARMONY_SESSION_DIRECTORY_CANDIDATE_TYPE',
+    'HARMONY_SESSION_DIRECTORY_INVITE_CODE',
     'HARMONY_TEST_ARGUMENTS_PATH',
     'HARMONY_TEST_IMPORT_LOG',
     'HARMONY_TEST_FAIL_OPERATION',
@@ -183,6 +184,23 @@ public static class LauncherFixture
     Remove-Item -LiteralPath (Join-Path $artifactRoot 'harmonyrecomp-user.cfg')
     $env:HARMONY_USER_XUID = $null
     $env:HARMONY_USER_NAME = $null
+
+    Set-Content -LiteralPath (Join-Path $artifactRoot 'harmonyrecomp-user.cfg') -Encoding ASCII -Value @(
+        'HARMONY_SESSION_DIRECTORY_INVITE_CODE=BAD'
+    )
+    $invalidInvite = Invoke-Setup $firstLocal
+    Assert-True ($invalidInvite.ExitCode -eq 26) "invalid invite exited $($invalidInvite.ExitCode), expected 26"
+
+    Set-Content -LiteralPath (Join-Path $artifactRoot 'harmonyrecomp-user.cfg') -Encoding ASCII -Value @(
+        'HARMONY_SESSION_DIRECTORY_INVITE_CODE=ab7k2q'
+    )
+    $inviteArguments = Join-Path $testRoot 'invite arguments.txt'
+    $env:HARMONY_TEST_ARGUMENTS_PATH = $inviteArguments
+    $invite = Invoke-Setup $firstLocal
+    Assert-True ($invite.ExitCode -eq 0) "invite launch exited $($invite.ExitCode)"
+    Assert-True ('--session_directory_invite_code=AB7K2Q' -in
+        (Get-GameArguments $inviteArguments)) 'invite code was not forwarded to Harmony'
+    Remove-Item -LiteralPath (Join-Path $artifactRoot 'harmonyrecomp-user.cfg')
 
     $env:HARMONY_TEST_FAIL_OPERATION = '--aggregate'
     $failedImport = Invoke-Setup $firstLocal @('-Setup', '-Source', $sourceRoot)

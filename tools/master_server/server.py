@@ -8,6 +8,7 @@ binds to loopback by default and never carries discovery or gameplay UDP.
 from __future__ import annotations
 
 import argparse
+import collections
 import ipaddress
 import json
 import secrets
@@ -39,6 +40,12 @@ MAX_RENDEZVOUS_ATTEMPTS = 1024
 DEFAULT_ATTEMPT_TTL_SECONDS = 20
 MAX_ATTEMPTS_PER_SESSION = 8
 ATTEMPT_CREATE_MIN_INTERVAL_SECONDS = 0.25
+INVITE_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+INVITE_CODE_LENGTH = 6
+INVITE_CODE_GENERATION_ATTEMPTS = 128
+INVITE_LOOKUP_WINDOW_SECONDS = 10.0
+MAX_INVITE_LOOKUPS_PER_WINDOW = 30
+MAX_INVITE_LOOKUP_SOURCES = 4096
 
 
 class ValidationError(ValueError):
@@ -92,6 +99,20 @@ def _url_token(value: Any, name: str, maximum: int) -> str:
     if any(not (ch.isascii() and (ch.isalnum() or ch in "-_")) for ch in value):
         raise ValidationError(f"{name} contains unsupported characters")
     return value
+
+
+def normalize_invite_code(value: str) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.upper()
+    if (len(normalized) != INVITE_CODE_LENGTH or
+            any(ch not in INVITE_CODE_ALPHABET for ch in normalized)):
+        return None
+    return normalized
+
+
+def generate_invite_code() -> str:
+    return "".join(secrets.choice(INVITE_CODE_ALPHABET) for _ in range(INVITE_CODE_LENGTH))
 
 
 def _validate_candidates(value: Any) -> list[dict[str, Any]]:
@@ -171,6 +192,7 @@ class StoredSession:
     registration_token: str
     host_instance_id: str
     host_instance_token: str
+    invite_code: str
     metadata: dict[str, Any]
     last_heartbeat: float
 
@@ -184,12 +206,14 @@ class StoredSession:
 
 class SessionRegistry:
     def __init__(self, ttl_seconds: int = DEFAULT_TTL_SECONDS, clock=time.time,
-                 on_remove=None):
+                 on_remove=None, invite_code_factory=generate_invite_code):
         self.ttl_seconds = ttl_seconds
         self.clock = clock
         self._lock = threading.Lock()
         self._sessions: dict[str, StoredSession] = {}
         self._host_instances: dict[str, str] = {}
+        self._invite_codes: dict[str, str] = {}
+        self.invite_code_factory = invite_code_factory
         self.on_remove = on_remove
 
     def _remove_locked(self, session_id: str) -> None:
@@ -199,6 +223,8 @@ class SessionRegistry:
         if (value.host_instance_id and
                 self._host_instances.get(value.host_instance_id) == session_id):
             del self._host_instances[value.host_instance_id]
+        if self._invite_codes.get(value.invite_code) == session_id:
+            del self._invite_codes[value.invite_code]
         if self.on_remove:
             self.on_remove(session_id)
 
@@ -227,10 +253,19 @@ class SessionRegistry:
                     current.last_heartbeat = now
                     return current
                 self._host_instances.pop(host_instance_id, None)
+            invite_code = None
+            for _ in range(INVITE_CODE_GENERATION_ATTEMPTS):
+                candidate = normalize_invite_code(self.invite_code_factory())
+                if candidate is not None and candidate not in self._invite_codes:
+                    invite_code = candidate
+                    break
+            if invite_code is None:
+                raise RuntimeError("unable to allocate invite code")
             value = StoredSession(
                 secrets.token_urlsafe(18), secrets.token_urlsafe(32),
-                host_instance_id, host_instance_token, metadata, now)
+                host_instance_id, host_instance_token, invite_code, metadata, now)
             self._sessions[value.session_id] = value
+            self._invite_codes[value.invite_code] = value.session_id
             if host_instance_id:
                 self._host_instances[host_instance_id] = value.session_id
         return value
@@ -274,6 +309,17 @@ class SessionRegistry:
             self._expire_locked(now)
             return session_id in self._sessions
 
+    def lookup_code(self, code: str) -> dict[str, Any] | None:
+        normalized = normalize_invite_code(code)
+        if normalized is None:
+            return None
+        now = self.clock()
+        with self._lock:
+            self._expire_locked(now)
+            session_id = self._invite_codes.get(normalized)
+            value = self._sessions.get(session_id) if session_id is not None else None
+            return value.public() if value is not None else None
+
     def list(self, filters: dict[str, str]) -> list[dict[str, Any]]:
         now = self.clock()
         with self._lock:
@@ -295,6 +341,33 @@ class SessionRegistry:
         return [value.public() for value in values]
 
 
+class InviteLookupLimiter:
+    """Small process-local fixed-window limiter with bounded source state."""
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._sources: collections.OrderedDict[str, tuple[float, int]] = collections.OrderedDict()
+
+    def allow(self, source: str) -> bool:
+        now = self.clock()
+        with self._lock:
+            stale_before = now - INVITE_LOOKUP_WINDOW_SECONDS
+            while self._sources:
+                oldest_source, (started, _) = next(iter(self._sources.items()))
+                if started > stale_before:
+                    break
+                self._sources.pop(oldest_source)
+            started, count = self._sources.pop(source, (now, 0))
+            if started <= stale_before:
+                started, count = now, 0
+            count += 1
+            self._sources[source] = (started, count)
+            while len(self._sources) > MAX_INVITE_LOOKUP_SOURCES:
+                self._sources.popitem(last=False)
+            return count <= MAX_INVITE_LOOKUPS_PER_WINDOW
+
+
 class DirectoryHandler(BaseHTTPRequestHandler):
     server_version = "HarmonyDirectory/1"
 
@@ -305,6 +378,10 @@ class DirectoryHandler(BaseHTTPRequestHandler):
     @property
     def traversal(self) -> RendezvousRegistry:
         return self.server.traversal  # type: ignore[attr-defined]
+
+    @property
+    def invite_limiter(self) -> InviteLookupLimiter:
+        return self.server.invite_limiter  # type: ignore[attr-defined]
 
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"{self.address_string()} - {fmt % args}")
@@ -345,6 +422,19 @@ class DirectoryHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, {"sessions": self.registry.list(query)})
             return
         parts = parsed.path.strip("/").split("/")
+        if len(parts) == 3 and parts[0] == "sessions" and parts[1] == "by-code":
+            code = normalize_invite_code(parts[2])
+            if code is None:
+                self._json(HTTPStatus.NOT_FOUND, {"error": "unknown invite code"})
+            elif not self.invite_limiter.allow(self._observed_client_ip()):
+                self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "invite lookup limit reached"})
+            else:
+                value = self.registry.lookup_code(code)
+                if value is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "unknown invite code"})
+                else:
+                    self._json(HTTPStatus.OK, {"session": value})
+            return
         if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "join-attempts":
             if not self.registry.owns(parts[1], self._bearer()):
                 self._json(HTTPStatus.NOT_FOUND, {"error": "unknown session or token"})
@@ -361,7 +451,9 @@ class DirectoryHandler(BaseHTTPRequestHandler):
                 value = self.registry.create(payload, self._observed_client_ip())
                 self._json(
                     HTTPStatus.CREATED,
-                    {"session_id": value.session_id, "registration_token": value.registration_token},
+                    {"session_id": value.session_id,
+                     "registration_token": value.registration_token,
+                     "invite_code": value.invite_code},
                 )
                 return
             parts = parsed.path.strip("/").split("/")
@@ -421,6 +513,7 @@ class DirectoryServer(ThreadingHTTPServer):
         super().__init__(address, DirectoryHandler)
         self.registry = registry
         self.traversal = traversal or RendezvousRegistry()
+        self.invite_limiter = InviteLookupLimiter()
 
 
 @dataclass
