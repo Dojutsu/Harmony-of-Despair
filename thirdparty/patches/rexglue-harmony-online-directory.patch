@@ -397,10 +397,9 @@ index 0000000..6605431
 +}  // namespace rex::system::xam
 diff --git a/include/rex/system/xam/session.h b/include/rex/system/xam/session.h
 new file mode 100644
-index 0000000..a5931c6
 --- /dev/null
 +++ b/include/rex/system/xam/session.h
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,222 @@
 +#pragma once
 +
 +#include <array>
@@ -408,6 +407,7 @@ index 0000000..a5931c6
 +#include <memory>
 +#include <mutex>
 +#include <optional>
++#include <span>
 +#include <string>
 +#include <unordered_map>
 +#include <unordered_set>
@@ -543,6 +543,10 @@ index 0000000..a5931c6
 +  std::vector<std::shared_ptr<SessionRecord>> List() const;
 +  std::vector<std::shared_ptr<SessionRecord>> ListRemote(uint64_t local_xuid) const;
 +  bool Join(const std::array<uint8_t, 8>& id, SessionMember member);
++  // Guest-title updates target the exact attached record. On clients these
++  // update observations only; local joining still requires a host response.
++  bool JoinBatch(const std::shared_ptr<SessionRecord>& expected,
++                 std::span<const SessionMember> members);
 +  bool Leave(const std::array<uint8_t, 8>& id, uint64_t xuid);
 +  bool Modify(const std::array<uint8_t, 8>& id, uint32_t flags, uint32_t public_slots,
 +              uint32_t private_slots);
@@ -1394,7 +1398,7 @@ index 3f9422d..e0dbf41 100644
      mouse_dy_ = 0.0f;
    }
 diff --git a/src/kernel/xam/apps/xgi_app.cpp b/src/kernel/xam/apps/xgi_app.cpp
-index 2b222da..9b9de30 100644
+index 2b222da..7d76c91 100644
 --- a/src/kernel/xam/apps/xgi_app.cpp
 +++ b/src/kernel/xam/apps/xgi_app.cpp
 @@ -9,8 +9,11 @@
@@ -1724,7 +1728,7 @@ index 2b222da..9b9de30 100644
        uint32_t session_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
        uint32_t user_count = memory::load_and_swap<uint32_t>(buffer + 4);
        uint32_t xuid_array_ptr = memory::load_and_swap<uint32_t>(buffer + 8);
-@@ -135,9 +400,85 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -135,9 +400,96 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        uint32_t private_slots_array = memory::load_and_swap<uint32_t>(buffer + 16);
        bool is_local = xuid_array_ptr == 0;
  
@@ -1742,6 +1746,8 @@ index 2b222da..9b9de30 100644
 +           !ReadableJoinArray(memory_, user_index_array, user_count, 4)))
 +        return X_E_INVALIDARG;
 +      auto session = object->record();
++      std::vector<SessionMember> members;
++      std::unordered_set<uint64_t> identities;
 +      for (uint32_t i = 0; i < user_count; ++i) {
 +        uint64_t xuid = is_local ? kernel_state_->user_profile()->xuid()
 +                                 : memory::load_and_swap<uint64_t>(
@@ -1757,29 +1763,38 @@ index 2b222da..9b9de30 100644
 +            xuid,         is_local ? kernel_state_->user_profile()->name() : std::string{},
 +            user_index,   is_local,
 +            private_slot, false};
-+        if (is_local && session->host_xuid != xuid) {
-+          REXKRNL_INFO("XGISessionJoinLocal: requesting LAN join xuid={:016X} host={:016X}", xuid,
-+                       session->host_xuid);
-+          auto updated = kernel_state_->session_manager()->discovery().Join(*session, member, 500);
-+          if (!updated)
-+            return X_E_FAIL;
-+          for (auto& updated_member : updated->members) {
-+            if (updated_member.xuid == xuid) {
-+              updated_member.local = true;
-+              updated_member.user_index = user_index;
-+              updated_member.name = kernel_state_->user_profile()->name();
-+            }
-+          }
-+          kernel_state_->session_manager()->registry().UpsertDiscovered(std::move(*updated));
-+          session = kernel_state_->session_manager()->registry().Find(session->info.id);
-+          object->set_record(session);
-+          REXKRNL_INFO("XGISessionJoinLocal: joined session with {} members",
-+                       session ? session->members.size() : 0);
-+        } else if (!kernel_state_->session_manager()->registry().Join(session->info.id,
-+                                                                      std::move(member))) {
-+          return X_E_FAIL;
++        if (!xuid || !identities.insert(xuid).second)
++          return X_E_INVALIDARG;
++        members.push_back(std::move(member));
++      }
++      if (!is_local || session->host_xuid == kernel_state_->user_profile()->xuid())
++        return kernel_state_->session_manager()->registry().JoinBatch(session, members)
++                   ? X_E_SUCCESS : X_E_FAIL;
++      // Current local-profile mapping produces one unique local XUID. A
++      // multi-user network transaction requires a protocol extension; never
++      // send a partial sequence of host admissions.
++      if (members.size() != 1)
++        return X_E_INVALIDARG;
++      const auto& member = members.front();
++      const auto xuid = member.xuid;
++      const auto user_index = member.user_index;
++      REXKRNL_INFO("XGISessionJoinLocal: requesting LAN join xuid={:016X} host={:016X}", xuid,
++                   session->host_xuid);
++      auto updated = kernel_state_->session_manager()->discovery().Join(*session, member, 500);
++      if (!updated)
++        return X_E_FAIL;
++      for (auto& updated_member : updated->members) {
++        if (updated_member.xuid == xuid) {
++          updated_member.local = true;
++          updated_member.user_index = user_index;
++          updated_member.name = kernel_state_->user_profile()->name();
 +        }
 +      }
++      kernel_state_->session_manager()->registry().UpsertDiscovered(std::move(*updated));
++      session = kernel_state_->session_manager()->registry().Find(session->info.id);
++      object->set_record(session);
++      REXKRNL_INFO("XGISessionJoinLocal: joined session with {} members",
++                   session ? session->members.size() : 0);
 +      return X_E_SUCCESS;
 +    }
 +    case 0x000B0013: {
@@ -1811,7 +1826,7 @@ index 2b222da..9b9de30 100644
        return X_E_SUCCESS;
      }
      case 0x000B0014: {
-@@ -149,7 +490,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -149,7 +501,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
  
        REXKRNL_DEBUG("XSessionStart({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
  
@@ -1824,7 +1839,7 @@ index 2b222da..9b9de30 100644
      }
      case 0x000B0015: {
        // send high scores?
-@@ -161,7 +506,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -161,7 +517,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
  
        REXKRNL_DEBUG("XSessionEnd({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
  
@@ -1837,7 +1852,7 @@ index 2b222da..9b9de30 100644
      }
      case 0x000B0016: {
        assert_true(!buffer_length || buffer_length == 32);
-@@ -179,7 +528,13 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -179,7 +539,13 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XSessionSearch({}, {}, {}, {}, {}, {:08X}, {:08X}, {}, {:08X})", proc_index,
                      user_index, num_results, num_props, num_ctx, props_ptr, ctx_ptr,
                      results_buffer_size, search_results_ptr);
@@ -1852,7 +1867,7 @@ index 2b222da..9b9de30 100644
      }
      case 0x000B0018: {
        assert_true(!buffer_length || buffer_length == 16);
-@@ -192,7 +547,12 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -192,7 +558,12 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XSessionModify({:08X}, {:08X}, {:08X}, {:08X})", obj_ptr, flags,
                      maxPublicSlots, maxPrivateSlots);
  
@@ -1866,7 +1881,7 @@ index 2b222da..9b9de30 100644
      }
      case 0x000B001C: {
        assert_true(!buffer_length || buffer_length == 36);
-@@ -213,8 +573,33 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -213,8 +584,33 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XSessionSearchEx({}, {}, {}, {}, {}, {:08X}, {:08X}, {}, {:08X}, {})",
                      proc_index, user_index, num_results, num_props, num_ctx, props_ptr, ctx_ptr,
                      results_buffer_size, search_results_ptr, num_users);
@@ -1901,7 +1916,7 @@ index 2b222da..9b9de30 100644
      }
      case 0x000B001D: {
        assert_true(!buffer_length || buffer_length == 24);
-@@ -229,6 +614,44 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -229,6 +625,44 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XSessionGetDetails({:08X}, {}, {:08X}, {}, {}, {})", obj_ptr,
                      details_buffer_size, session_details_ptr, reserved1, reserved2, reserved3);
  
@@ -1946,7 +1961,7 @@ index 2b222da..9b9de30 100644
        return X_E_SUCCESS;
      }
      case 0x000B001E: {
-@@ -289,7 +712,15 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -289,7 +723,15 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                      user_index, num_session_ids, session_ids_ptr, results_buffer_size,
                      search_results_ptr, reserved1, reserved2, reserved3);
  
@@ -1963,7 +1978,7 @@ index 2b222da..9b9de30 100644
      }
      case 0x000B001F: {
        assert_true(!buffer_length || buffer_length == 24);
-@@ -330,6 +761,10 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -330,6 +772,10 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XUserReadStats({}, {}, {:08X}, {}, {:08X}, {}, {:08X})", title_id, xuids_count,
                      xuids_ptr, specs_count, specs_ptr, results_size, results_ptr);
  
@@ -4010,10 +4025,9 @@ index 0000000..3a37fdb
 +}  // namespace rex::system::xam
 diff --git a/src/system/xam/session.cpp b/src/system/xam/session.cpp
 new file mode 100644
-index 0000000..86bc148
 --- /dev/null
 +++ b/src/system/xam/session.cpp
-@@ -0,0 +1,1158 @@
+@@ -0,0 +1,1220 @@
 +#include <rex/system/xam/session.h>
 +
 +#include <algorithm>
@@ -4098,6 +4112,58 @@ index 0000000..86bc148
 +constexpr uint8_t kJoin = 3;
 +constexpr uint8_t kLeave = 4;
 +constexpr size_t kMaxWireMembers = 8;
++
++// These are caller provenance, not a client-controlled eligibility flag.
++// XGI supplies an already allocated pool; discovery can request public only.
++enum class MemberUpdateSource { kTitleAllocatedPool, kDiscoveryPublic };
++
++bool ValidMemberAccounting(std::span<const SessionMember> members, uint32_t public_slots,
++                           uint32_t private_slots) {
++  uint64_t public_count = 0, private_count = 0;
++  std::unordered_set<uint64_t> identities;
++  for (const auto& member : members) {
++    if (!member.xuid || !identities.insert(member.xuid).second)
++      return false;
++    member.private_slot ? ++private_count : ++public_count;
++  }
++  return public_count <= public_slots && private_count <= private_slots;
++}
++
++// The only join mutation for hosted records. No callbacks, registry access, or
++// network I/O occur under this lock. Commit the complete candidate or nothing.
++bool ApplyMemberBatch(SessionRecord& session, std::span<const SessionMember> members,
++                      MemberUpdateSource source) {
++  std::lock_guard lock(*session.mutex);
++  if (session.state == SessionState::kDeleted || members.empty() ||
++      !ValidMemberAccounting(session.members, session.max_public_slots, session.max_private_slots))
++    return false;
++  auto candidate = session.members;
++  std::unordered_set<uint64_t> batch_ids;
++  for (auto member : members) {
++    if (!member.xuid || !batch_ids.insert(member.xuid).second)
++      return false;
++    auto it = std::find_if(candidate.begin(), candidate.end(),
++                           [&](const auto& current) { return current.xuid == member.xuid; });
++    if (source == MemberUpdateSource::kDiscoveryPublic) {
++      // A wire request cannot impersonate the host, reclassify an existing
++      // member, or change its authoritative metadata on a retry.
++      if (member.xuid == session.host_xuid)
++        return false;
++      if (it != candidate.end())
++        continue;
++      member.private_slot = false;
++      member.local = false;
++    }
++    if (it == candidate.end())
++      candidate.push_back(std::move(member));
++    else
++      *it = std::move(member);
++  }
++  if (!ValidMemberAccounting(candidate, session.max_public_slots, session.max_private_slots))
++    return false;
++  session.members.swap(candidate);
++  return true;
++}
 +
 +bool EnsureSocketRuntime() {
 +#if REX_PLATFORM_WIN32
@@ -4228,9 +4294,13 @@ index 0000000..86bc148
 +  session.flags = ntohl(packet.flags);
 +  session.max_public_slots = ntohl(packet.public_slots);
 +  session.max_private_slots = ntohl(packet.private_slots);
-+  uint32_t count = std::min<uint32_t>(ntohl(packet.member_count), kMaxWireMembers);
++  const uint32_t count = ntohl(packet.member_count);
++  if (count > kMaxWireMembers || !session.host_xuid)
++    return std::nullopt;
 +  for (uint32_t i = 0; i < count; ++i) {
 +    uint32_t flags = ntohl(packet.members[i].flags);
++    if (flags & ~7u)
++      return std::nullopt;
 +    session.members.push_back(
 +        {Swap64(packet.members[i].xuid),
 +         std::string(packet.members[i].name,
@@ -4239,6 +4309,8 @@ index 0000000..86bc148
 +  }
 +  if (session.members.empty())
 +    session.members.push_back({session.host_xuid, session.host_name, 0, false, false, false});
++  if (!ValidMemberAccounting(session.members, session.max_public_slots, session.max_private_slots))
++    return std::nullopt;
 +  return session;
 +}
 +
@@ -4309,7 +4381,14 @@ index 0000000..86bc148
 +        result->info.host_address.ipv4 = session.info.host_address.ipv4;
 +        result->discovery_address = session.discovery_address;
 +      }
-+      if (result && result->info.id == session.info.id) {
++      if (result && (result->info.id != session.info.id || result->info.key != session.info.key ||
++                     result->host_xuid != session.host_xuid))
++        result.reset();
++      if (result && member && type == kJoin &&
++          std::none_of(result->members.begin(), result->members.end(),
++                       [&](const auto& value) { return value.xuid == member->xuid; }))
++        result.reset();
++      if (result) {
 +        REXSYS_INFO("LAN discovery: {} response from {:08X}:{} members={}",
 +                    type == kJoin ? "join" : "leave", source.sin_addr.s_addr,
 +                    ntohs(source.sin_port), result->members.size());
@@ -4453,22 +4532,20 @@ index 0000000..86bc148
 +  return result;
 +}
 +bool SessionRegistry::Join(const std::array<uint8_t, 8>& id, SessionMember member) {
-+  auto session = Find(id);
-+  if (!session)
++  return JoinBatch(Find(id), std::span<const SessionMember>(&member, 1));
++}
++bool SessionRegistry::JoinBatch(const std::shared_ptr<SessionRecord>& expected,
++                                 std::span<const SessionMember> members) {
++  if (!expected)
 +    return false;
-+  std::lock_guard lock(*session->mutex);
-+  if (session->state == SessionState::kDeleted)
++  // Registry -> record is the existing deletion lock order. Pin the mapping
++  // through commit so a replaced client observation or deleted record cannot
++  // receive an update through a stale XSession pointer.
++  std::lock_guard registry_lock(mutex_);
++  auto it = sessions_.find(IdKey(expected->info.id));
++  if (it == sessions_.end() || it->second != expected)
 +    return false;
-+  auto it = std::find_if(session->members.begin(), session->members.end(),
-+                         [&](const auto& m) { return m.xuid == member.xuid; });
-+  if (it != session->members.end()) {
-+    *it = std::move(member);
-+    return true;
-+  }
-+  if (member.private_slot ? !session->OpenPrivateSlots() : !session->OpenPublicSlots())
-+    return false;
-+  session->members.push_back(std::move(member));
-+  return true;
++  return ApplyMemberBatch(*expected, members, MemberUpdateSource::kTitleAllocatedPool);
 +}
 +bool SessionRegistry::Leave(const std::array<uint8_t, 8>& id, uint64_t xuid) {
 +  auto session = Find(id);
@@ -4621,30 +4698,29 @@ index 0000000..86bc148
 +        REXSYS_INFO("LAN discovery: received search query from {:08X}:{}", source.sin_addr.s_addr,
 +                    ntohs(source.sin_port));
 +      }
-+      if (valid && query.type == kJoin && ntohl(query.member_count)) {
++      if (valid && (query.type == kJoin || query.type == kLeave)) {
 +        std::lock_guard lock(*advertised->mutex);
 +        const auto& wire = query.members[0];
-+        uint32_t flags = ntohl(wire.flags);
-+        SessionMember member{Swap64(wire.xuid),
-+                             std::string(wire.name, strnlen(wire.name, sizeof(wire.name))),
-+                             0,
-+                             false,
-+                             (flags & 2) != 0,
-+                             (flags & 4) != 0};
-+        auto it = std::find_if(advertised->members.begin(), advertised->members.end(),
-+                               [&](const auto& value) { return value.xuid == member.xuid; });
-+        if (it == advertised->members.end()) {
-+          REXSYS_INFO("LAN discovery: host accepted join xuid={:016X} name='{}' from {:08X}:{}",
-+                      member.xuid, member.name, source.sin_addr.s_addr, ntohs(source.sin_port));
-+          advertised->members.push_back(std::move(member));
-+        } else {
-+          REXSYS_INFO("LAN discovery: host reused member xuid={:016X} from {:08X}:{}", member.xuid,
-+                      source.sin_addr.s_addr, ntohs(source.sin_port));
++        const uint32_t flags = ntohl(wire.flags);
++        const uint64_t xuid = Swap64(wire.xuid);
++        // The packet has no build-ID field or authenticated player identity.
++        // Match the exact advertised incarnation; this is routing validation,
++        // not an admission credential. Never trust the wire private bit.
++        valid = advertised->state != SessionState::kDeleted &&
++                ntohl(query.member_count) == 1 && !query.reserved && !query.reserved2 &&
++                !(flags & ~6u) && xuid && xuid != advertised->host_xuid &&
++                Swap64(query.host_xuid) == advertised->host_xuid &&
++                std::memcmp(query.session_id, advertised->info.id.data(), 8) == 0 &&
++                std::memcmp(query.session_key, advertised->info.key.data(), 16) == 0;
++        if (valid && query.type == kJoin) {
++          SessionMember member{xuid,
++                               std::string(wire.name, strnlen(wire.name, sizeof(wire.name))),
++                               0, false, false, (flags & 4) != 0};
++          valid = ApplyMemberBatch(*advertised, std::span<const SessionMember>(&member, 1),
++                                   MemberUpdateSource::kDiscoveryPublic);
++        } else if (valid) {
++          std::erase_if(advertised->members, [&](const auto& value) { return value.xuid == xuid; });
 +        }
-+      } else if (valid && query.type == kLeave && ntohl(query.member_count)) {
-+        std::lock_guard lock(*advertised->mutex);
-+        uint64_t xuid = Swap64(query.members[0].xuid);
-+        std::erase_if(advertised->members, [&](const auto& value) { return value.xuid == xuid; });
 +      }
 +      if (valid && (query.type == kQuery || query.type == kJoin || query.type == kLeave)) {
 +        auto response = Encode(*advertised, title_id);
@@ -6365,7 +6441,7 @@ index 2d13ac8..63b7cf7 100644
  
    return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
 diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
-index 7bd264b..a8c74ce 100644
+index 7bd264b..8783254 100644
 --- a/tests/unit/CMakeLists.txt
 +++ b/tests/unit/CMakeLists.txt
 @@ -4,6 +4,7 @@ add_executable(unit_tests
@@ -6376,11 +6452,12 @@ index 7bd264b..a8c74ce 100644
      core/cvar_test.cpp
      core/fiber_test.cpp
      core/filesystem_test.cpp
-@@ -15,10 +16,13 @@ add_executable(unit_tests
+@@ -15,10 +16,14 @@ add_executable(unit_tests
      system/guest_path_test.cpp
      system/achievement_manager_test.cpp
      system/function_dispatcher_test.cpp
 +    system/session_test.cpp
++    system/session_admission_test.cpp
 +    system/socket_test.cpp
      input/input_assignment_test.cpp
      codegen/codegen_writer_test.cpp
@@ -6390,7 +6467,7 @@ index 7bd264b..a8c74ce 100644
  )
  
  target_sources(unit_tests PRIVATE
-@@ -35,8 +39,12 @@ target_include_directories(unit_tests PRIVATE
+@@ -35,8 +40,12 @@ target_include_directories(unit_tests PRIVATE
  target_link_libraries(unit_tests PRIVATE
      rexcodegen
      rexruntime
@@ -6403,7 +6480,7 @@ index 7bd264b..a8c74ce 100644
  
  # ReXApp is shipped as source for recomp projects, rather than compiled into
  # rexui. Keep its SDK-consumer compilation path covered by the test build.
-@@ -69,9 +77,21 @@ endif()
+@@ -69,9 +78,21 @@ endif()
  
  # Discover tests
  include(Catch)
@@ -8107,7 +8184,7 @@ diff --git a/tests/unit/kernel/xgi_slot_array_test.cpp b/tests/unit/kernel/xgi_s
 new file mode 100644
 --- /dev/null
 +++ b/tests/unit/kernel/xgi_slot_array_test.cpp
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,130 @@
 +// Exercise the real XGI join dispatch against allocated guest memory.
 +#include <rex/runtime.h>
 +#include <rex/logging.h>
@@ -8171,13 +8248,26 @@ new file mode 100644
 +  reset();
 +  put(112, 0x01020304); put(116, 0x10203040);
 +  put(96, 0); put(100, 1);
-+  Check(join(2, 0, guest+112, guest+96) == X_E_SUCCESS, "local join");
-+  // Existing local-profile identity behavior is deliberately unchanged: both
-+  // updates target the same local XUID, with the second index/flag winning.
-+  Check(object->record()->members.size() == 1, "local identity unchanged");
-+  const auto& local = object->record()->members[0];
-+  Check(local.xuid == host && local.local && local.user_index == 0x10203040 &&
-+        local.private_slot, "BE32 local index stride four");
++  Check(join(2, 0, guest+112, guest+96) == X_E_INVALIDARG, "duplicate local XUID batch rejected");
++  Check(object->record()->members.size() == 1 && !object->record()->members[0].private_slot,
++        "duplicate local batch has no partial mutation");
++  for (uint32_t i = 0; i < 2; ++i) {
++    Check(join(1, 0, guest+112+4*i, guest+96+4*i) == X_E_SUCCESS, "local single join");
++    const auto& local = object->record()->members[0];
++    Check(local.xuid == host && local.local &&
++          local.user_index == (i ? 0x10203040u : 0x01020304u) && local.private_slot == (i != 0),
++          "BE32 local index and private flag");
++  }
++  reset();
++  Check(kernel->session_manager()->registry().Modify(object->record()->info.id, 1, 2, 2),
++        "one available public slot");
++  put(96, 0); put(100, 0);
++  Check(join(2, guest+64, 0, guest+96) == X_E_FAIL, "whole remote batch exceeds capacity");
++  Check(object->record()->members.size() == 1, "XGI batch rolls back first member");
++  memory::store_and_swap<uint64_t>(mem->TranslateVirtual(guest + 72), ids[0]);
++  Check(join(2, guest+64, 0, guest+96) == X_E_INVALIDARG, "duplicate remote batch");
++  Check(object->record()->members.size() == 1, "duplicate remote has no partial mutation");
++  memory::store_and_swap<uint64_t>(mem->TranslateVirtual(guest + 72), ids[1]);
 +
 +  reset();
 +  auto reject = [&](uint32_t count, uint32_t xuids, uint32_t users, uint32_t flags) {
@@ -8225,3 +8315,348 @@ new file mode 100644
 +  runtime.Shutdown();
 +  return result;
 +}
+diff --git a/tests/unit/system/session_admission_test.cpp b/tests/unit/system/session_admission_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/system/session_admission_test.cpp
+@@ -0,0 +1,340 @@
++#include <catch2/catch_test_macros.hpp>
++#include <rex/system/xam/session.h>
++#include <array>
++#include <barrier>
++#include <thread>
++
++namespace rex::system::xam {
++TEST_CASE("member reclassification cannot overfill a destination pool", "[session][admission]") {
++  SessionRegistry registry;
++  auto record = registry.Create(1, "Host", {}, 1, 1, 1);
++  REQUIRE(registry.Join(record->info.id, {2, "Private", 0, false, true, false}));
++  CHECK_FALSE(registry.Join(record->info.id, {2, "Changed", 0, false, false, true}));
++  CHECK(record->members.size() == 2);
++  CHECK(record->members[1].private_slot);
++  CHECK(record->members[1].name == "Private");
++  CHECK_FALSE(record->members[1].ready);
++  CHECK(record->FilledPublicSlots() == 1);
++  CHECK(record->FilledPrivateSlots() == 1);
++  CHECK(record->OpenPublicSlots() == 0);
++  CHECK(record->OpenPrivateSlots() == 0);
++}
++}  // namespace rex::system::xam
++
++namespace rex::system::xam {
++namespace {
++SessionMember Member(uint64_t id, bool private_slot = false) {
++  return {id, "Player" + std::to_string(id), 0, false, private_slot, false};
++}
++void Accounting(const SessionRecord& r, uint32_t pub, uint32_t priv) {
++  CHECK(r.FilledPublicSlots() == pub);
++  CHECK(r.FilledPrivateSlots() == priv);
++  CHECK(r.members.size() == pub + priv);
++  REQUIRE(pub <= r.max_public_slots);
++  REQUIRE(priv <= r.max_private_slots);
++  CHECK(r.OpenPublicSlots() == r.max_public_slots - pub);
++  CHECK(r.OpenPrivateSlots() == r.max_private_slots - priv);
++  std::unordered_set<uint64_t> ids;
++  for (const auto& member : r.members) CHECK(ids.insert(member.xuid).second);
++}
++std::string Members(const SessionRecord& r) {
++  std::string result;
++  for (const auto& m : r.members)
++    result += std::to_string(m.xuid) + ":" + m.name + ":" + std::to_string(m.user_index) +
++              ":" + std::to_string(m.local) + std::to_string(m.private_slot) +
++              std::to_string(m.ready) + ";";
++  return result;
++}
++}
++TEST_CASE("host public capacity includes host and retries consume no slot", "[session][admission]") {
++  SessionRegistry registry;
++  auto r = registry.Create(1, "Host", {}, 1, 4, 2);
++  Accounting(*r, 1, 0);
++  for (uint64_t id = 2; id <= 4; ++id) {
++    REQUIRE(registry.Join(r->info.id, Member(id)));
++    Accounting(*r, uint32_t(id), 0);
++  }
++  const auto before = Members(*r);
++  CHECK_FALSE(registry.Join(r->info.id, Member(5)));
++  CHECK(Members(*r) == before);
++  REQUIRE(registry.Join(r->info.id, Member(4)));
++  CHECK(Members(*r) == before);
++  Accounting(*r, 4, 0);
++  REQUIRE(registry.Leave(r->info.id, 3));
++  Accounting(*r, 3, 0);
++}
++TEST_CASE("title reclassification validates both pools transactionally", "[session][admission]") {
++  SessionRegistry registry;
++  auto r = registry.Create(1, "Host", {}, 1, 2, 1);
++  REQUIRE(registry.Join(r->info.id, Member(2)));
++  REQUIRE(registry.Join(r->info.id, Member(3, true)));
++  Accounting(*r, 2, 1);
++  const auto before = Members(*r);
++  CHECK_FALSE(registry.Join(r->info.id, Member(2, true)));
++  CHECK(Members(*r) == before);
++  CHECK_FALSE(registry.Join(r->info.id, Member(3)));
++  CHECK(Members(*r) == before);
++  Accounting(*r, 2, 1);
++  REQUIRE(registry.Leave(r->info.id, 3));
++  REQUIRE(registry.Join(r->info.id, Member(2, true)));
++  Accounting(*r, 1, 1);
++  REQUIRE(registry.Join(r->info.id, Member(2)));
++  Accounting(*r, 2, 0);
++}
++TEST_CASE("batch joins commit all members or leave all metadata unchanged", "[session][admission]") {
++  SessionRegistry registry;
++  auto r = registry.Create(1, "Host", {}, 1, 3, 2);
++  std::array batch{Member(2), Member(3)};
++  REQUIRE(registry.JoinBatch(r, batch));
++  Accounting(*r, 3, 0);
++  auto before = Members(*r);
++  batch = {Member(2, true), Member(4)}; // Would fit after trusted reclassification.
++  REQUIRE(registry.JoinBatch(r, batch));
++  Accounting(*r, 3, 1);
++  before = Members(*r);
++  batch = {Member(5, true), Member(6)}; // First fits; second does not.
++  CHECK_FALSE(registry.JoinBatch(r, batch));
++  CHECK(Members(*r) == before);
++  batch = {Member(2), Member(2, true)};
++  CHECK_FALSE(registry.JoinBatch(r, batch));
++  CHECK(Members(*r) == before);
++  batch = {Member(5, true), Member(0)};
++  CHECK_FALSE(registry.JoinBatch(r, batch));
++  CHECK(Members(*r) == before);
++  Accounting(*r, 3, 1);
++}
++TEST_CASE("last public slot has one concurrent winner", "[session][admission][network]") {
++  for (unsigned attempt = 0; attempt < 32; ++attempt) {
++    SessionRegistry registry;
++    auto r = registry.Create(1, "Host", {}, 1, 2, 2);
++    std::barrier start(3);
++    std::array<bool, 2> success{};
++    std::thread a([&] { start.arrive_and_wait(); success[0] = registry.Join(r->info.id, Member(2)); });
++    std::thread b([&] { start.arrive_and_wait(); success[1] = registry.Join(r->info.id, Member(3)); });
++    start.arrive_and_wait(); a.join(); b.join();
++    CHECK(unsigned(success[0]) + unsigned(success[1]) == 1);
++    Accounting(*r, 2, 0);
++  }
++}
++TEST_CASE("stale observations and deleted records cannot receive batch updates", "[session][admission]") {
++  SessionRegistry registry;
++  SessionRecord observed;
++  observed.info.id[0] = 7;
++  observed.host_xuid = 1;
++  observed.max_public_slots = 4;
++  observed.members = {Member(1)};
++  registry.UpsertDiscovered(observed);
++  auto stale = registry.Find(observed.info.id);
++  registry.UpsertDiscovered(observed);
++  std::array batch{Member(2)};
++  CHECK_FALSE(registry.JoinBatch(stale, batch));
++  CHECK(stale->members.size() == 1);
++  auto current = registry.Find(observed.info.id);
++  CHECK(current->members.size() == 1);
++  REQUIRE(registry.Delete(current->info.id));
++  CHECK_FALSE(registry.JoinBatch(current, batch));
++  CHECK(current->members.size() == 1);
++}
++TEST_CASE("preexisting invalid host accounting is not made worse", "[session][admission]") {
++  SessionRegistry registry;
++  auto r = registry.Create(1, "Host", {}, 1, 0, 2);
++  const auto before = Members(*r);
++  CHECK_FALSE(registry.Join(r->info.id, Member(2, true)));
++  CHECK(Members(*r) == before);
++}
++} // namespace rex::system::xam
++
++#include <rex/platform.h>
++#if REX_PLATFORM_WIN32
++#include <WinSock2.h>
++#else
++#include <arpa/inet.h>
++#include <sys/socket.h>
++#include <unistd.h>
++#endif
++#include <cstring>
++
++namespace rex::system::xam {
++namespace {
++using Packet = std::array<uint8_t, 308>; // Version-1 fixed wire layout; 84 + 8*28.
++#if REX_PLATFORM_WIN32
++using TestSocket = SOCKET;
++constexpr auto bad_socket = INVALID_SOCKET;
++#else
++using TestSocket = int;
++constexpr auto bad_socket = -1;
++#endif
++struct Socket {
++  TestSocket fd = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++  ~Socket() {
++#if REX_PLATFORM_WIN32
++    if (fd != bad_socket) closesocket(fd);
++#else
++    if (fd != bad_socket) close(fd);
++#endif
++  }
++};
++void Put(Packet& p, size_t offset, uint64_t value, size_t width = 4) {
++  for (size_t i = 0; i < width; ++i) p[offset+i] = uint8_t(value >> (8*(width-i-1)));
++}
++sockaddr_in Address(uint16_t port) {
++  sockaddr_in addr{};
++  addr.sin_family = AF_INET; addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++  addr.sin_port = htons(port);
++  return addr;
++}
++std::optional<Packet> Receive(TestSocket fd, sockaddr_in& source, uint32_t wait_ms) {
++  fd_set fds; FD_ZERO(&fds); FD_SET(fd, &fds);
++  timeval timeout{long(wait_ms/1000), long(wait_ms%1000)*1000};
++  if (select(int(fd)+1, &fds, nullptr, nullptr, &timeout) <= 0) return std::nullopt;
++#if REX_PLATFORM_WIN32
++  int length = sizeof(source);
++#else
++  socklen_t length = sizeof(source);
++#endif
++  Packet p{};
++  if (recvfrom(fd, reinterpret_cast<char*>(p.data()), int(p.size()), 0,
++               reinterpret_cast<sockaddr*>(&source), &length) != int(p.size()))
++    return std::nullopt;
++  return p;
++}
++std::optional<Packet> Transfer(TestSocket fd, uint16_t port, const Packet& p) {
++  auto target = Address(port);
++  if (sendto(fd, reinterpret_cast<const char*>(p.data()), int(p.size()), 0,
++             reinterpret_cast<sockaddr*>(&target), sizeof(target)) != int(p.size()))
++    return std::nullopt;
++  sockaddr_in from{};
++  return Receive(fd, from, 150);
++}
++struct LocalDiscoveryConfig {
++  std::string bind = REXCVAR_GET(lan_bind_address);
++  std::string direct = REXCVAR_GET(direct_connect_address);
++  std::string directory = REXCVAR_GET(session_directory_url);
++  LocalDiscoveryConfig() {
++#if REX_PLATFORM_WIN32
++    WSADATA data{}; REQUIRE(WSAStartup(MAKEWORD(2,2), &data) == 0);
++#endif
++    REXCVAR_SET(lan_bind_address, "127.0.0.1");
++    REXCVAR_SET(direct_connect_address, "127.0.0.1");
++    REXCVAR_SET(session_directory_url, "");
++  }
++  ~LocalDiscoveryConfig() {
++    REXCVAR_SET(lan_bind_address, bind);
++    REXCVAR_SET(direct_connect_address, direct);
++    REXCVAR_SET(session_directory_url, directory);
++#if REX_PLATFORM_WIN32
++    WSACleanup();
++#endif
++  }
++};
++Packet Query(uint32_t title) {
++  Packet p{}; Put(p, 0, 0x5245584c); Put(p, 4, 1, 2); p[6] = 1; Put(p, 8, title);
++  return p;
++}
++Packet JoinPacket(Packet base, uint64_t xuid, bool priv = false) {
++  base[6] = 3; Put(base, 64, 1);
++  std::fill(base.begin()+84, base.end(), 0);
++  Put(base, 84, xuid, 8); Put(base, 92, priv ? 2 : 0);
++  std::memcpy(base.data()+96, "WirePlayer", 10);
++  return base;
++}
++}
++TEST_CASE("discovery admission validates identity and ignores private wire claims",
++          "[session][admission][network][lan]") {
++  LocalDiscoveryConfig config;
++  constexpr uint32_t title = 0x58410A7A;
++  constexpr uint16_t port = 39057;
++  SessionRegistry registry;
++  auto r = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 3074}, 1, 4, 2);
++  LanDiscoveryService host(title, port);
++  REQUIRE(host.Advertise(r));
++  Socket socket;
++  REQUIRE(socket.fd != bad_socket);
++  auto base = Transfer(socket.fd, port, Query(title)); REQUIRE(base);
++  auto assert_count = [&](uint32_t pub, uint32_t priv) {
++    std::lock_guard lock(*r->mutex); Accounting(*r, pub, priv);
++  };
++  auto wrong = JoinPacket(*base, 2); wrong[12] ^= 1;
++  CHECK_FALSE(Transfer(socket.fd, port, wrong)); assert_count(1,0);
++  wrong = JoinPacket(*base, 2); wrong[20] ^= 1;
++  CHECK_FALSE(Transfer(socket.fd, port, wrong)); assert_count(1,0);
++  wrong = JoinPacket(*base, 2); Put(wrong,8,title+1);
++  CHECK_FALSE(Transfer(socket.fd, port, wrong)); assert_count(1,0);
++  wrong = JoinPacket(*base, 2); Put(wrong,4,2,2);
++  CHECK_FALSE(Transfer(socket.fd, port, wrong)); assert_count(1,0);
++  wrong = JoinPacket(*base, 2); Put(wrong,36,9,8);
++  CHECK_FALSE(Transfer(socket.fd, port, wrong)); assert_count(1,0);
++  for (auto id : {uint64_t{0}, uint64_t{1}}) {
++    CHECK_FALSE(Transfer(socket.fd, port, JoinPacket(*base, id))); assert_count(1,0);
++  }
++  wrong = JoinPacket(*base, 2); Put(wrong,64,2);
++  CHECK_FALSE(Transfer(socket.fd, port, wrong)); assert_count(1,0);
++  wrong = JoinPacket(*base, 2); Put(wrong,92,8);
++  CHECK_FALSE(Transfer(socket.fd, port, wrong)); assert_count(1,0);
++  REQUIRE(Transfer(socket.fd, port, JoinPacket(*base, 2, true))); assert_count(2,0);
++  REQUIRE(Transfer(socket.fd, port, JoinPacket(*base, 3))); assert_count(3,0);
++  REQUIRE(Transfer(socket.fd, port, JoinPacket(*base, 4))); assert_count(4,0);
++  CHECK_FALSE(Transfer(socket.fd, port, JoinPacket(*base, 5, true))); assert_count(4,0);
++  std::string before;
++  { std::lock_guard lock(*r->mutex); before = Members(*r); }
++  auto retry = JoinPacket(*base, 2, true); Put(retry,92,6); retry[96]='X';
++  REQUIRE(Transfer(socket.fd, port, retry)); assert_count(4,0);
++  { std::lock_guard lock(*r->mutex); CHECK(Members(*r) == before); }
++  auto leave = JoinPacket(*base, 3); leave[6]=4;
++  REQUIRE(Transfer(socket.fd, port, leave)); assert_count(3,0);
++  REQUIRE(registry.Join(r->info.id, Member(6, true))); assert_count(3,1);
++  REQUIRE(Transfer(socket.fd, port, JoinPacket(*base, 6))); assert_count(3,1);
++  leave = JoinPacket(*base, 6); leave[6]=4;
++  REQUIRE(Transfer(socket.fd, port, leave)); assert_count(3,0);
++  // Registry and discovery compete under the same record lock.
++  std::barrier start(2); bool title_joined = false;
++  std::thread contender([&] { start.arrive_and_wait(); title_joined=registry.Join(r->info.id,Member(7)); });
++  start.arrive_and_wait();
++  bool wire_joined=Transfer(socket.fd, port, JoinPacket(*base, 8)).has_value();
++  contender.join(); CHECK(unsigned(title_joined)+unsigned(wire_joined)==1); assert_count(4,0);
++  REQUIRE(registry.Delete(r->info.id));
++  CHECK_FALSE(Transfer(socket.fd, port, JoinPacket(*base, 9)));
++}
++TEST_CASE("advertisement decode rejects duplicate and impossible rosters",
++          "[session][admission][network][lan]") {
++  LocalDiscoveryConfig config;
++  constexpr uint32_t title = 0x58410A7A;
++  SessionRegistry registry;
++  auto session = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 3074}, 1, 4, 2);
++  Packet valid=Query(title); valid[6]=2;
++  std::memcpy(valid.data()+12, session->info.id.data(), 8);
++  std::memcpy(valid.data()+20, session->info.key.data(), 16);
++  Put(valid,36,1,8); Put(valid,48,3074,2); Put(valid,56,4); Put(valid,60,2); Put(valid,64,2);
++  Put(valid,84,1,8); Put(valid,112,2,8);
++  for (int variant=0; variant<8; ++variant) {
++    INFO("variant=" << variant);
++    Packet response=valid;
++    if(variant==1) Put(response,112,1,8); // Duplicate XUID.
++    if(variant==2) Put(response,64,9); // Wire capacity exceeded, not clamped.
++    if(variant==3) Put(response,56,1); // Two public members in one public slot.
++    if(variant==4) { Put(response,120,2); Put(response,60,0); } // Private overflow.
++    if(variant==5) Put(response,112,0,8);
++    if(variant==6) response[12]^=1; // Exact-session response check.
++    if(variant==7) Put(response,112,3,8); // Does not acknowledge requested member.
++    Socket server; REQUIRE(server.fd!=bad_socket);
++    auto addr=Address(0); REQUIRE(bind(server.fd,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))==0);
++#if REX_PLATFORM_WIN32
++    int length=sizeof(addr);
++#else
++    socklen_t length=sizeof(addr);
++#endif
++    REQUIRE(getsockname(server.fd,reinterpret_cast<sockaddr*>(&addr),&length)==0);
++    SessionRecord target=*session;
++    target.discovery_address={htonl(INADDR_LOOPBACK),ntohs(addr.sin_port)};
++    std::jthread reply([&] {
++      sockaddr_in source{};
++      if(Receive(server.fd,source,1000))
++        sendto(server.fd,reinterpret_cast<const char*>(response.data()),int(response.size()),0,
++               reinterpret_cast<sockaddr*>(&source),sizeof(source));
++    });
++    LanDiscoveryService client(title, 39058);
++    auto result=client.Join(target,Member(2),100);
++    CHECK(result.has_value() == (variant==0));
++  }
++}
++} // namespace rex::system::xam
