@@ -1935,16 +1935,17 @@ index 2b222da..03a89ff 100644
      }
      case 0x000B0025: {
 diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
-index 58e36a4..2d3db83 100644
+index 58e36a4..62a394a 100644
 --- a/src/kernel/xam/xam_net.cpp
 +++ b/src/kernel/xam/xam_net.cpp
-@@ -12,7 +12,13 @@
+@@ -12,7 +12,14 @@
  // Disable warnings about unused parameters for kernel functions
  #pragma GCC diagnostic ignored "-Wunused-parameter"
  
 +#include <algorithm>
 +#include <atomic>
 +#include <chrono>
++#include <condition_variable>
  #include <cstring>
 +#include <mutex>
 +#include <thread>
@@ -1952,7 +1953,7 @@ index 58e36a4..2d3db83 100644
  
  #if REX_PLATFORM_MAC
  #include <sys/select.h>
-@@ -29,6 +35,7 @@
+@@ -29,6 +36,7 @@
  #include <rex/string.h>
  #include <rex/system/kernel_state.h>
  #include <rex/system/xevent.h>
@@ -1960,7 +1961,7 @@ index 58e36a4..2d3db83 100644
  #include <rex/system/xsocket.h>
  #include <rex/system/xthread.h>
  #include <rex/system/xtypes.h>
-@@ -61,14 +68,14 @@ enum {
+@@ -61,14 +69,14 @@ enum {
  };
  
  // https://github.com/pmrowla/hl2sdk-csgo/blob/master/common/xbox/xboxstubs.h
@@ -1977,7 +1978,7 @@ index 58e36a4..2d3db83 100644
  
  typedef struct {
    rex::be<int32_t> status;
-@@ -181,6 +188,189 @@ struct XNetStartupParams {
+@@ -181,6 +189,188 @@ struct XNetStartupParams {
  };
  
  XNetStartupParams xnet_startup_params = {};
@@ -2000,14 +2001,15 @@ index 58e36a4..2d3db83 100644
 +  uint32_t socket_handle = 0;
 +  uint32_t buffer_ptr = 0;
 +  uint32_t buffer_length = 0;
-+  uint32_t bytes_ptr = 0;
-+  uint32_t flags_ptr = 0;
++  // Initiation bytes/flags outputs may be automatic storage. Delayed results
++  // belong to this operation and are published by WSAGetOverlappedResult.
 +  uint32_t flags = 0;
 +  uint32_t from_ptr = 0;
 +  uint32_t from_length_ptr = 0;
 +  uint32_t overlapped_ptr = 0;
 +  uint32_t completion_routine = 0;
 +  uint32_t transferred = 0;
++  uint32_t completion_flags = 0;
 +  uint32_t error = 0;
 +  bool complete = false;
 +  bool readiness_logged = false;
@@ -2015,6 +2017,7 @@ index 58e36a4..2d3db83 100644
 +};
 +
 +std::mutex pending_recv_mutex;
++std::condition_variable pending_recv_changed;
 +std::unordered_map<uint32_t, PendingRecvFrom> pending_recvs;
 +std::atomic<bool> pending_recv_pump_running{false};
 +object_ref<XHostThread> pending_recv_pump_thread;
@@ -2084,10 +2087,7 @@ index 58e36a4..2d3db83 100644
 +  }
 +
 +  pending.transferred = uint32_t(result);
-+  if (pending.bytes_ptr)
-+    memory::store_and_swap<uint32_t>(memory->TranslateVirtual(pending.bytes_ptr), pending.transferred);
-+  if (pending.flags_ptr)
-+    memory::store_and_swap<uint32_t>(memory->TranslateVirtual(pending.flags_ptr), 0);
++  pending.completion_flags = 0;
 +  if (pending.from_ptr) {
 +    auto* from = memory->TranslateVirtual<XSOCKADDR_IN*>(pending.from_ptr);
 +    from->sin_family = native_from.sin_family;
@@ -2167,7 +2167,7 @@ index 58e36a4..2d3db83 100644
  
  u32 NetDll_XNetStartup_entry(u32 caller, ppc_ptr_t<XNetStartupParams> params) {
    if (params) {
-@@ -298,20 +488,133 @@ u32 NetDll_WSAGetLastError_entry() {
+@@ -298,20 +488,138 @@ u32 NetDll_WSAGetLastError_entry() {
  u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_ptr,
                               u32 buffer_count, mapped_u32 num_bytes_recv, mapped_u32 flags_ptr,
                               ppc_ptr_t<XSOCKADDR_IN> from_addr,
@@ -2208,8 +2208,6 @@ index 58e36a4..2d3db83 100644
 +        socket,
 +        buffers_ptr[0].buf_ptr,
 +        buffers_ptr[0].len,
-+        num_bytes_recv.guest_address(),
-+        flags_ptr.guest_address(),
 +        flags_ptr ? uint32_t(*flags_ptr) : 0,
 +        from_addr.guest_address(),
 +        from_length.guest_address(),
@@ -2227,7 +2225,7 @@ index 58e36a4..2d3db83 100644
 +        "from_length={:08X} "
 +        "event={:08X} completion={:08X}",
 +        socket, pending.overlapped_ptr, pending.buffer_ptr, pending.buffer_length,
-+        pending.flags_ptr, pending.flags, pending.from_ptr, pending.from_length_ptr,
++        flags_ptr.guest_address(), pending.flags, pending.from_ptr, pending.from_length_ptr,
 +        uint32_t(overlapped_ptr->event_handle), pending.completion_routine);
 +    XThread::SetLastError(kWsaIoPending);
 +    return -1;
@@ -2278,14 +2276,21 @@ index 58e36a4..2d3db83 100644
 -  // we're not going to be receiving packets any time soon
 -  // return error so we don't wait on that - Cancerous
 -  return -1;
-+  std::lock_guard lock(pending_recv_mutex);
++  std::unique_lock lock(pending_recv_mutex);
 +  auto it = pending_recvs.find(overlapped_ptr.guest_address());
++  // Never wait for network readiness while holding the cancellation lock.
++  // Re-find after every unlock: a competing query may have consumed the record.
++  while (wait && it != pending_recvs.end() && it->second.socket_handle == socket_handle &&
++         !it->second.complete && !TryCompleteRecvFrom(it->second, false)) {
++    pending_recv_changed.wait_for(lock, std::chrono::milliseconds(1));
++    it = pending_recvs.find(overlapped_ptr.guest_address());
++  }
 +  if (it == pending_recvs.end() || it->second.socket_handle != socket_handle) {
 +    XThread::SetLastError(kWsaInvalidArgument);
 +    return 0;
 +  }
 +  auto& pending = it->second;
-+  if (!pending.complete && !TryCompleteRecvFrom(pending, wait != 0)) {
++  if (!pending.complete && !TryCompleteRecvFrom(pending, false)) {
 +    REXKRNL_DEBUG(
 +        "NetDll_WSAGetOverlappedResult: incomplete socket={:08X} overlapped={:08X} wait={}",
 +        socket_handle, overlapped_ptr.guest_address(), wait != 0);
@@ -2299,7 +2304,7 @@ index 58e36a4..2d3db83 100644
 +  }
 +  *bytes_transferred = pending.transferred;
 +  if (flags_ptr)
-+    *flags_ptr = 0;
++    *flags_ptr = pending.completion_flags;
 +  REXKRNL_INFO(
 +      "NetDll_WSAGetOverlappedResult: completed socket={:08X} overlapped={:08X} bytes={}",
 +      socket_handle, overlapped_ptr.guest_address(), pending.transferred);
@@ -2309,7 +2314,7 @@ index 58e36a4..2d3db83 100644
  }
  
  // If the socket is a VDP socket, buffer 0 is the game data length, and buffer 1
-@@ -320,15 +623,21 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
+@@ -320,15 +628,21 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
                             u32 num_buffers, mapped_u32 num_bytes_sent, u32 flags,
                             ppc_ptr_t<XSOCKADDR_IN> to_ptr, u32 to_len,
                             ppc_ptr_t<XWSAOVERLAPPED> overlapped, mapped_void completion_routine) {
@@ -2334,7 +2339,7 @@ index 58e36a4..2d3db83 100644
  
    // Our sockets implementation doesn't support multiple buffers, so we need
    // to combine the buffers the game has given us!
-@@ -346,10 +655,48 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
+@@ -346,10 +660,48 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
    }
  
    N_XSOCKADDR_IN native_to(to_ptr);
@@ -2386,7 +2391,7 @@ index 58e36a4..2d3db83 100644
    return 0;
  }
  
-@@ -360,20 +707,33 @@ u32 NetDll_WSAWaitForMultipleEvents_entry(u32 num_events, mapped_u32 events, u32
+@@ -360,20 +712,33 @@ u32 NetDll_WSAWaitForMultipleEvents_entry(u32 num_events, mapped_u32 events, u32
      return ~0u;
    }
  
@@ -2433,7 +2438,7 @@ index 58e36a4..2d3db83 100644
  }
  
  u32 NetDll_WSACreateEvent_entry() {
-@@ -436,10 +796,12 @@ struct XnAddrStatus {
+@@ -436,10 +801,12 @@ struct XnAddrStatus {
  };
  
  u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
@@ -2450,7 +2455,7 @@ index 58e36a4..2d3db83 100644
  
    // TODO(gibbed): A proper mac address.
    // RakNet's 360 version appears to depend on abEnet to create "random" 64-bit
-@@ -452,11 +814,15 @@ u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
+@@ -452,11 +819,15 @@ u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
    // https://github.com/facebookarchive/RakNet/blob/master/Source/RakPeer.cpp#L4467
    // "Mac address is a poor solution because you can't have multiple connections
    // from the same system"
@@ -2469,7 +2474,7 @@ index 58e36a4..2d3db83 100644
  }
  
  u32 NetDll_XNetGetDebugXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
-@@ -471,23 +837,75 @@ u32 NetDll_XNetXnAddrToMachineId_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr, m
+@@ -471,23 +842,75 @@ u32 NetDll_XNetXnAddrToMachineId_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr, m
    return 1;
  }
  
@@ -2552,7 +2557,7 @@ index 58e36a4..2d3db83 100644
  }
  
  // https://www.google.com/patents/WO2008112448A1?cl=en
-@@ -506,7 +924,8 @@ struct XEthernetStatus {
+@@ -506,7 +929,8 @@ struct XEthernetStatus {
  };
  
  u32 NetDll_XNetGetEthernetLinkStatus_entry(u32 caller) {
@@ -2562,7 +2567,7 @@ index 58e36a4..2d3db83 100644
  }
  
  u32 NetDll_XNetDnsLookup_entry(u32 caller, mapped_string host, u32 event_handle, mapped_u32 pdns) {
-@@ -549,6 +968,44 @@ u32 NetDll_XNetQosServiceLookup_entry(u32 caller, u32 flags, u32 event_handle, m
+@@ -549,6 +973,44 @@ u32 NetDll_XNetQosServiceLookup_entry(u32 caller, u32 flags, u32 event_handle, m
    return 0;
  }
  
@@ -2607,7 +2612,7 @@ index 58e36a4..2d3db83 100644
  u32 NetDll_XNetQosRelease_entry(u32 caller, ppc_ptr_t<XNQOS> qos) {
    if (!qos) {
      return X_STATUS_INVALID_PARAMETER;
-@@ -559,7 +1016,9 @@ u32 NetDll_XNetQosRelease_entry(u32 caller, ppc_ptr_t<XNQOS> qos) {
+@@ -559,7 +1021,9 @@ u32 NetDll_XNetQosRelease_entry(u32 caller, ppc_ptr_t<XNQOS> qos) {
  
  u32 NetDll_XNetQosListen_entry(u32 caller, mapped_void id, mapped_void data, u32 data_size, u32 r7,
                                 u32 flags) {
@@ -2618,7 +2623,7 @@ index 58e36a4..2d3db83 100644
  }
  
  u32 NetDll_inet_addr_entry(mapped_string addr_ptr) {
-@@ -591,7 +1050,6 @@ u32 NetDll_socket_entry(u32 caller, u32 af, u32 type, u32 protocol) {
+@@ -591,11 +1055,13 @@ u32 NetDll_socket_entry(u32 caller, u32 af, u32 type, u32 protocol) {
      XThread::SetLastError(error);
      return -1;
    }
@@ -2626,7 +2631,37 @@ index 58e36a4..2d3db83 100644
    return socket->handle();
  }
  
-@@ -670,12 +1128,29 @@ u32 NetDll_bind_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> nam
+ u32 NetDll_closesocket_entry(u32 caller, u32 socket_handle) {
++  // Serialize close with receive completion so no receive can touch its guest
++  // buffers after cancellation has been published. Keep the result until query.
++  std::lock_guard lock(pending_recv_mutex);
+   auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
+   if (!socket) {
+     // WSAENOTSOCK
+@@ -606,7 +1072,22 @@ u32 NetDll_closesocket_entry(u32 caller, u32 socket_handle) {
+   // TODO: Absolutely delete this object. It is no longer valid after calling
+   // closesocket.
+   socket->Close();
++  for (auto& [_, pending] : pending_recvs) {
++    if (pending.socket_handle != socket_handle || pending.complete)
++      continue;
++    pending.error = 995;  // WSA_OPERATION_ABORTED
++    auto* overlapped = REX_KERNEL_MEMORY()->TranslateVirtual<XWSAOVERLAPPED*>(pending.overlapped_ptr);
++    overlapped->internal = 0xC0000120;  // STATUS_CANCELLED
++    overlapped->internal_high = 0;
++    if (overlapped->event_handle) {
++      auto event = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(overlapped->event_handle);
++      if (event)
++        event->Set(0, false);
++    }
++    pending.complete = true;
++  }
+   socket->ReleaseHandle();
++  pending_recv_changed.notify_all();
+   return 0;
+ }
+ 
+@@ -670,12 +1151,29 @@ u32 NetDll_bind_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> nam
    }
  
    N_XSOCKADDR_IN native_name(name);
@@ -2657,7 +2692,7 @@ index 58e36a4..2d3db83 100644
    return 0;
  }
  
-@@ -944,6 +1419,8 @@ REX_EXPORT(__imp__NetDll_XNetRandom, rex::kernel::xam::NetDll_XNetRandom_entry)
+@@ -944,6 +1442,8 @@ REX_EXPORT(__imp__NetDll_XNetRandom, rex::kernel::xam::NetDll_XNetRandom_entry)
  REX_EXPORT(__imp__NetDll_WSAStartup, rex::kernel::xam::NetDll_WSAStartup_entry)
  REX_EXPORT(__imp__NetDll_WSACleanup, rex::kernel::xam::NetDll_WSACleanup_entry)
  REX_EXPORT(__imp__NetDll_WSAGetLastError, rex::kernel::xam::NetDll_WSAGetLastError_entry)
@@ -2666,7 +2701,7 @@ index 58e36a4..2d3db83 100644
  REX_EXPORT(__imp__NetDll_WSARecvFrom, rex::kernel::xam::NetDll_WSARecvFrom_entry)
  REX_EXPORT(__imp__NetDll_WSASendTo, rex::kernel::xam::NetDll_WSASendTo_entry)
  REX_EXPORT(__imp__NetDll_WSAWaitForMultipleEvents,
-@@ -1002,7 +1479,6 @@ REX_EXPORT_STUB(__imp__NetDll_UpnpSearchGetDevices);
+@@ -1002,7 +1502,6 @@ REX_EXPORT_STUB(__imp__NetDll_UpnpSearchGetDevices);
  REX_EXPORT_STUB(__imp__NetDll_UpnpStartup);
  REX_EXPORT_STUB(__imp__NetDll_WSACancelOverlappedIO);
  REX_EXPORT_STUB(__imp__NetDll_WSAEventSelect);
@@ -2674,7 +2709,7 @@ index 58e36a4..2d3db83 100644
  REX_EXPORT_STUB(__imp__NetDll_WSARecv);
  REX_EXPORT_STUB(__imp__NetDll_WSASend);
  REX_EXPORT_STUB(__imp__NetDll_WSAStartupEx);
-@@ -1030,24 +1506,24 @@ REX_EXPORT_STUB(__imp__NetDll_XHttpSetStatusCallback);
+@@ -1030,24 +1529,24 @@ REX_EXPORT_STUB(__imp__NetDll_XHttpSetStatusCallback);
  REX_EXPORT_STUB(__imp__NetDll_XHttpShutdown);
  REX_EXPORT_STUB(__imp__NetDll_XHttpStartup);
  REX_EXPORT_STUB(__imp__NetDll_XHttpWriteData);
@@ -6290,7 +6325,7 @@ index 2d13ac8..63b7cf7 100644
  
    return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
 diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
-index 7bd264b..6137713 100644
+index 7bd264b..a93740b 100644
 --- a/tests/unit/CMakeLists.txt
 +++ b/tests/unit/CMakeLists.txt
 @@ -4,6 +4,7 @@ add_executable(unit_tests
@@ -6328,6 +6363,20 @@ index 7bd264b..6137713 100644
  
  # ReXApp is shipped as source for recomp projects, rather than compiled into
  # rexui. Keep its SDK-consumer compilation path covered by the test build.
+@@ -69,6 +77,13 @@ endif()
+ 
+ # Discover tests
+ include(Catch)
++if(WIN32)
++    add_executable(recvfrom_lifetime_test kernel/recvfrom_lifetime_test.cpp)
++    target_include_directories(recvfrom_lifetime_test PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/thirdparty)
++    target_link_libraries(recvfrom_lifetime_test PRIVATE rexruntime ws2_32)
++    set_target_properties(recvfrom_lifetime_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
++    add_test(NAME recvfrom_lifetime COMMAND recvfrom_lifetime_test)
++endif()
+ catch_discover_tests(unit_tests
+     TEST_PREFIX "unit."
+     PROPERTIES
 diff --git a/tests/unit/codegen/dispatch_table_layout_test.cpp b/tests/unit/codegen/dispatch_table_layout_test.cpp
 new file mode 100644
 index 0000000..7ed44c1
@@ -7750,3 +7799,259 @@ index 0000000..87beb81
 +}
 +
 +}  // namespace rex::system
+diff --git a/tests/unit/kernel/recvfrom_lifetime_test.cpp b/tests/unit/kernel/recvfrom_lifetime_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/kernel/recvfrom_lifetime_test.cpp
+@@ -0,0 +1,251 @@
++// Compile the real adapter in this isolated process to control its existing
++// pump state without exposing test controls in the production runtime.
++#include "kernel/xam/xam_net.cpp"
++#include <rex/runtime.h>
++#include <iostream>
++#include <stdexcept>
++#include <array>
++#include <future>
++
++using namespace rex;
++using namespace rex::system;
++using namespace rex::kernel::xam;
++
++static void Check(bool value, const char* what) {
++  if (!value)
++    throw std::runtime_error(what);
++}
++
++static void Run(KernelState* kernel, bool expect_stale, bool cancel_ready = false,
++                bool waiting_query = false) {
++  // Suppress only background scheduling: every operation still traverses the
++  // unmodified real API entry and completion code, with real loopback UDP.
++  pending_recv_pump_running = true;
++  auto* mem = kernel->memory();
++  const auto guest = mem->SystemHeapAlloc(4096);
++  Check(guest != 0, "guest allocation");
++  auto ptr = [&]<typename T>(uint32_t offset) {
++    return ppc_ptr_t<T>(mem->TranslateVirtual<T*>(guest + offset), guest + offset);
++  };
++  auto buf = ptr.operator()<XWSABUF>(0);
++  auto ov = ptr.operator()<XWSAOVERLAPPED>(32);
++  auto bytes = ptr.operator()<be_u32>(96);
++  auto flags = ptr.operator()<be_u32>(100);
++  auto query_bytes = ptr.operator()<be_u32>(112);
++  auto query_flags = ptr.operator()<be_u32>(116);
++  auto from = ptr.operator()<XSOCKADDR_IN>(128);
++  auto fromlen = ptr.operator()<be_u32>(148);
++  auto to = ptr.operator()<XSOCKADDR_IN>(160);
++  buf->len = 64;
++  buf->buf_ptr = guest + 256;
++  auto* slot = mem->TranslateVirtual(guest + 96);
++  constexpr uint64_t sentinel = 0x0000000044175530ull;
++  const std::array<uint8_t, 16> payload{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
++  auto receiver = make_object<XSocket>(kernel);
++  auto sender = make_object<XSocket>(kernel);
++  Check(XSUCCEEDED(receiver->Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM,
++                                        XSocket::X_IPPROTO_UDP)),
++        "receiver init");
++  Check(XSUCCEEDED(
++            sender->Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM, XSocket::X_IPPROTO_UDP)),
++        "sender init");
++  N_XSOCKADDR_IN addr{};
++  addr.sin_family = 2;
++  addr.sin_addr = 0x7f000001;
++  addr.sin_port = 0;
++  Check(XSUCCEEDED(receiver->Bind(&addr, sizeof(addr))), "bind loopback");
++  sockaddr_in native{};
++  int native_size = sizeof(native);
++  Check(getsockname(SOCKET(receiver->native_handle()), reinterpret_cast<sockaddr*>(&native),
++                    &native_size) == 0,
++        "getsockname");
++  addr.sin_port = ntohs(native.sin_port);
++  auto event = make_object<XEvent>(kernel);
++  event->Initialize(true, false);
++  auto queue = [&] {
++    std::memset(ov.host_address(), 0, sizeof(XWSAOVERLAPPED));
++    ov->event_handle = event->handle();
++    event->Reset();
++    *bytes = 0;
++    *flags = 0;
++    *fromlen = 16;
++    Check(NetDll_WSARecvFrom_entry(1, receiver->handle(), buf, 1, bytes, flags, from, fromlen, ov,
++                                   nullptr) == uint32_t(-1),
++          "pending return");
++    Check(XThread::GetCurrentThread()->last_error() == 997, "pending status");
++    memory::store_and_swap<uint64_t>(slot, sentinel);
++    Check(NetDll_WSAGetOverlappedResult_entry(1, receiver->handle(), ov, query_bytes, 0,
++                                              query_flags) == 0,
++          "query before readiness is incomplete");
++    Check(XThread::GetCurrentThread()->last_error() == 996, "incomplete error");
++  };
++  auto send = [&] {
++    Check(sender->SendTo(const_cast<uint8_t*>(payload.data()), payload.size(), 0, &addr,
++                         sizeof(addr)) == 16,
++          "send 16");
++    Check(receiver->WaitReadable(1000, false), "datagram readiness");
++  };
++  auto untouched = [&] {
++    Check(memory::load_and_swap<uint64_t>(slot) == sentinel, "saved register unchanged");
++  };
++  auto completed = [&] {
++    *query_bytes = 99;
++    *query_flags = 99;
++    Check(NetDll_WSAGetOverlappedResult_entry(1, receiver->handle(), ov, query_bytes, 0,
++                                              query_flags) == 1,
++          "completion query");
++    Check(uint32_t(ov->internal) == 0 && uint32_t(ov->internal_high) == 16, "overlapped result");
++    Check(std::memcmp(mem->TranslateVirtual(guest + 256), payload.data(), 16) == 0, "payload");
++    Check(uint32_t(*fromlen) == 16 && uint16_t(from->sin_family) == 2, "source outputs");
++    uint32_t type = 0, state = 0;
++    event->Query(&type, &state);
++    Check(state == 1, "completion event");
++    Check(uint32_t(*query_bytes) == 16 && uint32_t(*query_flags) == 0, "query bytes and flags");
++    Check(pending_recvs.empty(), "query releases operation");
++  };
++  queue();
++  send();
++  // The same pump runs synchronously during the title's disband send.
++  PumpPendingRecvFrom();
++  if (expect_stale) {
++    Check(memory::load_and_swap<uint64_t>(slot) == 0x0000001000000000ull,
++          "unfixed real adapter reproduces exact corruption");
++    completed();
++    std::cout << "BEFORE FIX: real adapter produced 0000001000000000\n";
++  } else {
++    untouched();
++    completed();
++    event->Reset();
++    PumpPendingRecvFrom();
++    uint32_t type = 0, state = 0;
++    event->Query(&type, &state);
++    Check(state == 0, "no duplicate event");
++    queue();
++    send();
++    completed();
++    untouched();  // query itself completes receive
++    queue();
++    send();
++    // Session release must not invent socket cancellation. The disband's send
++    // still pumps the outstanding receive on the same thread.
++    auto session = make_object<rex::system::xam::XSession>(kernel);
++    Check(session->Initialize(), "session init");
++    auto record = kernel->session_manager()->registry().Create(1, "Fixture", {}, 1, 6, 0);
++    session->set_record(record);
++    session->set_record(nullptr);
++    to->sin_family = addr.sin_family;
++    to->sin_addr = addr.sin_addr;
++    to->sin_port = addr.sin_port;
++    Check(NetDll_WSASendTo_entry(1, sender->handle(), buf, 1, query_bytes, 0, to,
++                                 sizeof(XSOCKADDR_IN), nullptr, nullptr) == 0,
++          "disband-style send pumps receive");
++    untouched();
++    completed();
++    // Drain the additional send from the preceding case before synchronous check.
++    std::array<uint8_t, 64> drain{};
++    Check(receiver->WaitReadable(1000, false), "drain ready");
++    Check(receiver->RecvFrom(drain.data(), drain.size(), 0, nullptr, nullptr) == 64, "drain send");
++    // Synchronous path keeps its initiation outputs valid.
++    send();
++    *bytes = 99;
++    *flags = 0;
++    Check(NetDll_WSARecvFrom_entry(1, receiver->handle(), buf, 1, bytes, flags, from, fromlen,
++                                   nullptr, nullptr) == 0,
++          "synchronous receive");
++    Check(uint32_t(*bytes) == 16 && uint32_t(*flags) == 0, "synchronous outputs");
++    // Cancellation is socket close in this adapter; no separate cancel API.
++    queue();
++    if (cancel_ready)
++      send();  // Cancel queued native data before any completion pump.
++    const auto handle = receiver->handle();
++    std::promise<void> querying;
++    object_ref<XHostThread> waiter;
++    uint32_t wait_result = 1, wait_error = 0;
++    *query_bytes = 99;
++    *query_flags = 99;
++    if (waiting_query) {
++      waiter = object_ref<XHostThread>(new XHostThread(kernel, 128 * 1024, 0, [&] {
++        querying.set_value();
++        wait_result =
++            NetDll_WSAGetOverlappedResult_entry(1, handle, ov, query_bytes, 1, query_flags);
++        wait_error = XThread::GetCurrentThread()->last_error();
++        return 0;
++      }));
++      Check(XSUCCEEDED(waiter->Create()), "query thread");
++      querying.get_future().wait();
++    }
++    std::array<uint8_t, 64> before_payload{};
++    std::memcpy(before_payload.data(), mem->TranslateVirtual(guest + 256), 64);
++    Check(NetDll_closesocket_entry(1, handle) == 0, "close cancels pending receive");
++    untouched();
++    Check(uint32_t(ov->internal) == 0xC0000120 && uint32_t(ov->internal_high) == 0,
++          "cancel status");
++    event->Query(&type, &state);
++    Check(state == 1, "cancel event");
++    event->Reset();
++    PumpPendingRecvFrom();
++    PumpPendingRecvFrom();
++    event->Query(&type, &state);
++    Check(state == 0, "no duplicate cancel event");
++    Check(std::memcmp(before_payload.data(), mem->TranslateVirtual(guest + 256), 64) == 0,
++          "cancel payload unchanged");
++    if (waiting_query) {
++      uint64_t timeout = static_cast<uint64_t>(-100000000ll);
++      Check(waiter->Wait(0, 0, 0, &timeout) == 0, "waiting query unblocked by close");
++      Check(wait_result == 0 && wait_error == 995, "waiting cancel result");
++    } else {
++      Check(NetDll_WSAGetOverlappedResult_entry(1, handle, ov, query_bytes, 0, query_flags) == 0,
++            "query cancellation");
++      Check(XThread::GetCurrentThread()->last_error() == 995, "cancel result error");
++    }
++    Check(uint32_t(*query_bytes) == 99 && uint32_t(*query_flags) == 99,
++          "error query outputs unchanged");
++    Check(pending_recvs.empty(), "cancel query releases record");
++    untouched();
++    std::cout << "AFTER FIX: pump/query/send/session-release lifetime, payload, source, event, "
++                 "synchronous and cancellation checks passed; cancel_ready="
++              << cancel_ready << '\n';
++  }
++  if (expect_stale) {
++    receiver->Close();
++    receiver->ReleaseHandle();
++  }
++  sender->Close();
++  event->ReleaseHandle();
++  sender->ReleaseHandle();
++  mem->SystemHeapFree(guest);
++  pending_recv_pump_running = false;
++}
++
++int main(int argc, char** argv) {
++  WSADATA wsa{};
++  if (WSAStartup(MAKEWORD(2, 2), &wsa))
++    return 4;
++  InitLogging();
++  Runtime runtime("");
++  RuntimeConfig config;
++  config.tool_mode = true;
++  if (runtime.Setup(std::move(config)))
++    return 2;
++  int result = 0;
++  auto thread = object_ref<XHostThread>(new XHostThread(runtime.kernel_state(), 128 * 1024, 0, [&] {
++    try {
++      const bool stale = argc == 2 && std::string(argv[1]) == "--expect-stale";
++      Run(runtime.kernel_state(), stale);
++      if (!stale)
++        Run(runtime.kernel_state(), false, true);
++      if (!stale)
++        Run(runtime.kernel_state(), false, false, true);
++    } catch (const std::exception& e) {
++      std::cerr << e.what() << '\n';
++      result = 1;
++    }
++    return result;
++  }));
++  if (XFAILED(thread->Create()))
++    return 3;
++  thread->Wait(0, 0, 0, nullptr);
++  thread.reset();
++  runtime.Shutdown();
++  return result;
++}
