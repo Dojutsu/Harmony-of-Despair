@@ -1394,7 +1394,7 @@ index 3f9422d..e0dbf41 100644
      mouse_dy_ = 0.0f;
    }
 diff --git a/src/kernel/xam/apps/xgi_app.cpp b/src/kernel/xam/apps/xgi_app.cpp
-index 2b222da..03a89ff 100644
+index 2b222da..9b9de30 100644
 --- a/src/kernel/xam/apps/xgi_app.cpp
 +++ b/src/kernel/xam/apps/xgi_app.cpp
 @@ -9,8 +9,11 @@
@@ -1409,7 +1409,7 @@ index 2b222da..03a89ff 100644
  #include <rex/thread.h>
  
  namespace rex {
-@@ -19,8 +22,195 @@ namespace xam {
+@@ -19,8 +22,221 @@ namespace xam {
  using namespace rex::system;
  using namespace rex::system::xam;
  namespace apps {
@@ -1427,6 +1427,32 @@ index 2b222da..03a89ff 100644
 +namespace {
 +constexpr uint32_t kSessionCreateHost = 1;
 +constexpr uint32_t kInvalidUserIndex = 0xFFFFFFFFu;
++
++// Validate the complete array before a join can mutate membership. Use widened
++// arithmetic and the heap's page-access check before translating guest memory.
++bool ReadableJoinArray(memory::Memory* memory, uint32_t address, uint32_t count,
++                       uint32_t width) {
++  const uint64_t size = uint64_t{count} * width;
++  if (!size || size > UINT32_MAX || uint64_t{address} + size > (uint64_t{1} << 32))
++    return false;
++  auto* heap = memory->LookupHeap(address);
++  if (!heap || heap->QueryRangeAccess(address, uint32_t(uint64_t{address} + size - 1)) ==
++                   memory::PageAccess::kNoAccess)
++    return false;
++  // Decommitted pages can retain protection metadata. Check commitment too,
++  // advancing by whole regions from a page-aligned address.
++  uint64_t cursor = address - (address - heap->heap_base()) % heap->page_size();
++  const uint64_t end = uint64_t{address} + size;
++  while (cursor < end) {
++    memory::HeapAllocationInfo info{};
++    if (!heap->QueryRegionInfo(uint32_t(cursor), &info) || !info.region_size ||
++        !(info.state & memory::kMemoryAllocationCommit))
++      return false;
++    cursor += info.region_size;
++  }
++  return true;
++}
++
 +
 +#pragma pack(push, 1)
 +struct GuestSessionInfo {
@@ -1605,7 +1631,7 @@ index 2b222da..03a89ff 100644
  XgiApp::XgiApp(KernelState* kernel_state) : App(kernel_state, 0xFB) {}
  
  // http://mb.mirage.org/bugzilla/xliveless/main.c
-@@ -42,6 +232,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -42,6 +258,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        uint32_t context_value = memory::load_and_swap<uint32_t>(buffer + 20);
        REXKRNL_DEBUG("XGIUserSetContextEx({:08X}, {:08X}, {:08X})", user_index, context_id,
                      context_value);
@@ -1614,7 +1640,7 @@ index 2b222da..03a89ff 100644
        return X_E_SUCCESS;
      }
      case 0x000B0007: {
-@@ -51,6 +243,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -51,6 +269,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        uint32_t value_ptr = memory::load_and_swap<uint32_t>(buffer + 24);
        REXKRNL_DEBUG("XGIUserSetPropertyEx({:08X}, {:08X}, {}, {:08X})", user_index, property_id,
                      value_size, value_ptr);
@@ -1623,7 +1649,7 @@ index 2b222da..03a89ff 100644
        return X_E_SUCCESS;
      }
      case 0x000B0008: {
-@@ -104,15 +298,50 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -104,15 +324,50 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        uint32_t flags = memory::load_and_swap<uint32_t>(buffer + 4);
        uint32_t num_slots_public = memory::load_and_swap<uint32_t>(buffer + 8);
        uint32_t num_slots_private = memory::load_and_swap<uint32_t>(buffer + 12);
@@ -1676,7 +1702,7 @@ index 2b222da..03a89ff 100644
        return X_E_SUCCESS;
      }
      case 0x000B0011: {
-@@ -124,6 +353,14 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -124,10 +379,20 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
  
        REXKRNL_DEBUG("XGISessionDelete({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
  
@@ -1691,7 +1717,14 @@ index 2b222da..03a89ff 100644
        return X_E_SUCCESS;
      }
      case 0x000B0012: {
-@@ -135,9 +372,78 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+-      assert_true(!buffer_length || buffer_length == 20);
++      if ((buffer_length && buffer_length != 20) ||
++          !ReadableJoinArray(memory_, buffer_ptr, 1, 20))
++        return X_E_INVALIDARG;
+       uint32_t session_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t user_count = memory::load_and_swap<uint32_t>(buffer + 4);
+       uint32_t xuid_array_ptr = memory::load_and_swap<uint32_t>(buffer + 8);
+@@ -135,9 +400,85 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        uint32_t private_slots_array = memory::load_and_swap<uint32_t>(buffer + 16);
        bool is_local = xuid_array_ptr == 0;
  
@@ -1701,6 +1734,12 @@ index 2b222da..03a89ff 100644
                      user_count, xuid_array_ptr, user_index_array, private_slots_array);
 +      auto* object = LookupSession(kernel_state_, session_ptr);
 +      if (!object || !object->record() || !user_count)
++        return X_E_INVALIDARG;
++      if (user_count > UINT32_MAX / 4 ||
++          (private_slots_array && !ReadableJoinArray(memory_, private_slots_array, user_count, 4)) ||
++          (!is_local && !ReadableJoinArray(memory_, xuid_array_ptr, user_count, 8)) ||
++          (is_local && user_index_array &&
++           !ReadableJoinArray(memory_, user_index_array, user_count, 4)))
 +        return X_E_INVALIDARG;
 +      auto session = object->record();
 +      for (uint32_t i = 0; i < user_count; ++i) {
@@ -1712,7 +1751,8 @@ index 2b222da..03a89ff 100644
 +                                        memory_->TranslateVirtual(user_index_array + i * 4))
 +                                  : kInvalidUserIndex;
 +        bool private_slot =
-+            private_slots_array && *memory_->TranslateVirtual(private_slots_array + i) != 0;
++            private_slots_array && memory::load_and_swap<uint32_t>(
++                                       memory_->TranslateVirtual(private_slots_array + 4 * i)) != 0;
 +        SessionMember member{
 +            xuid,         is_local ? kernel_state_->user_profile()->name() : std::string{},
 +            user_index,   is_local,
@@ -1771,7 +1811,7 @@ index 2b222da..03a89ff 100644
        return X_E_SUCCESS;
      }
      case 0x000B0014: {
-@@ -149,7 +455,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -149,7 +490,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
  
        REXKRNL_DEBUG("XSessionStart({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
  
@@ -1784,7 +1824,7 @@ index 2b222da..03a89ff 100644
      }
      case 0x000B0015: {
        // send high scores?
-@@ -161,7 +471,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -161,7 +506,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
  
        REXKRNL_DEBUG("XSessionEnd({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
  
@@ -1797,7 +1837,7 @@ index 2b222da..03a89ff 100644
      }
      case 0x000B0016: {
        assert_true(!buffer_length || buffer_length == 32);
-@@ -179,7 +493,13 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -179,7 +528,13 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XSessionSearch({}, {}, {}, {}, {}, {:08X}, {:08X}, {}, {:08X})", proc_index,
                      user_index, num_results, num_props, num_ctx, props_ptr, ctx_ptr,
                      results_buffer_size, search_results_ptr);
@@ -1812,7 +1852,7 @@ index 2b222da..03a89ff 100644
      }
      case 0x000B0018: {
        assert_true(!buffer_length || buffer_length == 16);
-@@ -192,7 +512,12 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -192,7 +547,12 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XSessionModify({:08X}, {:08X}, {:08X}, {:08X})", obj_ptr, flags,
                      maxPublicSlots, maxPrivateSlots);
  
@@ -1826,7 +1866,7 @@ index 2b222da..03a89ff 100644
      }
      case 0x000B001C: {
        assert_true(!buffer_length || buffer_length == 36);
-@@ -213,8 +538,33 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -213,8 +573,33 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XSessionSearchEx({}, {}, {}, {}, {}, {:08X}, {:08X}, {}, {:08X}, {})",
                      proc_index, user_index, num_results, num_props, num_ctx, props_ptr, ctx_ptr,
                      results_buffer_size, search_results_ptr, num_users);
@@ -1861,7 +1901,7 @@ index 2b222da..03a89ff 100644
      }
      case 0x000B001D: {
        assert_true(!buffer_length || buffer_length == 24);
-@@ -229,6 +579,44 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -229,6 +614,44 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XSessionGetDetails({:08X}, {}, {:08X}, {}, {}, {})", obj_ptr,
                      details_buffer_size, session_details_ptr, reserved1, reserved2, reserved3);
  
@@ -1906,7 +1946,7 @@ index 2b222da..03a89ff 100644
        return X_E_SUCCESS;
      }
      case 0x000B001E: {
-@@ -289,7 +677,15 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -289,7 +712,15 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                      user_index, num_session_ids, session_ids_ptr, results_buffer_size,
                      search_results_ptr, reserved1, reserved2, reserved3);
  
@@ -1923,7 +1963,7 @@ index 2b222da..03a89ff 100644
      }
      case 0x000B001F: {
        assert_true(!buffer_length || buffer_length == 24);
-@@ -330,6 +726,10 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -330,6 +761,10 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XUserReadStats({}, {}, {:08X}, {}, {:08X}, {}, {:08X})", title_id, xuids_count,
                      xuids_ptr, specs_count, specs_ptr, results_size, results_ptr);
  
@@ -6325,7 +6365,7 @@ index 2d13ac8..63b7cf7 100644
  
    return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
 diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
-index 7bd264b..a93740b 100644
+index 7bd264b..a8c74ce 100644
 --- a/tests/unit/CMakeLists.txt
 +++ b/tests/unit/CMakeLists.txt
 @@ -4,6 +4,7 @@ add_executable(unit_tests
@@ -6363,7 +6403,7 @@ index 7bd264b..a93740b 100644
  
  # ReXApp is shipped as source for recomp projects, rather than compiled into
  # rexui. Keep its SDK-consumer compilation path covered by the test build.
-@@ -69,6 +77,13 @@ endif()
+@@ -69,9 +77,21 @@ endif()
  
  # Discover tests
  include(Catch)
@@ -6377,6 +6417,14 @@ index 7bd264b..a93740b 100644
  catch_discover_tests(unit_tests
      TEST_PREFIX "unit."
      PROPERTIES
+         LABELS "unit"
+         TIMEOUT 60
+ )
++
++add_executable(xgi_slot_array_test kernel/xgi_slot_array_test.cpp)
++target_link_libraries(xgi_slot_array_test PRIVATE rexruntime)
++set_target_properties(xgi_slot_array_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
++add_test(NAME xgi_slot_array COMMAND xgi_slot_array_test)
 diff --git a/tests/unit/codegen/dispatch_table_layout_test.cpp b/tests/unit/codegen/dispatch_table_layout_test.cpp
 new file mode 100644
 index 0000000..7ed44c1
@@ -8052,6 +8100,128 @@ new file mode 100644
 +    return 3;
 +  thread->Wait(0, 0, 0, nullptr);
 +  thread.reset();
++  runtime.Shutdown();
++  return result;
++}
+diff --git a/tests/unit/kernel/xgi_slot_array_test.cpp b/tests/unit/kernel/xgi_slot_array_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/kernel/xgi_slot_array_test.cpp
+@@ -0,0 +1,117 @@
++// Exercise the real XGI join dispatch against allocated guest memory.
++#include <rex/runtime.h>
++#include <rex/logging.h>
++#include <rex/kernel/xam/apps/xgi_app.h>
++#include <rex/system/xam/session.h>
++#include <array>
++#include <iostream>
++#include <stdexcept>
++
++using namespace rex;
++using namespace rex::system;
++using namespace rex::system::xam;
++static void Check(bool value, const char* message) {
++  if (!value) throw std::runtime_error(message);
++}
++
++static void Run(KernelState* kernel) {
++  auto* mem = kernel->memory();
++  const uint32_t guest = mem->SystemHeapAlloc(16384);
++  Check(guest != 0, "guest allocation");
++  auto put = [&](uint32_t offset, uint32_t value) {
++    memory::store_and_swap<uint32_t>(mem->TranslateVirtual(guest + offset), value);
++  };
++  auto object = make_object<XSession>(kernel);
++  Check(object->Initialize(), "session object");
++  auto& registry = kernel->session_manager()->registry();
++  const uint64_t host = kernel->user_profile()->xuid();
++  auto reset = [&] {
++    if (object->record()) registry.Delete(object->record()->info.id);
++    object->set_record(registry.Create(host, "Host", {}, 1, 4, 2));
++  };
++  kernel::xam::apps::XgiApp app(kernel);
++  auto join = [&](uint32_t count, uint32_t xuids, uint32_t users, uint32_t flags) {
++    put(0, object->guest_object()); put(4, count); put(8, xuids);
++    put(12, users); put(16, flags);
++    return app.DispatchMessageSync(0x000B0012, guest, 20);
++  };
++  const std::array<uint64_t, 2> ids{0x1122334455667788ull, 0x8877665544332211ull};
++  for (size_t i = 0; i < ids.size(); ++i)
++    memory::store_and_swap<uint64_t>(mem->TranslateVirtual(guest + 64 + 8*i), ids[i]);
++  const std::array<std::array<uint32_t, 2>, 6> values{{{0,0},{1,0},{0,1},{1,0},{1,1},{0,0}}};
++  for (size_t test = 0; test < values.size(); ++test) {
++    reset();
++    const uint32_t count = test < 2 ? 1 : 2;
++    for (uint32_t i = 0; i < count; ++i) put(96 + 4*i, values[test][i]);
++    Check(join(count, guest + 64, 0, guest + 96) == X_E_SUCCESS, "remote join");
++    auto record = object->record();
++    Check(record->members.size() == count + 1, "exact member count");
++    Check(record->host_xuid == host, "host identity");
++    for (uint32_t i = 0; i < count; ++i) {
++      const auto& member = record->members[i+1];
++      Check(member.xuid == ids[i], "BE64 XUID stride eight");
++      Check(member.private_slot == (values[test][i] != 0), "BE32 private flag stride four");
++      Check(!member.local && member.user_index == UINT32_MAX, "remote metadata");
++    }
++  }
++  reset();
++  Check(join(2, guest+64, 0, 0) == X_E_SUCCESS, "null flags join");
++  Check(!object->record()->members[1].private_slot &&
++        !object->record()->members[2].private_slot, "null flags false");
++  reset();
++  put(112, 0x01020304); put(116, 0x10203040);
++  put(96, 0); put(100, 1);
++  Check(join(2, 0, guest+112, guest+96) == X_E_SUCCESS, "local join");
++  // Existing local-profile identity behavior is deliberately unchanged: both
++  // updates target the same local XUID, with the second index/flag winning.
++  Check(object->record()->members.size() == 1, "local identity unchanged");
++  const auto& local = object->record()->members[0];
++  Check(local.xuid == host && local.local && local.user_index == 0x10203040 &&
++        local.private_slot, "BE32 local index stride four");
++
++  reset();
++  auto reject = [&](uint32_t count, uint32_t xuids, uint32_t users, uint32_t flags) {
++    Check(join(count, xuids, users, flags) == X_E_INVALIDARG, "malformed array rejected");
++    Check(object->record()->members.size() == 1, "no partial admission");
++  };
++  reject(UINT32_MAX, guest+64, 0, guest+96);
++  reject(0x40000000, 0, 0, 0);
++  reject(0x20000000, guest+64, 0, 0);
++  reject(2, guest+64, 0, 0xfffffffc);
++  reject(2, 0xfffffff8, 0, 0);
++  reject(2, 0, 0xfffffffc, 0);
++  reject(1, guest+64, 0, 1);
++  // A readable first entry followed by a no-access page must be rejected
++  // before even the first member is inserted.
++  auto* heap = mem->LookupHeap(guest);
++  const uint32_t page = heap->page_size();
++  const uint32_t boundary = (guest + page - 1) / page * page + page;
++  Check(heap->Protect(boundary, page, 0), "protect short buffer boundary");
++  reject(2, guest+64, 0, boundary-4);
++  reject(2, boundary-8, 0, 0);
++  reject(2, 0, boundary-4, 0);
++  Check(app.DispatchMessageSync(0x000B0012, boundary-4, 20) == X_E_INVALIDARG,
++        "short message rejected");
++  Check(heap->Protect(boundary, page, memory::kMemoryProtectRead | memory::kMemoryProtectWrite),
++        "restore test page");
++  Check(heap->Decommit(boundary, page), "decommit short buffer boundary");
++  reject(2, guest+64, 0, boundary-4);
++  object->set_record(nullptr);
++  object->ReleaseHandle();
++  object.reset();
++  mem->SystemHeapFree(guest);
++  std::cout << "PASS: six flag vectors, null, remote/local identity strides, malformed/short "
++               "arrays and message, overflow, and no partial admission\n";
++}
++int main() {
++  InitLogging();
++  Runtime runtime("");
++  RuntimeConfig config;
++  config.tool_mode = true;
++  if (runtime.Setup(std::move(config))) return 2;
++  int result = 0;
++  try { Run(runtime.kernel_state()); }
++  catch (const std::exception& e) { std::cerr << e.what() << '\n'; result = 1; }
 +  runtime.Shutdown();
 +  return result;
 +}
