@@ -8,7 +8,7 @@ import threading
 import unittest
 
 from tools.master_server.server import (
-    AttemptPurpose, AuthenticationError, DirectoryServer, INVITE_CODE_ALPHABET,
+    AttemptPhase, AttemptPurpose, AuthenticationError, DirectoryServer, INVITE_CODE_ALPHABET,
     INVITE_CODE_LENGTH,
     InviteLookupLimiter,
     MAX_INVITE_LOOKUPS_PER_WINDOW, RENDEZVOUS_MAGIC, RENDEZVOUS_PACKET, RENDEZVOUS_REGISTER,
@@ -477,6 +477,565 @@ class PhaseOneRegistryTests(unittest.TestCase):
         self.assertEqual({}, traversal._request_ids)
 
 
+class PhaseTwoRegistryTests(unittest.TestCase):
+    def make_private_attempt(self, *, discovery_ready=True):
+        now = [1000.0]
+        traversal = RendezvousRegistry(
+            20, lambda: now[0], rendezvous_host="rendezvous.example",
+            admission_ttl_seconds=20)
+        registry = SessionRegistry(45, lambda: now[0], traversal.remove_session)
+        session = registry.create(payload())
+        status, _, client = registry.issue_by_code_attempt(
+            session.invite_code, attempt_payload(), traversal, "client")
+        self.assertEqual("created", status)
+        poll_status, attempts = registry.host_poll_attempts(
+            session.session_id, session.registration_token, [], traversal)
+        self.assertEqual("ok", poll_status)
+        host = attempts[0]
+        if discovery_ready:
+            attempt_id = bytes.fromhex(client["attempt_id"])
+            self.assertIsNotNone(traversal.register(
+                attempt_id, bytes.fromhex(host["capability"]), 0, 0,
+                ("198.51.100.10", 41000)))
+            self.assertIsNotNone(traversal.register(
+                attempt_id, bytes.fromhex(client["capability"]), 1, 0,
+                ("203.0.113.20", 42000)))
+        return now, registry, traversal, session, client, host
+
+    def arm(self, registry, traversal, session, client):
+        return registry.arm_admission(
+            session.session_id, client["attempt_id"], client["capability"], traversal)
+
+    def acknowledge(self, registry, traversal, session, admission):
+        return registry.host_poll_attempts(
+            session.session_id,
+            session.registration_token,
+            [{
+                "attempt_id": admission["attempt_id"],
+                "admission_generation": admission["admission_generation"],
+                "lease_revision": admission["lease_revision"],
+            }],
+            traversal,
+        )
+
+    def test_public_completion_and_expiry_do_not_retain_terminal_state(self):
+        now = [1000.0]
+        traversal = RendezvousRegistry(
+            20, lambda: now[0], rendezvous_host="rendezvous.example")
+        registry = SessionRegistry(45, lambda: now[0], traversal.remove_session)
+        session = registry.create(payload())
+
+        completed = []
+        for index in range(3):
+            status, attempt = registry.issue_public_attempt(
+                session.session_id, traversal, f"completed-{index}")
+            self.assertEqual("created", status)
+            attempt_id = bytes.fromhex(attempt["attempt_id"])
+            self.assertIsNone(traversal._attempts[attempt_id].admission)
+            self.assertTrue(traversal.complete(
+                session.session_id, attempt["attempt_id"], attempt["capability"]))
+            self.assertNotIn(attempt_id, traversal._attempts)
+            self.assertFalse(traversal.complete(
+                session.session_id, attempt["attempt_id"], attempt["capability"]))
+            completed.append(attempt)
+
+        expiring = []
+        for index in range(3):
+            status, attempt = registry.issue_public_attempt(
+                session.session_id, traversal, f"expiring-{index}")
+            self.assertEqual("created", status)
+            expiring.append(attempt)
+        now[0] += 21
+        self.assertEqual([], traversal.pending(session.session_id))
+
+        self.assertEqual({}, traversal._attempts)
+        self.assertEqual({}, traversal._terminal_attempts)
+        self.assertEqual({}, traversal._terminal_by_session)
+        self.assertTrue(registry.exists(session.session_id))
+        for attempt in completed + expiring:
+            self.assertFalse(traversal.complete(
+                session.session_id, attempt["attempt_id"], attempt["capability"]))
+
+    def test_by_code_pre_arm_terminal_state_and_tombstone_are_retained(self):
+        _, registry, traversal, session, client, _ = self.make_private_attempt(
+            discovery_ready=False)
+        attempt_id = bytes.fromhex(client["attempt_id"])
+        self.assertTrue(traversal.complete(
+            session.session_id, client["attempt_id"], client["capability"]))
+
+        self.assertNotIn(attempt_id, traversal._attempts)
+        self.assertIn(attempt_id, traversal._terminal_attempts)
+        self.assertIsNone(traversal._terminal_attempts[attempt_id].admission)
+        request = traversal._request_ids[client["request_id"]]
+        self.assertEqual("completed", request.terminal_reason)
+        status, _, replay = registry.issue_by_code_attempt(
+            session.invite_code, attempt_payload(), traversal, "replay")
+        self.assertEqual("terminal", status)
+        self.assertIsNone(replay)
+
+        status, terminal = registry.admission_status(
+            session.session_id, client["attempt_id"], client["capability"], traversal)
+        self.assertEqual("ok", status)
+        self.assertEqual(AttemptPhase.TERMINAL.value, terminal["phase"])
+        self.assertEqual("completed", terminal["terminal_reason"])
+        self.assertFalse(terminal["host_ready"])
+
+        self.assertTrue(registry.delete(session.session_id, session.registration_token))
+        self.assertEqual({}, traversal._terminal_attempts)
+        self.assertEqual({}, traversal._terminal_by_session)
+        self.assertEqual({}, traversal._request_ids)
+
+    def test_arm_requires_completed_discovery_and_is_idempotent(self):
+        now, registry, traversal, session, client, host = self.make_private_attempt(
+            discovery_ready=False)
+        status, admission = self.arm(registry, traversal, session, client)
+        self.assertEqual("not_ready", status)
+        self.assertIsNone(admission)
+
+        attempt_id = bytes.fromhex(client["attempt_id"])
+        traversal.register(
+            attempt_id, bytes.fromhex(host["capability"]), 0, 0,
+            ("198.51.100.10", 41000))
+        traversal.register(
+            attempt_id, bytes.fromhex(client["capability"]), 1, 0,
+            ("203.0.113.20", 42000))
+        status, admission = self.arm(registry, traversal, session, client)
+        self.assertEqual("created", status)
+        self.assertEqual(AttemptPhase.ADMISSION_AWAITING_HOST.value, admission["phase"])
+        self.assertEqual(1, admission["lease_revision"])
+        self.assertFalse(admission["host_ready"])
+        self.assertEqual(32, len(admission["admission_generation"]))
+        original_expiry = traversal._attempts[attempt_id].admission.expires_at
+
+        now[0] += 5
+        replay_status, replay = self.arm(registry, traversal, session, client)
+        self.assertEqual("replayed", replay_status)
+        self.assertEqual(admission["admission_generation"], replay["admission_generation"])
+        self.assertEqual(1, replay["lease_revision"])
+        self.assertEqual(original_expiry, traversal._attempts[attempt_id].admission.expires_at)
+        self.assertLess(replay["admission_expires_in_ms"], admission["admission_expires_in_ms"])
+
+    def test_armed_admission_does_not_extend_rendezvous_credentials(self):
+        now, registry, traversal, session, client, host = self.make_private_attempt()
+        attempt_id = bytes.fromhex(client["attempt_id"])
+        rendezvous_expiry = traversal._attempts[attempt_id].expires_at
+
+        now[0] += 5
+        status, admission = self.arm(registry, traversal, session, client)
+        self.assertEqual("created", status)
+        self.assertEqual(rendezvous_expiry, traversal._attempts[attempt_id].expires_at)
+        self.assertGreater(traversal._attempts[attempt_id].admission.expires_at,
+                           rendezvous_expiry)
+
+        now[0] = rendezvous_expiry + 1
+        self.assertIsNone(traversal.register(
+            attempt_id, bytes.fromhex(host["capability"]), 0, 0,
+            ("198.51.100.11", 41001)))
+        status, state = registry.admission_status(
+            session.session_id, client["attempt_id"], client["capability"], traversal)
+        self.assertEqual("ok", status)
+        self.assertEqual(admission["admission_generation"], state["admission_generation"])
+        self.assertEqual(AttemptPhase.ADMISSION_AWAITING_HOST.value, state["phase"])
+        self.assertGreater(state["admission_expires_in_ms"], 0)
+
+    def test_public_host_wrong_session_and_expired_rendezvous_cannot_arm(self):
+        now, registry, traversal, session, client, host = self.make_private_attempt()
+        other = registry.create(payload())
+        self.assertEqual(
+            "not_found",
+            registry.arm_admission(
+                other.session_id, client["attempt_id"], client["capability"], traversal)[0],
+        )
+        self.assertEqual(
+            "not_found",
+            registry.arm_admission(
+                session.session_id, client["attempt_id"], host["capability"], traversal)[0],
+        )
+
+        public = registry.issue_public_attempt(session.session_id, traversal, "public-client")[1]
+        self.assertEqual(
+            "not_eligible",
+            registry.arm_admission(
+                session.session_id, public["attempt_id"], public["capability"], traversal)[0],
+        )
+
+        now2, registry2, traversal2, session2, client2, _ = self.make_private_attempt()
+        now2[0] += 21
+        self.assertEqual("terminal", self.arm(registry2, traversal2, session2, client2)[0])
+
+    def test_ack_ready_renew_and_status_are_revision_exact(self):
+        now, registry, traversal, session, client, _ = self.make_private_attempt()
+        _, admission = self.arm(registry, traversal, session, client)
+        attempt_id = bytes.fromhex(client["attempt_id"])
+        original_expiry = traversal._attempts[attempt_id].admission.expires_at
+
+        status, value = registry.renew_admission(
+            session.session_id, client["attempt_id"], client["capability"],
+            {"admission_generation": admission["admission_generation"],
+             "previous_lease_revision": 1}, traversal)
+        self.assertEqual("not_ready", status)
+        self.assertIsNone(value)
+        self.assertEqual(original_expiry, traversal._attempts[attempt_id].admission.expires_at)
+
+        self.acknowledge(registry, traversal, session, admission)
+        status, ready = registry.admission_status(
+            session.session_id, client["attempt_id"], client["capability"], traversal)
+        self.assertEqual("ok", status)
+        self.assertTrue(ready["host_ready"])
+        self.assertEqual(AttemptPhase.ADMISSION_READY.value, ready["phase"])
+        self.assertNotIn("capability", ready)
+
+        now[0] += 6
+        status, renewed = registry.renew_admission(
+            session.session_id, client["attempt_id"], client["capability"],
+            {"admission_generation": admission["admission_generation"],
+             "previous_lease_revision": 1}, traversal)
+        self.assertEqual("renewed", status)
+        self.assertEqual(2, renewed["lease_revision"])
+        self.assertFalse(renewed["host_ready"])
+        renewed_expiry = traversal._attempts[attempt_id].admission.expires_at
+        self.assertEqual(now[0] + 20, renewed_expiry)
+
+        for generation, revision in (
+            (admission["admission_generation"], 1),
+            (admission["admission_generation"], 3),
+            ("ff" * 16, 2),
+        ):
+            with self.subTest(generation=generation, revision=revision):
+                self.assertEqual(
+                    "conflict",
+                    registry.renew_admission(
+                        session.session_id, client["attempt_id"], client["capability"],
+                        {"admission_generation": generation,
+                         "previous_lease_revision": revision}, traversal)[0],
+                )
+                self.assertEqual(renewed_expiry, traversal._attempts[attempt_id].admission.expires_at)
+
+        # An acknowledgement for the old revision cannot ready the new revision.
+        self.acknowledge(registry, traversal, session, admission)
+        _, waiting = registry.admission_status(
+            session.session_id, client["attempt_id"], client["capability"], traversal)
+        self.assertFalse(waiting["host_ready"])
+        self.acknowledge(registry, traversal, session, renewed)
+        _, ready_again = registry.admission_status(
+            session.session_id, client["attempt_id"], client["capability"], traversal)
+        self.assertTrue(ready_again["host_ready"])
+
+        status_expiry = traversal._attempts[attempt_id].admission.expires_at
+        now[0] += 2
+        registry.admission_status(
+            session.session_id, client["attempt_id"], client["capability"], traversal)
+        self.assertEqual(status_expiry, traversal._attempts[attempt_id].admission.expires_at)
+
+    def test_expiry_completion_revocation_and_session_cleanup_are_terminal(self):
+        now, registry, traversal, session, client, host = self.make_private_attempt()
+        _, admission = self.arm(registry, traversal, session, client)
+        self.acknowledge(registry, traversal, session, admission)
+        now[0] += 21
+        status, terminal = registry.admission_status(
+            session.session_id, client["attempt_id"], client["capability"], traversal)
+        self.assertEqual("ok", status)
+        self.assertEqual(AttemptPhase.TERMINAL.value, terminal["phase"])
+        self.assertEqual("admission_expired", terminal["terminal_reason"])
+        self.assertFalse(terminal["host_ready"])
+        attempt_id = bytes.fromhex(client["attempt_id"])
+        self.assertIn(attempt_id, traversal._terminal_attempts)
+        self.acknowledge(registry, traversal, session, admission)
+        _, still_terminal = registry.admission_status(
+            session.session_id, client["attempt_id"], client["capability"], traversal)
+        self.assertEqual(AttemptPhase.TERMINAL.value, still_terminal["phase"])
+        self.assertFalse(still_terminal["host_ready"])
+        self.assertEqual(
+            "terminal",
+            registry.renew_admission(
+                session.session_id, client["attempt_id"], client["capability"],
+                {"admission_generation": admission["admission_generation"],
+                 "previous_lease_revision": 1}, traversal)[0],
+        )
+
+        _, registry2, traversal2, session2, client2, host2 = self.make_private_attempt()
+        _, admission2 = self.arm(registry2, traversal2, session2, client2)
+        self.assertEqual(
+            "revoked",
+            registry2.revoke_admission(
+                session2.session_id, client2["attempt_id"], host2["capability"], traversal2),
+        )
+        _, revoked = registry2.admission_status(
+            session2.session_id, client2["attempt_id"], client2["capability"], traversal2)
+        self.assertEqual("revoked", revoked["terminal_reason"])
+        self.assertFalse(revoked["host_ready"])
+        self.assertIn(bytes.fromhex(client2["attempt_id"]), traversal2._terminal_attempts)
+        self.assertEqual(
+            "terminal",
+            registry2.renew_admission(
+                session2.session_id, client2["attempt_id"], client2["capability"],
+                {"admission_generation": admission2["admission_generation"],
+                 "previous_lease_revision": 1}, traversal2)[0],
+        )
+        self.assertTrue(registry2.delete(session2.session_id, session2.registration_token))
+        self.assertEqual({}, traversal2._terminal_attempts)
+        self.assertEqual({}, traversal2._terminal_by_session)
+        self.assertEqual({}, traversal2._request_ids)
+
+        _, registry3, traversal3, session3, client3, _ = self.make_private_attempt()
+        self.arm(registry3, traversal3, session3, client3)
+        self.assertTrue(registry3.delete(session3.session_id, session3.registration_token))
+        self.assertEqual({}, traversal3._attempts)
+        self.assertEqual({}, traversal3._terminal_attempts)
+        self.assertEqual({}, traversal3._request_ids)
+
+        _, registry4, traversal4, session4, client4, _ = self.make_private_attempt()
+        self.arm(registry4, traversal4, session4, client4)
+        self.assertTrue(traversal4.complete(
+            session4.session_id, client4["attempt_id"], client4["capability"]))
+        self.assertIn(bytes.fromhex(client4["attempt_id"]), traversal4._terminal_attempts)
+        _, completed = registry4.admission_status(
+            session4.session_id, client4["attempt_id"], client4["capability"], traversal4)
+        self.assertEqual("completed", completed["terminal_reason"])
+        self.assertFalse(completed["host_ready"])
+
+        restarted = RendezvousRegistry(rendezvous_host="rendezvous.example")
+        self.assertEqual({}, restarted._attempts)
+        self.assertEqual({}, restarted._terminal_attempts)
+
+    def test_concurrent_arm_and_renew_have_single_generation_and_revision_winner(self):
+        _, registry, traversal, session, client, _ = self.make_private_attempt()
+        barrier = threading.Barrier(8)
+        results = []
+        errors = []
+        lock = threading.Lock()
+
+        def arm_worker():
+            try:
+                barrier.wait()
+                value = self.arm(registry, traversal, session, client)
+                with lock:
+                    results.append(value)
+            except BaseException as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=arm_worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual([], errors)
+        self.assertEqual(1, sum(status == "created" for status, _ in results))
+        self.assertEqual(7, sum(status == "replayed" for status, _ in results))
+        self.assertEqual(1, len({value["admission_generation"] for _, value in results}))
+        self.assertEqual({1}, {value["lease_revision"] for _, value in results})
+
+        admission = results[0][1]
+        self.acknowledge(registry, traversal, session, admission)
+        barrier = threading.Barrier(6)
+        renewals = []
+
+        def renew_worker():
+            try:
+                barrier.wait()
+                value = registry.renew_admission(
+                    session.session_id, client["attempt_id"], client["capability"],
+                    {"admission_generation": admission["admission_generation"],
+                     "previous_lease_revision": 1}, traversal)
+                with lock:
+                    renewals.append(value)
+            except BaseException as exc:
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=renew_worker) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual([], errors)
+        self.assertEqual(1, sum(status == "renewed" for status, _ in renewals))
+        self.assertEqual(5, sum(status == "conflict" for status, _ in renewals))
+        self.assertEqual(2, traversal._attempts[
+            bytes.fromhex(client["attempt_id"])].admission.lease_revision)
+
+    def test_ack_renew_expiry_terminal_and_delete_races_fail_closed(self):
+        now, registry, traversal, session, client, _ = self.make_private_attempt()
+        _, admission = self.arm(registry, traversal, session, client)
+        self.acknowledge(registry, traversal, session, admission)
+
+        barrier = threading.Barrier(2)
+        errors = []
+        error_lock = threading.Lock()
+
+        def renew():
+            try:
+                barrier.wait()
+                registry.renew_admission(
+                    session.session_id, client["attempt_id"], client["capability"],
+                    {"admission_generation": admission["admission_generation"],
+                     "previous_lease_revision": 1}, traversal)
+            except BaseException as exc:
+                with error_lock:
+                    errors.append(exc)
+
+        def stale_ack():
+            try:
+                barrier.wait()
+                self.acknowledge(registry, traversal, session, admission)
+            except BaseException as exc:
+                with error_lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=renew), threading.Thread(target=stale_ack)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual([], errors)
+        _, state = registry.admission_status(
+            session.session_id, client["attempt_id"], client["capability"], traversal)
+        self.assertEqual(2, state["lease_revision"])
+        self.assertFalse(state["host_ready"])
+
+        now[0] += 21
+        barrier = threading.Barrier(2)
+        expiry_results = []
+
+        def expiry_ack():
+            try:
+                barrier.wait()
+                self.acknowledge(registry, traversal, session, {
+                    **admission, "lease_revision": 2,
+                })
+            except BaseException as exc:
+                with error_lock:
+                    errors.append(exc)
+
+        def expiry_status():
+            try:
+                barrier.wait()
+                expiry_results.append(registry.admission_status(
+                    session.session_id, client["attempt_id"],
+                    client["capability"], traversal))
+            except BaseException as exc:
+                with error_lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=expiry_ack), threading.Thread(target=expiry_status)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual([], errors)
+        self.assertEqual(AttemptPhase.TERMINAL.value, expiry_results[0][1]["phase"])
+        _, expired = registry.admission_status(
+            session.session_id, client["attempt_id"], client["capability"], traversal)
+        self.assertEqual(AttemptPhase.TERMINAL.value, expired["phase"])
+        self.assertFalse(expired["host_ready"])
+
+        _, registry2, traversal2, session2, client2, _ = self.make_private_attempt()
+        _, armed2 = self.arm(registry2, traversal2, session2, client2)
+        self.acknowledge(registry2, traversal2, session2, armed2)
+        barrier = threading.Barrier(2)
+        outcomes = []
+
+        def renew2():
+            try:
+                barrier.wait()
+                outcomes.append(registry2.renew_admission(
+                    session2.session_id, client2["attempt_id"], client2["capability"],
+                    {"admission_generation": armed2["admission_generation"],
+                     "previous_lease_revision": 1}, traversal2)[0])
+            except BaseException as exc:
+                with error_lock:
+                    errors.append(exc)
+
+        def terminate2():
+            try:
+                barrier.wait()
+                outcomes.append("completed" if traversal2.complete(
+                    session2.session_id, client2["attempt_id"], client2["capability"])
+                    else "not_found")
+            except BaseException as exc:
+                with error_lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=renew2), threading.Thread(target=terminate2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual([], errors)
+        _, terminal = registry2.admission_status(
+            session2.session_id, client2["attempt_id"], client2["capability"], traversal2)
+        self.assertEqual(AttemptPhase.TERMINAL.value, terminal["phase"])
+        self.assertIn("completed", outcomes)
+
+        _, registry3, traversal3, session3, client3, _ = self.make_private_attempt()
+        barrier = threading.Barrier(2)
+        results = []
+
+        def arm3():
+            try:
+                barrier.wait()
+                results.append(registry3.arm_admission(
+                    session3.session_id, client3["attempt_id"],
+                    client3["capability"], traversal3)[0])
+            except BaseException as exc:
+                with error_lock:
+                    errors.append(exc)
+
+        def delete3():
+            try:
+                barrier.wait()
+                registry3.delete(session3.session_id, session3.registration_token)
+            except BaseException as exc:
+                with error_lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=arm3), threading.Thread(target=delete3)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual([], errors)
+        self.assertIn(results[0], {"created", "not_found"})
+        self.assertEqual({}, traversal3._attempts)
+        self.assertEqual({}, traversal3._terminal_attempts)
+
+        _, registry4, traversal4, session4, client4, _ = self.make_private_attempt()
+        _, armed4 = self.arm(registry4, traversal4, session4, client4)
+        self.acknowledge(registry4, traversal4, session4, armed4)
+        barrier = threading.Barrier(2)
+        renew_delete_results = []
+
+        def renew4():
+            try:
+                barrier.wait()
+                renew_delete_results.append(registry4.renew_admission(
+                    session4.session_id, client4["attempt_id"], client4["capability"],
+                    {"admission_generation": armed4["admission_generation"],
+                     "previous_lease_revision": 1}, traversal4)[0])
+            except BaseException as exc:
+                with error_lock:
+                    errors.append(exc)
+
+        def delete4():
+            try:
+                barrier.wait()
+                registry4.delete(session4.session_id, session4.registration_token)
+            except BaseException as exc:
+                with error_lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=renew4), threading.Thread(target=delete4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual([], errors)
+        self.assertIn(renew_delete_results[0], {"renewed", "not_found"})
+        self.assertEqual({}, traversal4._attempts)
+        self.assertEqual({}, traversal4._terminal_attempts)
+
+
 class HttpTests(unittest.TestCase):
     def setUp(self):
         self.traversal = RendezvousRegistry(rendezvous_host="rendezvous.example", rendezvous_port=30740)
@@ -507,6 +1066,29 @@ class HttpTests(unittest.TestCase):
         path = f"/sessions/by-code/{created['invite_code']}/join-attempts"
         status, response = self.request("POST", path, request or attempt_payload())
         return created, path, status, response
+
+    def make_discovery_ready(self, created, client):
+        host_path = f"/sessions/{created['session_id']}/join-attempts"
+        status, pending = self.request(
+            "GET", host_path, token=created["registration_token"])
+        self.assertEqual(200, status)
+        host = next(
+            value for value in pending["attempts"]
+            if value["attempt_id"] == client["attempt_id"])
+        attempt_id = bytes.fromhex(client["attempt_id"])
+        self.assertIsNotNone(self.traversal.register(
+            attempt_id, bytes.fromhex(host["capability"]), 0, 0,
+            ("198.51.100.10", 41000)))
+        self.assertIsNotNone(self.traversal.register(
+            attempt_id, bytes.fromhex(client["capability"]), 1, 0,
+            ("203.0.113.20", 42000)))
+        return host
+
+    @staticmethod
+    def admission_path(created, client, operation=""):
+        base = (f"/sessions/{created['session_id']}/join-attempts/"
+                f"{client['attempt_id']}/admission")
+        return f"{base}/{operation}" if operation else base
 
     def test_full_http_lifecycle(self):
         status, created = self.request("POST", "/sessions", payload())
@@ -586,6 +1168,9 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(AttemptPurpose.PUBLIC.value, client["purpose"])
         self.assertNotIn("host_capability", client)
         self.assertNotIn("rendezvous_expires_in_ms", client)
+        for field in ("phase", "admission_generation", "lease_revision",
+                      "admission_expires_in_ms", "host_ready"):
+            self.assertNotIn(field, client)
         self.assertEqual("rendezvous.example", client["rendezvous_host"])
         status, _ = self.request("GET", path, token="wrong")
         self.assertEqual(404, status)
@@ -596,6 +1181,9 @@ class HttpTests(unittest.TestCase):
         self.assertEqual("host", host["participant"])
         self.assertEqual(AttemptPurpose.PUBLIC.value, host["purpose"])
         self.assertNotIn("rendezvous_expires_in_ms", host)
+        for field in ("phase", "admission_generation", "lease_revision",
+                      "admission_expires_in_ms", "host_ready"):
+            self.assertNotIn(field, host)
         self.assertEqual(client["attempt_id"], host["attempt_id"])
         self.assertNotEqual(client["capability"], host["capability"])
         status, _ = self.request(
@@ -630,6 +1218,230 @@ class HttpTests(unittest.TestCase):
         self.assertNotIn("rendezvous_expires_in_ms", host)
         self.assertNotIn(client["capability"], host.values())
         self.assertNotIn(host["capability"], client.values())
+
+    def test_admission_http_arm_poll_ack_status_and_renew(self):
+        created, _, status, response = self.create_by_code()
+        self.assertEqual(201, status)
+        client = response["attempt"]
+        host = self.make_discovery_ready(created, client)
+        arm_path = self.admission_path(created, client, "arm")
+
+        status, armed = self.request("POST", arm_path, {}, client["capability"])
+        self.assertEqual(201, status)
+        self.assertEqual(AttemptPhase.ADMISSION_AWAITING_HOST.value, armed["phase"])
+        self.assertEqual(1, armed["lease_revision"])
+        self.assertFalse(armed["host_ready"])
+        attempt_id = bytes.fromhex(client["attempt_id"])
+        original_expiry = self.traversal._attempts[attempt_id].admission.expires_at
+
+        status, replay = self.request("POST", arm_path, {}, client["capability"])
+        self.assertEqual(200, status)
+        self.assertEqual(armed["admission_generation"], replay["admission_generation"])
+        self.assertEqual(original_expiry, self.traversal._attempts[attempt_id].admission.expires_at)
+
+        status_path = self.admission_path(created, client)
+        status, waiting = self.request("GET", status_path, token=client["capability"])
+        self.assertEqual(200, status)
+        self.assertFalse(waiting["host_ready"])
+        self.assertNotIn("capability", waiting)
+
+        poll_path = f"/sessions/{created['session_id']}/join-attempts/poll"
+        acknowledgement = {
+            "attempt_id": client["attempt_id"],
+            "admission_generation": armed["admission_generation"],
+            "lease_revision": 1,
+        }
+        status, polled = self.request(
+            "POST", poll_path, {"acknowledged": [acknowledgement]},
+            created["registration_token"])
+        self.assertEqual(200, status)
+        host_view = next(
+            value for value in polled["attempts"]
+            if value["attempt_id"] == client["attempt_id"])
+        self.assertEqual(host["capability"], host_view["capability"])
+        self.assertEqual(armed["admission_generation"],
+                         host_view["admission_generation"])
+        self.assertEqual(1, host_view["lease_revision"])
+        self.assertTrue(host_view["host_ready"])
+        self.assertNotIn(client["capability"], host_view.values())
+        self.assertNotIn("request_id", host_view)
+        self.assertNotIn("rendezvous_expires_in_ms", host_view)
+
+        status, ready = self.request("GET", status_path, token=client["capability"])
+        self.assertEqual(200, status)
+        self.assertTrue(ready["host_ready"])
+        self.assertEqual(armed["admission_generation"],
+                         ready["host_seen_admission_generation"])
+        self.assertEqual(1, ready["host_seen_lease_revision"])
+
+        renew_path = self.admission_path(created, client, "renew")
+        status, renewed = self.request(
+            "POST", renew_path,
+            {"admission_generation": armed["admission_generation"],
+             "previous_lease_revision": 1},
+            client["capability"])
+        self.assertEqual(200, status)
+        self.assertEqual(2, renewed["lease_revision"])
+        self.assertFalse(renewed["host_ready"])
+        renewed_expiry = self.traversal._attempts[attempt_id].admission.expires_at
+
+        # Old acknowledgement is harmless; current acknowledgement readies revision 2.
+        self.request(
+            "POST", poll_path, {"acknowledged": [acknowledgement]},
+            created["registration_token"])
+        _, not_ready = self.request("GET", status_path, token=client["capability"])
+        self.assertFalse(not_ready["host_ready"])
+        acknowledgement["lease_revision"] = 2
+        self.request(
+            "POST", poll_path, {"acknowledged": [acknowledgement]},
+            created["registration_token"])
+        _, ready_again = self.request("GET", status_path, token=client["capability"])
+        self.assertTrue(ready_again["host_ready"])
+        self.assertEqual(renewed_expiry,
+                         self.traversal._attempts[attempt_id].admission.expires_at)
+
+    def test_admission_http_authorization_scope_and_server_owned_fields(self):
+        created, _, status, response = self.create_by_code()
+        self.assertEqual(201, status)
+        client = response["attempt"]
+        arm_path = self.admission_path(created, client, "arm")
+        status, _ = self.request("POST", arm_path, {}, client["capability"])
+        self.assertEqual(409, status)
+        self.assertEqual(404, self.request(
+            "POST", arm_path, {}, "00" * 16)[0])
+        for body in (
+            {"admission_generation": "00" * 16},
+            {"lease_revision": 99},
+            {"purpose": AttemptPurpose.INVITE_CODE_PRIVATE_ELIGIBLE.value},
+        ):
+            with self.subTest(body=body):
+                status, _ = self.request("POST", arm_path, body, client["capability"])
+                self.assertEqual(400, status)
+
+        host = self.make_discovery_ready(created, client)
+        status, armed = self.request("POST", arm_path, {}, client["capability"])
+        self.assertEqual(201, status)
+        self.assertEqual(404, self.request("POST", arm_path, {}, host["capability"])[0])
+        self.assertEqual(404, self.request(
+            "GET", self.admission_path(created, client), token=host["capability"])[0])
+
+        _, other = self.request("POST", "/sessions", payload())
+        wrong_session_path = (f"/sessions/{other['session_id']}/join-attempts/"
+                              f"{client['attempt_id']}/admission/arm")
+        self.assertEqual(404, self.request(
+            "POST", wrong_session_path, {}, client["capability"])[0])
+
+        public = self.registry.issue_public_attempt(
+            created["session_id"], self.traversal, "public-client")[1]
+        self.assertIsNotNone(public)
+        self.assertEqual(409, self.request(
+            "POST", self.admission_path(created, public, "arm"), {},
+            public["capability"])[0])
+        self.assertEqual(409, self.request(
+            "POST", self.admission_path(created, public, "revoke"), {},
+            public["capability"])[0])
+        _, host_poll = self.request(
+            "GET", f"/sessions/{created['session_id']}/join-attempts",
+            token=created["registration_token"])
+        public_host = next(
+            value for value in host_poll["attempts"]
+            if value["attempt_id"] == public["attempt_id"])
+        for field in ("phase", "admission_generation", "lease_revision",
+                      "admission_expires_in_ms", "host_ready"):
+            self.assertNotIn(field, public_host)
+
+        renew_path = self.admission_path(created, client, "renew")
+        renewal = {
+            "admission_generation": armed["admission_generation"],
+            "previous_lease_revision": 1,
+        }
+        self.assertEqual(404, self.request(
+            "POST", renew_path, renewal, host["capability"])[0])
+        self.assertEqual(409, self.request(
+            "POST", renew_path, {**renewal, "admission_generation": "ff" * 16},
+            client["capability"])[0])
+        self.assertEqual(409, self.request(
+            "POST", renew_path, {**renewal, "previous_lease_revision": 2},
+            client["capability"])[0])
+
+        poll_path = f"/sessions/{created['session_id']}/join-attempts/poll"
+        acknowledgement = {
+            "attempt_id": client["attempt_id"],
+            "admission_generation": armed["admission_generation"],
+            "lease_revision": 1,
+        }
+        for change in (
+            {"admission_generation": "ee" * 16},
+            {"lease_revision": 2},
+        ):
+            status, _ = self.request(
+                "POST", poll_path,
+                {"acknowledged": [{**acknowledgement, **change}]},
+                created["registration_token"])
+            self.assertEqual(200, status)
+            _, unchanged = self.request(
+                "GET", self.admission_path(created, client), token=client["capability"])
+            self.assertFalse(unchanged["host_ready"])
+        self.assertEqual(404, self.request(
+            "POST", poll_path, {"acknowledged": [acknowledgement]},
+            client["capability"])[0])
+        self.assertEqual(404, self.request(
+            "POST", poll_path, {"acknowledged": [acknowledgement]}, "wrong-token")[0])
+        other_poll = f"/sessions/{other['session_id']}/join-attempts/poll"
+        self.assertEqual(200, self.request(
+            "POST", other_poll, {"acknowledged": [acknowledgement]},
+            other["registration_token"])[0])
+        _, state = self.request(
+            "GET", self.admission_path(created, client), token=client["capability"])
+        self.assertFalse(state["host_ready"])
+
+    def test_admission_http_expiry_revocation_and_terminal_status(self):
+        now = [1000.0]
+        self.registry.clock = lambda: now[0]
+        self.traversal.clock = lambda: now[0]
+        created, _, status, response = self.create_by_code()
+        self.assertEqual(201, status)
+        client = response["attempt"]
+        self.make_discovery_ready(created, client)
+        status, armed = self.request(
+            "POST", self.admission_path(created, client, "arm"), {},
+            client["capability"])
+        self.assertEqual(201, status)
+        now[0] += 21
+        status, terminal = self.request(
+            "GET", self.admission_path(created, client), token=client["capability"])
+        self.assertEqual(200, status)
+        self.assertEqual(AttemptPhase.TERMINAL.value, terminal["phase"])
+        self.assertEqual("admission_expired", terminal["terminal_reason"])
+        self.assertFalse(terminal["host_ready"])
+        renewal = {
+            "admission_generation": armed["admission_generation"],
+            "previous_lease_revision": 1,
+        }
+        self.assertEqual(410, self.request(
+            "POST", self.admission_path(created, client, "renew"), renewal,
+            client["capability"])[0])
+        self.assertEqual(410, self.request(
+            "POST", self.admission_path(created, client, "arm"), {},
+            client["capability"])[0])
+
+        now[0] += 0.3
+        created2, _, status, response2 = self.create_by_code(
+            attempt_payload(request_id="ffeeddccbbaa99887766554433221100"))
+        self.assertEqual(201, status)
+        client2 = response2["attempt"]
+        host2 = self.make_discovery_ready(created2, client2)
+        self.assertEqual(201, self.request(
+            "POST", self.admission_path(created2, client2, "arm"), {},
+            client2["capability"])[0])
+        self.assertEqual(204, self.request(
+            "POST", self.admission_path(created2, client2, "revoke"), {},
+            host2["capability"])[0])
+        status, revoked = self.request(
+            "GET", self.admission_path(created2, client2), token=client2["capability"])
+        self.assertEqual(200, status)
+        self.assertEqual("revoked", revoked["terminal_reason"])
+        self.assertFalse(revoked["host_ready"])
 
     def test_client_cannot_supply_attempt_purpose(self):
         status, created = self.request("POST", "/sessions", payload())

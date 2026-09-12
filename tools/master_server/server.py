@@ -39,6 +39,7 @@ RENDEZVOUS_PACKET = struct.Struct("!4sBBBB16s16s4sH4sH4x")
 RENDEZVOUS_MIN_INTERVAL_SECONDS = 0.1
 MAX_RENDEZVOUS_ATTEMPTS = 1024
 DEFAULT_ATTEMPT_TTL_SECONDS = 20
+DEFAULT_ADMISSION_TTL_SECONDS = 20
 MAX_ATTEMPTS_PER_SESSION = 8
 ATTEMPT_CREATE_MIN_INTERVAL_SECONDS = 0.25
 INVITE_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
@@ -53,6 +54,13 @@ ATTEMPT_REQUEST_ID_LENGTH = 32
 class AttemptPurpose(str, enum.Enum):
     PUBLIC = "public"
     INVITE_CODE_PRIVATE_ELIGIBLE = "invite_code_private_eligible"
+
+
+class AttemptPhase(str, enum.Enum):
+    RENDEZVOUS_ACTIVE = "rendezvous_active"
+    ADMISSION_AWAITING_HOST = "admission_awaiting_host"
+    ADMISSION_READY = "admission_ready"
+    TERMINAL = "terminal"
 
 
 class ValidationError(ValueError):
@@ -134,6 +142,58 @@ def validate_by_code_attempt(payload: Any) -> dict[str, Any]:
             payload.get("protocol_version"), "protocol_version", 1, 65535),
         "build_id": _build_id(payload.get("build_id")),
     }
+
+
+def _hex_128(value: Any, name: str) -> str:
+    if not isinstance(value, str) or len(value) != 32:
+        raise ValidationError(f"{name} must contain exactly 32 hexadecimal digits")
+    normalized = value.lower()
+    if any(ch not in "0123456789abcdef" for ch in normalized):
+        raise ValidationError(f"{name} must contain exactly 32 hexadecimal digits")
+    return normalized
+
+
+def validate_admission_arm(payload: Any) -> None:
+    if not isinstance(payload, dict):
+        raise ValidationError("request body must be an object")
+    if payload:
+        raise ValidationError("admission arm request must be empty")
+
+
+def validate_admission_renew(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValidationError("request body must be an object")
+    expected = {"admission_generation", "previous_lease_revision"}
+    if set(payload) != expected:
+        raise ValidationError("admission renewal fields are invalid")
+    return {
+        "admission_generation": _hex_128(
+            payload.get("admission_generation"), "admission_generation"),
+        "previous_lease_revision": _required_int(
+            payload.get("previous_lease_revision"),
+            "previous_lease_revision", 1, (1 << 63) - 1),
+    }
+
+
+def validate_host_poll(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict) or set(payload) != {"acknowledged"}:
+        raise ValidationError("host poll request must contain acknowledged")
+    acknowledged = payload.get("acknowledged")
+    if not isinstance(acknowledged, list) or len(acknowledged) > MAX_ATTEMPTS_PER_SESSION:
+        raise ValidationError("acknowledged must be a bounded array")
+    result = []
+    for value in acknowledged:
+        if (not isinstance(value, dict) or
+                set(value) != {"attempt_id", "admission_generation", "lease_revision"}):
+            raise ValidationError("acknowledgement fields are invalid")
+        result.append({
+            "attempt_id": _hex_128(value.get("attempt_id"), "attempt_id"),
+            "admission_generation": _hex_128(
+                value.get("admission_generation"), "admission_generation"),
+            "lease_revision": _required_int(
+                value.get("lease_revision"), "lease_revision", 1, (1 << 63) - 1),
+        })
+    return result
 
 
 def _url_token(value: Any, name: str, maximum: int) -> str:
@@ -402,6 +462,67 @@ class SessionRegistry:
             )
             return status, value.public(), attempt
 
+    def arm_admission(
+        self, session_id: str, attempt_id: str, credential: str,
+        traversal: RendezvousRegistry,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Arm while preserving the registry -> traversal lock order."""
+        now = self.clock()
+        with self._lock:
+            self._expire_locked(now)
+            if session_id not in self._sessions:
+                return "not_found", None
+            return traversal.arm_admission(session_id, attempt_id, credential)
+
+    def renew_admission(
+        self, session_id: str, attempt_id: str, credential: str,
+        request: dict[str, Any], traversal: RendezvousRegistry,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Renew while preserving the registry -> traversal lock order."""
+        now = self.clock()
+        with self._lock:
+            self._expire_locked(now)
+            if session_id not in self._sessions:
+                return "not_found", None
+            return traversal.renew_admission(
+                session_id, attempt_id, credential,
+                request["admission_generation"], request["previous_lease_revision"])
+
+    def admission_status(
+        self, session_id: str, attempt_id: str, credential: str,
+        traversal: RendezvousRegistry,
+    ) -> tuple[str, dict[str, Any] | None]:
+        now = self.clock()
+        with self._lock:
+            self._expire_locked(now)
+            if session_id not in self._sessions:
+                return "not_found", None
+            return traversal.admission_status(session_id, attempt_id, credential)
+
+    def host_poll_attempts(
+        self, session_id: str, token: str, acknowledged: list[dict[str, Any]],
+        traversal: RendezvousRegistry,
+    ) -> tuple[str, list[dict[str, Any]] | None]:
+        """Authenticate and poll/ack atomically with directory-session lifetime."""
+        now = self.clock()
+        with self._lock:
+            self._expire_locked(now)
+            value = self._sessions.get(session_id)
+            if value is None or not secrets.compare_digest(value.registration_token, token):
+                return "not_found", None
+            return "ok", traversal.host_poll(session_id, acknowledged)
+
+    def revoke_admission(
+        self, session_id: str, attempt_id: str, credential: str,
+        traversal: RendezvousRegistry,
+    ) -> str:
+        now = self.clock()
+        with self._lock:
+            self._expire_locked(now)
+            if session_id not in self._sessions:
+                return "not_found"
+            return traversal.revoke_admission(session_id, attempt_id, credential)
+
     def lookup_code(self, code: str) -> dict[str, Any] | None:
         normalized = normalize_invite_code(code)
         if normalized is None:
@@ -508,6 +629,22 @@ class DirectoryHandler(BaseHTTPRequestHandler):
         return observed_client_ip(
             self.client_address[0], self.headers.get("X-Forwarded-For", ""))
 
+    def _admission_error(self, status: str) -> None:
+        if status == "terminal":
+            self._json(HTTPStatus.GONE, {"error": "attempt is terminal"})
+        elif status in {"not_eligible", "not_ready", "conflict"}:
+            self._json(HTTPStatus.CONFLICT, {"error": status.replace("_", " ")})
+        elif status == "invalid_purpose":
+            self._json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"error": "admission state failed closed"},
+            )
+        else:
+            self._json(
+                HTTPStatus.NOT_FOUND,
+                {"error": "unknown session, attempt, or capability"},
+            )
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlsplit(self.path)
         if parsed.path == "/sessions":
@@ -528,11 +665,22 @@ class DirectoryHandler(BaseHTTPRequestHandler):
                 else:
                     self._json(HTTPStatus.OK, {"session": value})
             return
+        if (len(parts) == 5 and parts[0] == "sessions" and
+                parts[2] == "join-attempts" and parts[4] == "admission"):
+            status, value = self.registry.admission_status(
+                parts[1], parts[3], self._bearer(), self.traversal)
+            if status == "ok":
+                self._json(HTTPStatus.OK, value)
+            else:
+                self._admission_error(status)
+            return
         if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "join-attempts":
-            if not self.registry.owns(parts[1], self._bearer()):
+            status, attempts = self.registry.host_poll_attempts(
+                parts[1], self._bearer(), [], self.traversal)
+            if status != "ok":
                 self._json(HTTPStatus.NOT_FOUND, {"error": "unknown session or token"})
             else:
-                self._json(HTTPStatus.OK, {"attempts": self.traversal.pending(parts[1])})
+                self._json(HTTPStatus.OK, {"attempts": attempts})
             return
         self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
@@ -605,6 +753,48 @@ class DirectoryHandler(BaseHTTPRequestHandler):
                         {"error": "attempt issuance failed closed"},
                     )
                 return
+            if (len(parts) == 4 and parts[0] == "sessions" and
+                    parts[2] == "join-attempts" and parts[3] == "poll"):
+                acknowledged = validate_host_poll(payload)
+                status, attempts = self.registry.host_poll_attempts(
+                    parts[1], self._bearer(), acknowledged, self.traversal)
+                if status != "ok":
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "unknown session or token"})
+                else:
+                    self._json(HTTPStatus.OK, {"attempts": attempts})
+                return
+            if (len(parts) == 6 and parts[0] == "sessions" and
+                    parts[2] == "join-attempts" and parts[4] == "admission"):
+                if parts[5] == "arm":
+                    validate_admission_arm(payload)
+                    status, value = self.registry.arm_admission(
+                        parts[1], parts[3], self._bearer(), self.traversal)
+                    if status == "created":
+                        self._json(HTTPStatus.CREATED, value)
+                    elif status == "replayed":
+                        self._json(HTTPStatus.OK, value)
+                    else:
+                        self._admission_error(status)
+                    return
+                if parts[5] == "renew":
+                    request = validate_admission_renew(payload)
+                    status, value = self.registry.renew_admission(
+                        parts[1], parts[3], self._bearer(), request, self.traversal)
+                    if status == "renewed":
+                        self._json(HTTPStatus.OK, value)
+                    else:
+                        self._admission_error(status)
+                    return
+                if parts[5] == "revoke":
+                    validate_admission_arm(payload)
+                    status = self.registry.revoke_admission(
+                        parts[1], parts[3], self._bearer(), self.traversal)
+                    if status == "revoked":
+                        self.send_response(HTTPStatus.NO_CONTENT)
+                        self.end_headers()
+                    else:
+                        self._admission_error(status)
+                    return
             if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "join-attempts":
                 _reject_client_purpose(payload)
                 status, value = self.registry.issue_public_attempt(
@@ -667,6 +857,16 @@ class DirectoryServer(ThreadingHTTPServer):
 
 
 @dataclass
+class AdmissionState:
+    generation: bytes
+    lease_revision: int
+    expires_at: float
+    host_seen_generation: bytes | None = None
+    host_seen_revision: int | None = None
+    host_seen_at: float | None = None
+
+
+@dataclass
 class RendezvousAttempt:
     session_id: str
     credentials: tuple[bytes, bytes]
@@ -681,6 +881,17 @@ class RendezvousAttempt:
         tuple[int, int],
         tuple[float, tuple[str, int], tuple[str, int] | None],
     ]
+    admission: AdmissionState | None = None
+
+
+@dataclass
+class TerminalAttempt:
+    session_id: str
+    credentials: tuple[bytes, bytes]
+    purpose: AttemptPurpose | str
+    request_id: str | None
+    admission: AdmissionState | None
+    terminal_reason: str
 
 
 @dataclass
@@ -695,12 +906,16 @@ class RendezvousRegistry:
     """Short-lived, credential-bound NAT traversal endpoint observations."""
 
     def __init__(self, ttl_seconds: int = DEFAULT_ATTEMPT_TTL_SECONDS, clock=time.monotonic,
-                 rendezvous_host: str = "", rendezvous_port: int = 30740):
+                 rendezvous_host: str = "", rendezvous_port: int = 30740,
+                 admission_ttl_seconds: int = DEFAULT_ADMISSION_TTL_SECONDS):
         self.ttl_seconds = ttl_seconds
+        self.admission_ttl_seconds = admission_ttl_seconds
         self.clock = clock
         self._lock = threading.Lock()
         self._attempts: dict[bytes, RendezvousAttempt] = {}
         self._by_session: dict[str, set[bytes]] = {}
+        self._terminal_attempts: dict[bytes, TerminalAttempt] = {}
+        self._terminal_by_session: dict[str, set[bytes]] = {}
         self._last_create: dict[tuple[str, str], float] = {}
         self._request_ids: dict[str, AttemptRequestState] = {}
         self._request_ids_by_session: dict[str, set[str]] = {}
@@ -723,17 +938,33 @@ class RendezvousRegistry:
             attempts.discard(attempt_id)
             if not attempts:
                 self._by_session.pop(value.session_id, None)
+        if value.request_id is not None or value.admission is not None:
+            self._terminal_attempts[attempt_id] = TerminalAttempt(
+                session_id=value.session_id,
+                credentials=value.credentials,
+                purpose=value.purpose,
+                request_id=value.request_id,
+                admission=value.admission,
+                terminal_reason=reason,
+            )
+            self._terminal_by_session.setdefault(value.session_id, set()).add(attempt_id)
         if value.request_id is not None:
             request = self._request_ids.get(value.request_id)
             if request is not None and request.attempt_id == attempt_id:
                 request.terminal_reason = reason
 
     def _expire_locked(self, now: float) -> None:
-        stale = [key for key, value in self._attempts.items()
-                 if value.completed or now >= value.expires_at]
-        for key in stale:
-            value = self._attempts[key]
-            self._remove_attempt_locked(key, "completed" if value.completed else "expired")
+        stale: list[tuple[bytes, str]] = []
+        for key, value in self._attempts.items():
+            if value.completed:
+                stale.append((key, "completed"))
+            elif value.admission is not None:
+                if now >= value.admission.expires_at:
+                    stale.append((key, "admission_expired"))
+            elif now >= value.expires_at:
+                stale.append((key, "expired"))
+        for key, reason in stale:
+            self._remove_attempt_locked(key, reason)
 
     def _issue_locked(
         self, session_id: str, source: str, purpose: AttemptPurpose,
@@ -833,74 +1064,304 @@ class RendezvousRegistry:
                 return "invalid_purpose", None
             return "created", value
 
-    def pending(self, session_id: str) -> list[dict[str, Any]]:
+    @staticmethod
+    def _decode_128(value: str) -> bytes | None:
+        try:
+            decoded = bytes.fromhex(value)
+        except (TypeError, ValueError):
+            return None
+        return decoded if len(decoded) == 16 else None
+
+    @staticmethod
+    def _host_ready(admission: AdmissionState, now: float) -> bool:
+        return (
+            now < admission.expires_at and
+            admission.host_seen_generation == admission.generation and
+            admission.host_seen_revision == admission.lease_revision
+        )
+
+    def _admission_view(
+        self, attempt_id: bytes, purpose: AttemptPurpose,
+        admission: AdmissionState | None, now: float,
+        *, include_host_seen: bool, terminal_reason: str | None = None,
+    ) -> dict[str, Any]:
+        host_ready = admission is not None and self._host_ready(admission, now)
+        if terminal_reason is not None:
+            phase = AttemptPhase.TERMINAL
+            host_ready = False
+        elif admission is None:
+            phase = AttemptPhase.RENDEZVOUS_ACTIVE
+        elif host_ready:
+            phase = AttemptPhase.ADMISSION_READY
+        else:
+            phase = AttemptPhase.ADMISSION_AWAITING_HOST
+        value: dict[str, Any] = {
+            "attempt_id": attempt_id.hex(),
+            "purpose": purpose.value,
+            "phase": phase.value,
+            "admission_generation": (
+                admission.generation.hex() if admission is not None else None),
+            "lease_revision": admission.lease_revision if admission is not None else None,
+            "admission_lease_duration_ms": int(self.admission_ttl_seconds * 1000),
+            "admission_expires_in_ms": (
+                max(0, int((admission.expires_at - now) * 1000))
+                if admission is not None and terminal_reason is None else 0),
+            "host_ready": host_ready,
+        }
+        if include_host_seen:
+            value["host_seen_admission_generation"] = (
+                admission.host_seen_generation.hex()
+                if admission is not None and admission.host_seen_generation is not None
+                else None)
+            value["host_seen_lease_revision"] = (
+                admission.host_seen_revision if admission is not None else None)
+        if terminal_reason is not None:
+            value["terminal_reason"] = terminal_reason
+        return value
+
+    def _terminal_client_locked(
+        self, session_id: str, attempt_id: bytes, credential: bytes,
+    ) -> TerminalAttempt | None:
+        terminal = self._terminal_attempts.get(attempt_id)
+        if (terminal is None or terminal.session_id != session_id or
+                not secrets.compare_digest(terminal.credentials[1], credential)):
+            return None
+        return terminal
+
+    def arm_admission(
+        self, session_id: str, attempt_text: str, credential_text: str,
+    ) -> tuple[str, dict[str, Any] | None]:
+        attempt_id = self._decode_128(attempt_text)
+        credential = self._decode_128(credential_text)
+        if attempt_id is None or credential is None:
+            return "not_found", None
         now = self.clock()
         with self._lock:
             self._expire_locked(now)
-            pending = []
-            for key in list(self._by_session.get(session_id, set())):
-                attempt = self._attempts.get(key)
-                if attempt is None:
-                    continue
-                value = self._public(key, attempt, 0)
-                if value is None:
-                    self._remove_attempt_locked(key, "invalid_purpose")
-                    continue
-                pending.append(value)
-            if pending:
-                print(f"NAT timing: host poll session={session_id} attempts="
-                      f"{','.join(item['attempt_id'] for item in pending)}", flush=True)
-            return pending
+            attempt = self._attempts.get(attempt_id)
+            if attempt is None:
+                terminal = self._terminal_client_locked(session_id, attempt_id, credential)
+                return ("terminal", None) if terminal is not None else ("not_found", None)
+            if (attempt.session_id != session_id or
+                    not secrets.compare_digest(attempt.credentials[1], credential)):
+                return "not_found", None
+            purpose = self._purpose(attempt.purpose)
+            if purpose is None:
+                self._remove_attempt_locked(attempt_id, "invalid_purpose")
+                return "invalid_purpose", None
+            if purpose is not AttemptPurpose.INVITE_CODE_PRIVATE_ELIGIBLE:
+                return "not_eligible", None
+            if attempt.admission is not None:
+                return "replayed", self._admission_view(
+                    attempt_id, purpose, attempt.admission, now, include_host_seen=False)
+            # The directory owns no Xbox session tuple. Both discovery-role endpoint
+            # observations are the strongest completed-rendezvous evidence it has.
+            if (0, 0) not in attempt.endpoints or (1, 0) not in attempt.endpoints:
+                return "not_ready", None
+            attempt.admission = AdmissionState(
+                generation=secrets.token_bytes(16),
+                lease_revision=1,
+                expires_at=now + self.admission_ttl_seconds,
+            )
+            return "created", self._admission_view(
+                attempt_id, purpose, attempt.admission, now, include_host_seen=False)
 
-    def complete(self, session_id: str, attempt_text: str, credential_text: str) -> bool:
-        try:
-            attempt_id = bytes.fromhex(attempt_text)
-            credential = bytes.fromhex(credential_text)
-        except ValueError:
-            return False
+    def renew_admission(
+        self, session_id: str, attempt_text: str, credential_text: str,
+        generation_text: str, previous_revision: int,
+    ) -> tuple[str, dict[str, Any] | None]:
+        attempt_id = self._decode_128(attempt_text)
+        credential = self._decode_128(credential_text)
+        generation = self._decode_128(generation_text)
+        if attempt_id is None or credential is None or generation is None:
+            return "not_found", None
+        now = self.clock()
+        with self._lock:
+            self._expire_locked(now)
+            attempt = self._attempts.get(attempt_id)
+            if attempt is None:
+                terminal = self._terminal_client_locked(session_id, attempt_id, credential)
+                return ("terminal", None) if terminal is not None else ("not_found", None)
+            if (attempt.session_id != session_id or
+                    not secrets.compare_digest(attempt.credentials[1], credential)):
+                return "not_found", None
+            purpose = self._purpose(attempt.purpose)
+            if purpose is None:
+                self._remove_attempt_locked(attempt_id, "invalid_purpose")
+                return "invalid_purpose", None
+            if purpose is not AttemptPurpose.INVITE_CODE_PRIVATE_ELIGIBLE:
+                return "not_eligible", None
+            admission = attempt.admission
+            if admission is None:
+                return "not_ready", None
+            if (admission.generation != generation or
+                    admission.lease_revision != previous_revision):
+                return "conflict", None
+            if not self._host_ready(admission, now):
+                return "not_ready", None
+            if admission.lease_revision >= (1 << 63) - 1:
+                return "conflict", None
+            admission.lease_revision += 1
+            admission.expires_at = now + self.admission_ttl_seconds
+            return "renewed", self._admission_view(
+                attempt_id, purpose, admission, now, include_host_seen=False)
+
+    def admission_status(
+        self, session_id: str, attempt_text: str, credential_text: str,
+    ) -> tuple[str, dict[str, Any] | None]:
+        attempt_id = self._decode_128(attempt_text)
+        credential = self._decode_128(credential_text)
+        if attempt_id is None or credential is None:
+            return "not_found", None
+        now = self.clock()
+        with self._lock:
+            self._expire_locked(now)
+            attempt = self._attempts.get(attempt_id)
+            if attempt is not None:
+                if (attempt.session_id != session_id or
+                        not secrets.compare_digest(attempt.credentials[1], credential)):
+                    return "not_found", None
+                purpose = self._purpose(attempt.purpose)
+                if purpose is None:
+                    self._remove_attempt_locked(attempt_id, "invalid_purpose")
+                    return "invalid_purpose", None
+                if purpose is not AttemptPurpose.INVITE_CODE_PRIVATE_ELIGIBLE:
+                    return "not_eligible", None
+                return "ok", self._admission_view(
+                    attempt_id, purpose, attempt.admission, now, include_host_seen=True)
+            terminal = self._terminal_client_locked(session_id, attempt_id, credential)
+            if terminal is None:
+                return "not_found", None
+            purpose = self._purpose(terminal.purpose)
+            if purpose is None:
+                return "invalid_purpose", None
+            return "ok", self._admission_view(
+                attempt_id, purpose, terminal.admission, now, include_host_seen=True,
+                terminal_reason=terminal.terminal_reason)
+
+    def host_poll(
+        self, session_id: str, acknowledged: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        now = self.clock()
+        with self._lock:
+            self._expire_locked(now)
+            for value in acknowledged:
+                attempt_id = self._decode_128(value["attempt_id"])
+                generation = self._decode_128(value["admission_generation"])
+                if attempt_id is None or generation is None:
+                    continue
+                attempt = self._attempts.get(attempt_id)
+                if attempt is None or attempt.session_id != session_id:
+                    continue
+                purpose = self._purpose(attempt.purpose)
+                if purpose is None:
+                    self._remove_attempt_locked(attempt_id, "invalid_purpose")
+                    continue
+                if purpose is not AttemptPurpose.INVITE_CODE_PRIVATE_ELIGIBLE:
+                    continue
+                admission = attempt.admission
+                if (admission is None or now >= admission.expires_at or
+                        admission.generation != generation or
+                        admission.lease_revision != value["lease_revision"]):
+                    continue
+                admission.host_seen_generation = admission.generation
+                admission.host_seen_revision = admission.lease_revision
+                admission.host_seen_at = now
+            return self._pending_locked(session_id, now)
+
+    def _pending_locked(self, session_id: str, now: float) -> list[dict[str, Any]]:
+        pending = []
+        for key in list(self._by_session.get(session_id, set())):
+            attempt = self._attempts.get(key)
+            if attempt is None:
+                continue
+            value = self._public(key, attempt, 0, now=now)
+            if value is None:
+                self._remove_attempt_locked(key, "invalid_purpose")
+                continue
+            pending.append(value)
+        if pending:
+            print(f"NAT timing: host poll session={session_id} attempts="
+                  f"{','.join(item['attempt_id'] for item in pending)}", flush=True)
+        return pending
+
+    def pending(self, session_id: str) -> list[dict[str, Any]]:
+        return self.host_poll(session_id, [])
+
+    def _terminate(
+        self, session_id: str, attempt_text: str, credential_text: str, reason: str,
+        *, require_admission: bool = False,
+    ) -> str:
+        attempt_id = self._decode_128(attempt_text)
+        credential = self._decode_128(credential_text)
+        if attempt_id is None or credential is None:
+            return "not_found"
         now = self.clock()
         with self._lock:
             self._expire_locked(now)
             attempt = self._attempts.get(attempt_id)
             if attempt is None or attempt.session_id != session_id:
-                return False
-            if self._purpose(attempt.purpose) is None:
+                return "not_found"
+            purpose = self._purpose(attempt.purpose)
+            if purpose is None:
                 self._remove_attempt_locked(attempt_id, "invalid_purpose")
-                return False
+                return "invalid_purpose"
+            if require_admission:
+                if purpose is not AttemptPurpose.INVITE_CODE_PRIVATE_ELIGIBLE:
+                    return "not_eligible"
+                if attempt.admission is None:
+                    return "not_ready"
             if not any(secrets.compare_digest(value, credential)
                        for value in attempt.credentials):
-                return False
-            attempt.completed = True
-            self._expire_locked(now)
-            return True
+                return "not_found"
+            self._remove_attempt_locked(attempt_id, reason)
+            return reason
+
+    def complete(self, session_id: str, attempt_text: str, credential_text: str) -> bool:
+        return self._terminate(
+            session_id, attempt_text, credential_text, "completed") == "completed"
+
+    def revoke_admission(
+        self, session_id: str, attempt_text: str, credential_text: str,
+    ) -> str:
+        status = self._terminate(
+            session_id, attempt_text, credential_text, "revoked", require_admission=True)
+        return "revoked" if status == "revoked" else status
 
     def remove_session(self, session_id: str) -> None:
         with self._lock:
             for key in list(self._by_session.get(session_id, set())):
                 self._remove_attempt_locked(key, "session_removed")
+            for key in self._terminal_by_session.pop(session_id, set()):
+                self._terminal_attempts.pop(key, None)
             for request_id in self._request_ids_by_session.pop(session_id, set()):
                 self._request_ids.pop(request_id, None)
             for key in [key for key in self._last_create if key[0] == session_id]:
                 del self._last_create[key]
 
     def _public(self, attempt_id: bytes, attempt: RendezvousAttempt,
-                participant: int) -> dict[str, Any] | None:
+                participant: int, now: float | None = None) -> dict[str, Any] | None:
         purpose = self._purpose(attempt.purpose)
         if purpose is None:
             return None
+        if now is None:
+            now = self.clock()
         value = {
             "attempt_id": attempt_id.hex(),
             "capability": attempt.credentials[participant].hex(),
             "participant": "host" if participant == 0 else "client",
             "purpose": purpose.value,
-            "expires_in": max(0, int(attempt.expires_at - self.clock())),
+            "expires_in": max(0, int(attempt.expires_at - now)),
             "rendezvous_host": self.rendezvous_host,
             "rendezvous_port": self.rendezvous_port,
         }
         if participant == 1 and attempt.request_id is not None:
             value["request_id"] = attempt.request_id
             value["rendezvous_expires_in_ms"] = max(
-                0, int((attempt.expires_at - self.clock()) * 1000))
+                0, int((attempt.expires_at - now) * 1000))
+        if participant == 0 and attempt.admission is not None:
+            value.update(self._admission_view(
+                attempt_id, purpose, attempt.admission, now, include_host_seen=False))
         return value
 
     def register(
@@ -917,7 +1378,7 @@ class RendezvousRegistry:
             if attempt is not None and self._purpose(attempt.purpose) is None:
                 self._remove_attempt_locked(attempt_id, "invalid_purpose")
                 return None
-            if (attempt is None or attempt.completed or
+            if (attempt is None or attempt.completed or now >= attempt.expires_at or
                     not secrets.compare_digest(attempt.credentials[participant], credential)):
                 return None
             previous = attempt.endpoint_seen.get(key)
