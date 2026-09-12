@@ -314,13 +314,13 @@ index 9b9cf9e..657352a 100644
    // don't return into freed pages. Drained at the end of ~KernelState.
 diff --git a/include/rex/system/xam/nat_probe.h b/include/rex/system/xam/nat_probe.h
 new file mode 100644
-index 0000000..6605431
 --- /dev/null
 +++ b/include/rex/system/xam/nat_probe.h
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,84 @@
 +#pragma once
 +
 +#include <cstddef>
++#include <chrono>
 +#include <cstdint>
 +#include <optional>
 +#include <string>
@@ -383,6 +383,7 @@ index 0000000..6605431
 +                    XSocket* socket_object = nullptr);
 +void NatProbeDetach(uint64_t socket);
 +void NatProbeTick(uint64_t socket);
++void NatProbeTickAt(uint64_t socket, std::chrono::steady_clock::time_point now);
 +bool NatProbeIsControlPacket(uint64_t socket, const uint8_t* data, size_t size,
 +                             uint32_t source_ipv4, uint16_t source_port);
 +bool NatProbeConsume(uint64_t socket, const uint8_t* data, size_t size, uint32_t source_ipv4,
@@ -391,6 +392,11 @@ index 0000000..6605431
 +std::vector<LanAddress> NatProbePeers(uint64_t socket, bool require_ack = true);
 +std::vector<NatProbePeerAttempt> NatProbePeerAttempts(uint64_t socket,
 +                                                       bool require_ack = true);
++std::vector<std::string> NatProbeMatchAcknowledgedDiscoveryAttempts(
++    uint64_t socket, LanAddress source);
++std::vector<NatProbePeerAttempt> NatProbeAcknowledgedDiscoveryAttempts();
++bool NatProbeRendezvousAttemptActive(uint64_t socket,
++                                     std::string_view attempt_id);
 +std::optional<LanAddress> NatProbeNormalizeGameplaySource(uint64_t socket,
 +                                                          LanAddress source);
 +
@@ -399,7 +405,7 @@ diff --git a/include/rex/system/xam/session.h b/include/rex/system/xam/session.h
 new file mode 100644
 --- /dev/null
 +++ b/include/rex/system/xam/session.h
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,237 @@
 +#pragma once
 +
 +#include <array>
@@ -499,6 +505,20 @@ new file mode 100644
 +  bool ready = false;
 +};
 +
++struct SessionRecord;
++
++enum class DiscoveryAdmissionSource { kPublicDiscovery, kInviteGrant };
++
++struct DiscoveryAdmissionContext {
++  DiscoveryAdmissionSource source = DiscoveryAdmissionSource::kPublicDiscovery;
++};
++
++// Authoritative hosted-session mutation seam. Public discovery ignores a peer
++// private-bit claim; an invite context may honor the title-selected slot pool.
++bool ApplyDiscoveryMemberBatch(SessionRecord& session,
++                               std::span<const SessionMember> members,
++                               DiscoveryAdmissionContext context);
++
 +enum class SessionState : uint32_t { kLobby, kRegistration, kInGame, kReporting, kDeleted };
 +
 +struct SessionRecord {
@@ -543,8 +563,6 @@ new file mode 100644
 +  std::vector<std::shared_ptr<SessionRecord>> List() const;
 +  std::vector<std::shared_ptr<SessionRecord>> ListRemote(uint64_t local_xuid) const;
 +  bool Join(const std::array<uint8_t, 8>& id, SessionMember member);
-+  // Guest-title updates target the exact attached record. On clients these
-+  // update observations only; local joining still requires a host response.
 +  bool JoinBatch(const std::shared_ptr<SessionRecord>& expected,
 +                 std::span<const SessionMember> members);
 +  bool Leave(const std::array<uint8_t, 8>& id, uint64_t xuid);
@@ -566,7 +584,9 @@ new file mode 100644
 +
 +class LanDiscoveryService {
 + public:
-+  LanDiscoveryService(uint32_t title_id, uint16_t port);
++  LanDiscoveryService(
++      uint32_t title_id, uint16_t port,
++      std::shared_ptr<HostAdmissionGrantStore> admission_grants = {});
 +  ~LanDiscoveryService();
 +  LanDiscoveryService(const LanDiscoveryService&) = delete;
 +  LanDiscoveryService& operator=(const LanDiscoveryService&) = delete;
@@ -584,6 +604,7 @@ new file mode 100644
 +
 + private:
 +  class Impl;
++  std::shared_ptr<HostAdmissionGrantStore> admission_grants_;
 +  std::unique_ptr<Impl> impl_;
 +  SessionDirectoryClient directory_;
 +};
@@ -624,17 +645,21 @@ new file mode 100644
 +}  // namespace rex::system
 diff --git a/include/rex/system/xam/session_directory.h b/include/rex/system/xam/session_directory.h
 new file mode 100644
-index 0000000..b309f7a
 --- /dev/null
 +++ b/include/rex/system/xam/session_directory.h
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,224 @@
 +#pragma once
 +
++#include <chrono>
 +#include <filesystem>
 +#include <cstdint>
 +#include <memory>
++#include <mutex>
 +#include <optional>
++#include <span>
 +#include <string>
++#include <unordered_map>
++#include <unordered_set>
 +#include <vector>
 +
 +#include <rex/cvar.h>
@@ -675,6 +700,100 @@ index 0000000..b309f7a
 +  std::string rendezvous_host;
 +  uint16_t rendezvous_port = 0;
 +  uint8_t participant = 0;
++  std::string purpose;
++  std::string admission_generation;
++  uint64_t lease_revision = 0;
++  uint32_t admission_expires_in_ms = 0;
++  bool host_ready = false;
++};
++
++struct HostAdmissionPollAttempt {
++  std::string attempt_id;
++  std::string capability;
++  std::string purpose;
++  std::string admission_generation;
++  uint64_t lease_revision = 0;
++  uint32_t admission_expires_in_ms = 0;
++  bool host_ready = false;
++};
++
++struct HostAdmissionReservation {
++  std::string directory_session_id;
++  std::string attempt_id;
++  std::string admission_generation;
++  uint64_t lease_revision = 0;
++  uint64_t discovery_socket = 0;
++  uint32_t peer_ipv4 = 0;
++  uint16_t peer_port = 0;
++  uint64_t xuid = 0;
++  uint64_t reservation_id = 0;
++  explicit operator bool() const { return reservation_id != 0; }
++};
++
++enum class HostAdmissionReservationStatus {
++  kNoMatch,
++  kAmbiguous,
++  kReserved,
++  kDuplicateReservation,
++  kConsumedDuplicate,
++};
++
++struct HostAdmissionReservationResult {
++  HostAdmissionReservationStatus status = HostAdmissionReservationStatus::kNoMatch;
++  HostAdmissionReservation reservation;
++};
++
++struct HostAdmissionCompletion {
++  std::string directory_session_id;
++  std::string attempt_id;
++  std::string capability;
++};
++
++// Process-local host authority. Callers snapshot NAT state before entering this
++// lock and release it before taking any session-membership lock.
++class HostAdmissionGrantStore {
++ public:
++  using Clock = std::chrono::steady_clock;
++
++  void ApplyAuthenticatedPoll(std::string_view directory_session_id,
++                              std::span<const HostAdmissionPollAttempt> attempts,
++                              Clock::time_point poll_started_at = Clock::now());
++  HostAdmissionReservationResult Reserve(
++      std::string_view directory_session_id, uint64_t discovery_socket,
++      uint32_t peer_ipv4, uint16_t peer_port,
++      std::span<const std::string> acknowledged_attempt_ids, uint64_t xuid,
++      Clock::time_point now = Clock::now());
++  void Finish(const HostAdmissionReservation& reservation, bool committed,
++              Clock::time_point now = Clock::now());
++  void InvalidateSession(std::string_view directory_session_id);
++  void Clear();
++  std::vector<HostAdmissionCompletion> TakeCompletions();
++  std::optional<std::string> hosted_directory_session() const;
++  size_t available_grant_count(Clock::time_point now = Clock::now()) const;
++
++ private:
++  struct Grant {
++    std::string directory_session_id;
++    std::string attempt_id;
++    std::string capability;
++    std::string admission_generation;
++    uint64_t lease_revision = 0;
++    Clock::time_point expires_at{};
++    uint64_t reservation_id = 0;
++    uint64_t reserved_socket = 0;
++    uint32_t reserved_ipv4 = 0;
++    uint16_t reserved_port = 0;
++    uint64_t reserved_xuid = 0;
++    uint64_t consumed_xuid = 0;
++    bool invalidated_while_reserved = false;
++  };
++
++  void InvalidateGrantLocked(Grant& grant);
++  mutable std::mutex mutex_;
++  std::unordered_map<std::string, Grant> grants_;
++  std::vector<HostAdmissionCompletion> completions_;
++  std::string hosted_directory_session_;
++  uint64_t next_reservation_id_ = 1;
 +};
 +
 +enum class DirectoryHeartbeatDisposition {
@@ -684,11 +803,43 @@ index 0000000..b309f7a
 +  kRejected,
 +};
 +
++enum class DirectoryHostPollDisposition {
++  kAccepted,
++  kRetainUntilExpiry,
++  kRecoverRegistration,
++  kRejectSnapshot,
++};
++
++struct DirectoryHostPollRuntimeState {
++  std::string directory_session_id;
++  std::string registration_token;
++  std::string public_invite_code;
++  std::unordered_set<std::string> host_attempts;
++  std::unordered_map<std::string, HostAdmissionPollAttempt> private_attempts;
++  std::vector<HostAdmissionCompletion> pending_completions;
++  bool recovering = false;
++};
++
++struct DirectoryHostPollTransition {
++  bool recover_now = false;
++};
++
 +// Keep transport and server failures distinct from an authoritative 404. This
 +// policy is public only so the host lifecycle can be covered without real HTTP
 +// timing in unit tests.
 +DirectoryHeartbeatDisposition ClassifyDirectoryHeartbeatResponse(std::optional<uint32_t> status,
 +                                                                 bool valid_session_id);
++DirectoryHostPollDisposition ClassifyDirectoryHostPollResponse(
++    std::optional<uint32_t> status, bool valid_snapshot);
++std::optional<std::vector<DirectoryTraversalAttempt>> ParseDirectoryHostPollSnapshot(
++    std::string_view body, std::string_view directory_session_id);
++DirectoryHostPollTransition ApplyDirectoryHostPollResult(
++    DirectoryHostPollDisposition disposition,
++    std::span<const DirectoryTraversalAttempt> attempts,
++    DirectoryHostPollRuntimeState& state,
++    HostAdmissionGrantStore* admission_grants, SessionRecord& hosted,
++    HostAdmissionGrantStore::Clock::time_point poll_started_at =
++        HostAdmissionGrantStore::Clock::now());
 +std::optional<std::string> NormalizeDirectoryInviteCode(std::string_view value);
 +bool WriteActiveInviteCodeFile(const std::filesystem::path& path, std::string_view code);
 +void RemoveActiveInviteCodeFile(const std::filesystem::path& path);
@@ -704,7 +855,8 @@ index 0000000..b309f7a
 +  SessionDirectoryClient& operator=(const SessionDirectoryClient&) = delete;
 +
 +  void StartHosting(const std::shared_ptr<SessionRecord>& session, uint32_t title_id,
-+                    uint16_t discovery_port);
++                    uint16_t discovery_port,
++                    std::shared_ptr<HostAdmissionGrantStore> admission_grants = {});
 +  void StopHosting();
 +  std::vector<DirectorySession> List(uint32_t title_id) const;
 +  void RequestList(uint32_t title_id) const;
@@ -1398,22 +1550,22 @@ index 3f9422d..e0dbf41 100644
      mouse_dy_ = 0.0f;
    }
 diff --git a/src/kernel/xam/apps/xgi_app.cpp b/src/kernel/xam/apps/xgi_app.cpp
-index 2b222da..7d76c91 100644
 --- a/src/kernel/xam/apps/xgi_app.cpp
 +++ b/src/kernel/xam/apps/xgi_app.cpp
-@@ -9,8 +9,11 @@
+@@ -9,8 +9,12 @@
   * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
   */
- 
+
 +#include <algorithm>
++#include <unordered_set>
 +
  #include <rex/kernel/xam/apps/xgi_app.h>
  #include <rex/logging.h>
 +#include <rex/system/xam/session.h>
  #include <rex/thread.h>
- 
+
  namespace rex {
-@@ -19,8 +22,221 @@ namespace xam {
+@@ -19,8 +23,220 @@ namespace xam {
  using namespace rex::system;
  using namespace rex::system::xam;
  namespace apps {
@@ -1427,25 +1579,25 @@ index 2b222da..7d76c91 100644
 +  return true;
 +}
  using namespace rex::system;
- 
+
 +namespace {
 +constexpr uint32_t kSessionCreateHost = 1;
 +constexpr uint32_t kInvalidUserIndex = 0xFFFFFFFFu;
 +
-+// Validate the complete array before a join can mutate membership. Use widened
-+// arithmetic and the heap's page-access check before translating guest memory.
 +bool ReadableJoinArray(memory::Memory* memory, uint32_t address, uint32_t count,
 +                       uint32_t width) {
 +  const uint64_t size = uint64_t{count} * width;
-+  if (!size || size > UINT32_MAX || uint64_t{address} + size > (uint64_t{1} << 32))
++  if (!size || size > UINT32_MAX ||
++      uint64_t{address} + size > (uint64_t{1} << 32))
 +    return false;
 +  auto* heap = memory->LookupHeap(address);
-+  if (!heap || heap->QueryRangeAccess(address, uint32_t(uint64_t{address} + size - 1)) ==
-+                   memory::PageAccess::kNoAccess)
++  if (!heap ||
++      heap->QueryRangeAccess(address,
++                             uint32_t(uint64_t{address} + size - 1)) ==
++          memory::PageAccess::kNoAccess)
 +    return false;
-+  // Decommitted pages can retain protection metadata. Check commitment too,
-+  // advancing by whole regions from a page-aligned address.
-+  uint64_t cursor = address - (address - heap->heap_base()) % heap->page_size();
++  uint64_t cursor =
++      address - (address - heap->heap_base()) % heap->page_size();
 +  const uint64_t end = uint64_t{address} + size;
 +  while (cursor < end) {
 +    memory::HeapAllocationInfo info{};
@@ -1456,7 +1608,6 @@ index 2b222da..7d76c91 100644
 +  }
 +  return true;
 +}
-+
 +
 +#pragma pack(push, 1)
 +struct GuestSessionInfo {
@@ -1633,7 +1784,7 @@ index 2b222da..7d76c91 100644
 +}  // namespace
 +
  XgiApp::XgiApp(KernelState* kernel_state) : App(kernel_state, 0xFB) {}
- 
+
  // http://mb.mirage.org/bugzilla/xliveless/main.c
 @@ -42,6 +258,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        uint32_t context_value = memory::load_and_swap<uint32_t>(buffer + 20);
@@ -1661,7 +1812,7 @@ index 2b222da..7d76c91 100644
 +      uint32_t user_index = memory::load_and_swap<uint32_t>(buffer + 16);
        uint32_t session_info_ptr = memory::load_and_swap<uint32_t>(buffer + 20);
        uint32_t nonce_ptr = memory::load_and_swap<uint32_t>(buffer + 24);
- 
+
        REXKRNL_DEBUG(
            "XGISessionCreateImpl({:08X}, {:08X}, {}, {}, {:08X}, {:08X}, "
            "{:08X})",
@@ -1707,9 +1858,9 @@ index 2b222da..7d76c91 100644
      }
      case 0x000B0011: {
 @@ -124,10 +379,20 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
- 
+
        REXKRNL_DEBUG("XGISessionDelete({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
- 
+
 +      auto* object = LookupSession(kernel_state_, obj_ptr);
 +      if (!object || !object->record())
 +        return X_E_INVALIDARG;
@@ -1728,10 +1879,10 @@ index 2b222da..7d76c91 100644
        uint32_t session_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
        uint32_t user_count = memory::load_and_swap<uint32_t>(buffer + 4);
        uint32_t xuid_array_ptr = memory::load_and_swap<uint32_t>(buffer + 8);
-@@ -135,9 +400,96 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -135,9 +400,103 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        uint32_t private_slots_array = memory::load_and_swap<uint32_t>(buffer + 16);
        bool is_local = xuid_array_ptr == 0;
- 
+
 -      REXKRNL_DEBUG("{}({:08X}, {}, {}, {:08X}, {:08X})",
 +      REXKRNL_DEBUG("{}({:08X}, count={}, xuids={:08X}, users={:08X}, private={:08X})",
                      is_local ? "XGISessionJoinLocal" : "XGISessionJoinRemote", session_ptr,
@@ -1740,8 +1891,10 @@ index 2b222da..7d76c91 100644
 +      if (!object || !object->record() || !user_count)
 +        return X_E_INVALIDARG;
 +      if (user_count > UINT32_MAX / 4 ||
-+          (private_slots_array && !ReadableJoinArray(memory_, private_slots_array, user_count, 4)) ||
-+          (!is_local && !ReadableJoinArray(memory_, xuid_array_ptr, user_count, 8)) ||
++          (private_slots_array &&
++           !ReadableJoinArray(memory_, private_slots_array, user_count, 4)) ||
++          (!is_local &&
++           !ReadableJoinArray(memory_, xuid_array_ptr, user_count, 8)) ||
 +          (is_local && user_index_array &&
 +           !ReadableJoinArray(memory_, user_index_array, user_count, 4)))
 +        return X_E_INVALIDARG;
@@ -1756,9 +1909,9 @@ index 2b222da..7d76c91 100644
 +                                  ? memory::load_and_swap<uint32_t>(
 +                                        memory_->TranslateVirtual(user_index_array + i * 4))
 +                                  : kInvalidUserIndex;
-+        bool private_slot =
-+            private_slots_array && memory::load_and_swap<uint32_t>(
-+                                       memory_->TranslateVirtual(private_slots_array + 4 * i)) != 0;
++        bool private_slot = private_slots_array &&
++                            memory::load_and_swap<uint32_t>(memory_->TranslateVirtual(
++                                private_slots_array + 4 * i)) != 0;
 +        SessionMember member{
 +            xuid,         is_local ? kernel_state_->user_profile()->name() : std::string{},
 +            user_index,   is_local,
@@ -1767,20 +1920,24 @@ index 2b222da..7d76c91 100644
 +          return X_E_INVALIDARG;
 +        members.push_back(std::move(member));
 +      }
-+      if (!is_local || session->host_xuid == kernel_state_->user_profile()->xuid())
-+        return kernel_state_->session_manager()->registry().JoinBatch(session, members)
-+                   ? X_E_SUCCESS : X_E_FAIL;
-+      // Current local-profile mapping produces one unique local XUID. A
-+      // multi-user network transaction requires a protocol extension; never
-+      // send a partial sequence of host admissions.
++      if (!is_local ||
++          session->host_xuid == kernel_state_->user_profile()->xuid())
++        return kernel_state_->session_manager()->registry().JoinBatch(session,
++                                                                       members)
++                   ? X_E_SUCCESS
++                   : X_E_FAIL;
++      // One local profile maps to one XUID. Never turn a multi-user network
++      // request into a partial sequence of host admissions.
 +      if (members.size() != 1)
 +        return X_E_INVALIDARG;
 +      const auto& member = members.front();
 +      const auto xuid = member.xuid;
 +      const auto user_index = member.user_index;
-+      REXKRNL_INFO("XGISessionJoinLocal: requesting LAN join xuid={:016X} host={:016X}", xuid,
-+                   session->host_xuid);
-+      auto updated = kernel_state_->session_manager()->discovery().Join(*session, member, 500);
++      REXKRNL_INFO(
++          "XGISessionJoinLocal: requesting LAN join xuid={:016X} host={:016X}",
++          xuid, session->host_xuid);
++      auto updated = kernel_state_->session_manager()->discovery().Join(
++          *session, member, 500);
 +      if (!updated)
 +        return X_E_FAIL;
 +      for (auto& updated_member : updated->members) {
@@ -1790,7 +1947,8 @@ index 2b222da..7d76c91 100644
 +          updated_member.name = kernel_state_->user_profile()->name();
 +        }
 +      }
-+      kernel_state_->session_manager()->registry().UpsertDiscovered(std::move(*updated));
++      kernel_state_->session_manager()->registry().UpsertDiscovered(
++          std::move(*updated));
 +      session = kernel_state_->session_manager()->registry().Find(session->info.id);
 +      object->set_record(session);
 +      REXKRNL_INFO("XGISessionJoinLocal: joined session with {} members",
@@ -1826,10 +1984,10 @@ index 2b222da..7d76c91 100644
        return X_E_SUCCESS;
      }
      case 0x000B0014: {
-@@ -149,7 +501,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
- 
+@@ -149,7 +508,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+
        REXKRNL_DEBUG("XSessionStart({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
- 
+
 -      return X_STATUS_SUCCESS;
 +      auto* object = LookupSession(kernel_state_, obj_ptr);
 +      return object && object->record() &&
@@ -1839,10 +1997,10 @@ index 2b222da..7d76c91 100644
      }
      case 0x000B0015: {
        // send high scores?
-@@ -161,7 +517,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
- 
+@@ -161,7 +524,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+
        REXKRNL_DEBUG("XSessionEnd({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
- 
+
 -      return X_E_SUCCESS;
 +      auto* object = LookupSession(kernel_state_, obj_ptr);
 +      return object && object->record() &&
@@ -1852,7 +2010,7 @@ index 2b222da..7d76c91 100644
      }
      case 0x000B0016: {
        assert_true(!buffer_length || buffer_length == 32);
-@@ -179,7 +539,13 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -179,7 +546,13 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XSessionSearch({}, {}, {}, {}, {}, {:08X}, {:08X}, {}, {:08X})", proc_index,
                      user_index, num_results, num_props, num_ctx, props_ptr, ctx_ptr,
                      results_buffer_size, search_results_ptr);
@@ -1867,10 +2025,10 @@ index 2b222da..7d76c91 100644
      }
      case 0x000B0018: {
        assert_true(!buffer_length || buffer_length == 16);
-@@ -192,7 +558,12 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -192,7 +565,12 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XSessionModify({:08X}, {:08X}, {:08X}, {:08X})", obj_ptr, flags,
                      maxPublicSlots, maxPrivateSlots);
- 
+
 -      return X_E_SUCCESS;
 +      auto* object = LookupSession(kernel_state_, obj_ptr);
 +      return object && object->record() &&
@@ -1881,7 +2039,7 @@ index 2b222da..7d76c91 100644
      }
      case 0x000B001C: {
        assert_true(!buffer_length || buffer_length == 36);
-@@ -213,8 +584,33 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -213,8 +591,33 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XSessionSearchEx({}, {}, {}, {}, {}, {:08X}, {:08X}, {}, {:08X}, {})",
                      proc_index, user_index, num_results, num_props, num_ctx, props_ptr, ctx_ptr,
                      results_buffer_size, search_results_ptr, num_users);
@@ -1909,17 +2067,17 @@ index 2b222da..7d76c91 100644
 +                       memory::load_and_swap<uint32_t>(contexts + i * 8 + 4));
 +        }
 +      }
- 
+
 -      return X_E_SUCCESS;
 +      return WriteSearchResults(kernel_state_, search_results_ptr, results_buffer_size, num_results,
 +                                true, nullptr, num_props, props_ptr, num_ctx, ctx_ptr);
      }
      case 0x000B001D: {
        assert_true(!buffer_length || buffer_length == 24);
-@@ -229,6 +625,44 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -229,6 +632,44 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XSessionGetDetails({:08X}, {}, {:08X}, {}, {}, {})", obj_ptr,
                      details_buffer_size, session_details_ptr, reserved1, reserved2, reserved3);
- 
+
 +      auto* object = LookupSession(kernel_state_, obj_ptr);
 +      if (!object || !object->record() || !session_details_ptr)
 +        return X_E_INVALIDARG;
@@ -1961,10 +2119,10 @@ index 2b222da..7d76c91 100644
        return X_E_SUCCESS;
      }
      case 0x000B001E: {
-@@ -289,7 +723,15 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -289,7 +730,15 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                      user_index, num_session_ids, session_ids_ptr, results_buffer_size,
                      search_results_ptr, reserved1, reserved2, reserved3);
- 
+
 -      return X_E_SUCCESS;
 +      if (!num_session_ids || !session_ids_ptr)
 +        return X_E_INVALIDARG;
@@ -1978,10 +2136,10 @@ index 2b222da..7d76c91 100644
      }
      case 0x000B001F: {
        assert_true(!buffer_length || buffer_length == 24);
-@@ -330,6 +772,10 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+@@ -330,6 +779,10 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
        REXKRNL_DEBUG("XUserReadStats({}, {}, {:08X}, {}, {:08X}, {}, {:08X})", title_id, xuids_count,
                      xuids_ptr, specs_count, specs_ptr, results_size, results_ptr);
- 
+
 +      if (!results_ptr || !InitializeEmptyStatsReadResults(std::span<uint8_t>(
 +                              memory_->TranslateVirtual(results_ptr), results_size))) {
 +        return X_E_INVALIDARG;
@@ -3329,10 +3487,9 @@ index c10694c..ceffd4f 100644
      Shutdown();
 diff --git a/src/system/xam/nat_probe.cpp b/src/system/xam/nat_probe.cpp
 new file mode 100644
-index 0000000..3a37fdb
 --- /dev/null
 +++ b/src/system/xam/nat_probe.cpp
-@@ -0,0 +1,690 @@
+@@ -0,0 +1,771 @@
 +#include <rex/system/xam/nat_probe.h>
 +
 +#include <algorithm>
@@ -3345,6 +3502,7 @@ index 0000000..3a37fdb
 +#include <string>
 +#include <thread>
 +#include <unordered_map>
++#include <unordered_set>
 +#include <vector>
 +
 +#include <rex/cvar.h>
@@ -3421,7 +3579,10 @@ index 0000000..3a37fdb
 +  uint8_t stability_checkpoints = 0;
 +  std::chrono::steady_clock::time_point last_registration{};
 +  std::chrono::steady_clock::time_point last_punch{};
-+  bool terminal = false;
++  // Stops the short rendezvous transmission phase without discarding an
++  // already authenticated and acknowledged discovery correlation. Private
++  // authority still requires a separately live host admission grant.
++  bool rendezvous_expired = false;
 +  uint32_t registrations_sent = 0;
 +};
 +
@@ -3439,10 +3600,17 @@ index 0000000..3a37fdb
 +std::unordered_map<uint64_t, State> states;
 +std::unordered_map<std::string, Identity> automatic_identities;
 +std::unordered_map<std::string, LanAddress> automatic_logical_gameplay_peers;
++std::unordered_set<std::string> expired_discovery_attempts;
++std::unordered_set<std::string> expired_gameplay_attempts;
 +std::mutex gameplay_pump_mutex;
 +std::condition_variable gameplay_pump_cv;
 +bool gameplay_pump_running = false;
 +std::jthread gameplay_pump_thread;
++
++std::unordered_set<std::string>& ExpiredAttempts(NatProbeRole role) {
++  return role == NatProbeRole::kDiscovery ? expired_discovery_attempts
++                                          : expired_gameplay_attempts;
++}
 +
 +bool ParseHex(std::string_view text, uint8_t* output) {
 +  if (text.size() != 32)
@@ -3563,7 +3731,7 @@ index 0000000..3a37fdb
 +    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
 +                             now - attempt.attached_at)
 +                             .count();
-+    if (attempt.identity.automatic && !attempt.terminal &&
++    if (attempt.identity.automatic && !attempt.rendezvous_expired &&
 +        NatProbeAutomaticAttemptActive(uint32_t(std::max<int64_t>(0, elapsed)),
 +                                       attempt.endpoint.acknowledged()))
 +      return true;
@@ -3687,6 +3855,8 @@ index 0000000..3a37fdb
 +    if (automatic_identities.contains(identity->key)) return true;
 +    automatic_identities.insert_or_assign(identity->key, *identity);
 +    for (auto& [socket, state] : states) {
++      if (ExpiredAttempts(state.role).contains(identity->key))
++        continue;
 +      AttemptState attempt{};
 +      attempt.identity = *identity;
 +      if (auto logical = automatic_logical_gameplay_peers.find(identity->key);
@@ -3716,9 +3886,12 @@ index 0000000..3a37fdb
 +
 +void NatProbeRetireIdentity(std::string_view attempt_id) {
 +  std::lock_guard lock(state_mutex);
-+  automatic_identities.erase(std::string(attempt_id));
-+  automatic_logical_gameplay_peers.erase(std::string(attempt_id));
-+  for (auto& [socket, state] : states) state.attempts.erase(std::string(attempt_id));
++  const std::string key(attempt_id);
++  automatic_identities.erase(key);
++  automatic_logical_gameplay_peers.erase(key);
++  expired_discovery_attempts.erase(key);
++  expired_gameplay_attempts.erase(key);
++  for (auto& [socket, state] : states) state.attempts.erase(key);
 +  gameplay_pump_cv.notify_all();
 +}
 +
@@ -3729,6 +3902,8 @@ index 0000000..3a37fdb
 +    if (identity.participant == participant) retired.push_back(key);
 +  for (const auto& key : retired) automatic_identities.erase(key);
 +  for (const auto& key : retired) automatic_logical_gameplay_peers.erase(key);
++  for (const auto& key : retired) expired_discovery_attempts.erase(key);
++  for (const auto& key : retired) expired_gameplay_attempts.erase(key);
 +  for (auto& [socket, state] : states)
 +      for (const auto& key : retired) state.attempts.erase(key);
 +  gameplay_pump_cv.notify_all();
@@ -3764,7 +3939,8 @@ index 0000000..3a37fdb
 +      state.attempts.emplace(identity.key, std::move(attempt));
 +    };
 +    if (auto manual = ManualIdentity()) add(*manual);
-+    for (const auto& [key, identity] : automatic_identities) add(identity);
++    for (const auto& [key, identity] : automatic_identities)
++      if (!ExpiredAttempts(role).contains(key)) add(identity);
 +    start_gameplay_pump = role == NatProbeRole::kGameplay &&
 +                          GameplayAttemptPendingLocked(state, std::chrono::steady_clock::now());
 +    states.insert_or_assign(socket, state);
@@ -3794,66 +3970,89 @@ index 0000000..3a37fdb
 +                        std::chrono::steady_clock::time_point now) {
 +  constexpr std::array checkpoints{std::chrono::seconds(5), std::chrono::seconds(15),
 +                                   std::chrono::seconds(30)};
-+  for (auto& [key, attempt] : state.attempts) {
-+  if (attempt.terminal) continue;
-+  if (attempt.identity.automatic &&
-+      now - attempt.attached_at >= std::chrono::seconds(20)) {
-+    attempt.terminal = true;
-+    REXSYS_WARN("NAT traversal: automatic attempt expired locally role={}", uint8_t(state.role));
-+    continue;
-+  }
-+  for (size_t i = 0; i < checkpoints.size(); ++i) {
-+    const uint8_t bit = uint8_t(1u << i);
-+    if (attempt.observed.port && !(attempt.stability_checkpoints & bit) &&
-+        now - attempt.attached_at >= checkpoints[i]) {
-+      attempt.stability_checkpoints |= bit;
-+      REXSYS_INFO("NAT traversal: role={} mapping stable at {}s public={:08X}:{}",
-+                  uint8_t(state.role), checkpoints[i].count(), attempt.observed.ipv4,
-+                  attempt.observed.port);
++  for (auto iterator = state.attempts.begin(); iterator != state.attempts.end();) {
++    auto& attempt = iterator->second;
++    if (attempt.rendezvous_expired) {
++      ++iterator;
++      continue;
 +    }
-+  }
-+  // A host may already have its gameplay socket registered when the joining
-+  // client's gameplay socket appears. Poll quickly until the rendezvous server
-+  // supplies that peer so the title's bounded membership exchange is not spent
-+  // waiting for the normal mapping keepalive interval.
-+  const auto registration_interval = std::chrono::milliseconds(
-+      NatProbeRegistrationIntervalMs(attempt.endpoint.peer().port != 0));
-+  if (now - attempt.last_registration >= registration_interval) {
-+    Packet packet{};
-+    FillIdentity(packet, attempt.identity);
-+    packet.type = kRegister;
-+    packet.role = uint8_t(state.role);
-+    Send(socket, packet, attempt.identity.server);
-+    attempt.last_registration = now;
-+    ++attempt.registrations_sent;
-+    REXSYS_INFO(
-+        "NAT traversal: registration sent socket={} role={} attempt={} participant={} count={}",
-+        socket, uint8_t(state.role), attempt.identity.key, attempt.identity.participant,
-+        attempt.registrations_sent);
-+  }
-+  const auto peer = attempt.endpoint.peer();
-+  if (peer.port && !attempt.endpoint.acknowledged() &&
-+      now - attempt.last_punch >= std::chrono::milliseconds(100)) {
-+    Packet packet{};
-+    FillIdentity(packet, attempt.identity);
-+    packet.type = kPunch;
-+    packet.role = uint8_t(state.role);
-+    std::memset(packet.credential, 0, sizeof(packet.credential));
-+    Send(socket, packet, peer);
-+    attempt.last_punch = now;
-+    REXSYS_INFO("NAT traversal: {} punch sent socket={} peer={:08X}:{}",
-+                state.role == NatProbeRole::kDiscovery ? "discovery" : "gameplay", socket,
-+                peer.ipv4, peer.port);
-+  }
++    if (attempt.identity.automatic &&
++        now - attempt.attached_at >= std::chrono::seconds(20)) {
++      if (!attempt.endpoint.acknowledged()) {
++        REXSYS_INFO(
++            "NAT traversal: unacknowledged automatic rendezvous attempt retired role={}",
++            uint8_t(state.role));
++        const auto expired_key = attempt.identity.key;
++        ExpiredAttempts(state.role).insert(expired_key);
++        for (auto& [other_socket, other_state] : states)
++          if (other_socket != socket && other_state.role == state.role)
++            other_state.attempts.erase(expired_key);
++        iterator = state.attempts.erase(iterator);
++        continue;
++      }
++      attempt.rendezvous_expired = true;
++      REXSYS_INFO("NAT traversal: automatic rendezvous transmissions ended role={}",
++                  uint8_t(state.role));
++      ++iterator;
++      continue;
++    }
++    for (size_t i = 0; i < checkpoints.size(); ++i) {
++      const uint8_t bit = uint8_t(1u << i);
++      if (attempt.observed.port && !(attempt.stability_checkpoints & bit) &&
++          now - attempt.attached_at >= checkpoints[i]) {
++        attempt.stability_checkpoints |= bit;
++        REXSYS_INFO("NAT traversal: role={} mapping stable at {}s public={:08X}:{}",
++                    uint8_t(state.role), checkpoints[i].count(), attempt.observed.ipv4,
++                    attempt.observed.port);
++      }
++    }
++    // A host may already have its gameplay socket registered when the joining
++    // client's gameplay socket appears. Poll quickly until the rendezvous server
++    // supplies that peer so the title's bounded membership exchange is not spent
++    // waiting for the normal mapping keepalive interval.
++    const auto registration_interval = std::chrono::milliseconds(
++        NatProbeRegistrationIntervalMs(attempt.endpoint.peer().port != 0));
++    if (now - attempt.last_registration >= registration_interval) {
++      Packet packet{};
++      FillIdentity(packet, attempt.identity);
++      packet.type = kRegister;
++      packet.role = uint8_t(state.role);
++      Send(socket, packet, attempt.identity.server);
++      attempt.last_registration = now;
++      ++attempt.registrations_sent;
++      REXSYS_INFO(
++          "NAT traversal: registration sent socket={} role={} attempt={} participant={} count={}",
++          socket, uint8_t(state.role), attempt.identity.key, attempt.identity.participant,
++          attempt.registrations_sent);
++    }
++    const auto peer = attempt.endpoint.peer();
++    if (peer.port && !attempt.endpoint.acknowledged() &&
++        now - attempt.last_punch >= std::chrono::milliseconds(100)) {
++      Packet packet{};
++      FillIdentity(packet, attempt.identity);
++      packet.type = kPunch;
++      packet.role = uint8_t(state.role);
++      std::memset(packet.credential, 0, sizeof(packet.credential));
++      Send(socket, packet, peer);
++      attempt.last_punch = now;
++      REXSYS_INFO("NAT traversal: {} punch sent socket={} peer={:08X}:{}",
++                  state.role == NatProbeRole::kDiscovery ? "discovery" : "gameplay", socket,
++                  peer.ipv4, peer.port);
++    }
++    ++iterator;
 +  }
 +}
 +}  // namespace
 +
 +void NatProbeTick(uint64_t socket) {
++  NatProbeTickAt(socket, std::chrono::steady_clock::now());
++}
++
++void NatProbeTickAt(uint64_t socket, std::chrono::steady_clock::time_point now) {
 +  std::lock_guard lock(state_mutex);
 +  auto found = states.find(socket);
 +  if (found == states.end()) return;
-+  NatProbeTickLocked(socket, found->second, std::chrono::steady_clock::now());
++  NatProbeTickLocked(socket, found->second, now);
 +}
 +
 +bool NatProbeIsControlPacket(uint64_t socket, const uint8_t* data, size_t size,
@@ -4008,6 +4207,45 @@ index 0000000..3a37fdb
 +  return result;
 +}
 +
++std::vector<std::string> NatProbeMatchAcknowledgedDiscoveryAttempts(
++    uint64_t socket, LanAddress source) {
++  std::lock_guard lock(state_mutex);
++  std::vector<std::string> result;
++  auto found = states.find(socket);
++  if (found == states.end() || found->second.role != NatProbeRole::kDiscovery)
++    return result;
++  for (const auto& [key, attempt] : found->second.attempts) {
++    if (attempt.endpoint.acknowledged_peer() == source &&
++        attempt.endpoint.peer() == source)
++      result.push_back(key);
++  }
++  return result;
++}
++
++std::vector<NatProbePeerAttempt> NatProbeAcknowledgedDiscoveryAttempts() {
++  std::lock_guard lock(state_mutex);
++  std::vector<NatProbePeerAttempt> result;
++  for (const auto& [_, state] : states) {
++    if (state.role != NatProbeRole::kDiscovery)
++      continue;
++    for (const auto& [key, attempt] : state.attempts) {
++      if (attempt.endpoint.acknowledged())
++        result.push_back({key, attempt.endpoint.peer()});
++    }
++  }
++  return result;
++}
++
++bool NatProbeRendezvousAttemptActive(uint64_t socket,
++                                     std::string_view attempt_id) {
++  std::lock_guard lock(state_mutex);
++  auto found = states.find(socket);
++  if (found == states.end()) return false;
++  auto attempt = found->second.attempts.find(std::string(attempt_id));
++  return attempt != found->second.attempts.end() &&
++         !attempt->second.rendezvous_expired;
++}
++
 +std::optional<LanAddress> NatProbeNormalizeGameplaySource(uint64_t socket,
 +                                                          LanAddress source) {
 +  std::lock_guard lock(state_mutex);
@@ -4027,7 +4265,7 @@ diff --git a/src/system/xam/session.cpp b/src/system/xam/session.cpp
 new file mode 100644
 --- /dev/null
 +++ b/src/system/xam/session.cpp
-@@ -0,0 +1,1220 @@
+@@ -0,0 +1,1296 @@
 +#include <rex/system/xam/session.h>
 +
 +#include <algorithm>
@@ -4036,6 +4274,7 @@ new file mode 100644
 +#include <cstring>
 +#include <random>
 +#include <thread>
++#include <unordered_set>
 +
 +#include <rex/logging.h>
 +#include <rex/cvar.h>
@@ -4113,13 +4352,16 @@ new file mode 100644
 +constexpr uint8_t kLeave = 4;
 +constexpr size_t kMaxWireMembers = 8;
 +
-+// These are caller provenance, not a client-controlled eligibility flag.
-+// XGI supplies an already allocated pool; discovery can request public only.
-+enum class MemberUpdateSource { kTitleAllocatedPool, kDiscoveryPublic };
++enum class MemberUpdateSource {
++  kTitleAllocatedPool,
++  kDiscoveryPublic,
++  kInviteGrant,
++};
 +
-+bool ValidMemberAccounting(std::span<const SessionMember> members, uint32_t public_slots,
-+                           uint32_t private_slots) {
-+  uint64_t public_count = 0, private_count = 0;
++bool ValidMemberAccounting(std::span<const SessionMember> members,
++                           uint32_t public_slots, uint32_t private_slots) {
++  uint64_t public_count = 0;
++  uint64_t private_count = 0;
 +  std::unordered_set<uint64_t> identities;
 +  for (const auto& member : members) {
 +    if (!member.xuid || !identities.insert(member.xuid).second)
@@ -4129,13 +4371,17 @@ new file mode 100644
 +  return public_count <= public_slots && private_count <= private_slots;
 +}
 +
-+// The only join mutation for hosted records. No callbacks, registry access, or
-+// network I/O occur under this lock. Commit the complete candidate or nothing.
-+bool ApplyMemberBatch(SessionRecord& session, std::span<const SessionMember> members,
++// Complete candidate planning and commit use one record lock. NAT and grant
++// locks are never held here.
++bool ApplyMemberBatch(SessionRecord& session,
++                      std::span<const SessionMember> members,
 +                      MemberUpdateSource source) {
 +  std::lock_guard lock(*session.mutex);
 +  if (session.state == SessionState::kDeleted || members.empty() ||
-+      !ValidMemberAccounting(session.members, session.max_public_slots, session.max_private_slots))
++      !ValidMemberAccounting(session.members, session.max_public_slots,
++                             session.max_private_slots))
++    return false;
++  if (source == MemberUpdateSource::kInviteGrant && members.size() != 1)
 +    return false;
 +  auto candidate = session.members;
 +  std::unordered_set<uint64_t> batch_ids;
@@ -4143,23 +4389,25 @@ new file mode 100644
 +    if (!member.xuid || !batch_ids.insert(member.xuid).second)
 +      return false;
 +    auto it = std::find_if(candidate.begin(), candidate.end(),
-+                           [&](const auto& current) { return current.xuid == member.xuid; });
-+    if (source == MemberUpdateSource::kDiscoveryPublic) {
-+      // A wire request cannot impersonate the host, reclassify an existing
-+      // member, or change its authoritative metadata on a retry.
++                           [&](const auto& current) {
++                             return current.xuid == member.xuid;
++                           });
++    if (source != MemberUpdateSource::kTitleAllocatedPool) {
 +      if (member.xuid == session.host_xuid)
 +        return false;
 +      if (it != candidate.end())
 +        continue;
-+      member.private_slot = false;
 +      member.local = false;
++      if (source == MemberUpdateSource::kDiscoveryPublic)
++        member.private_slot = false;
 +    }
 +    if (it == candidate.end())
 +      candidate.push_back(std::move(member));
 +    else
 +      *it = std::move(member);
 +  }
-+  if (!ValidMemberAccounting(candidate, session.max_public_slots, session.max_private_slots))
++  if (!ValidMemberAccounting(candidate, session.max_public_slots,
++                             session.max_private_slots))
 +    return false;
 +  session.members.swap(candidate);
 +  return true;
@@ -4309,7 +4557,8 @@ new file mode 100644
 +  }
 +  if (session.members.empty())
 +    session.members.push_back({session.host_xuid, session.host_name, 0, false, false, false});
-+  if (!ValidMemberAccounting(session.members, session.max_public_slots, session.max_private_slots))
++  if (!ValidMemberAccounting(session.members, session.max_public_slots,
++                             session.max_private_slots))
 +    return std::nullopt;
 +  return session;
 +}
@@ -4381,7 +4630,8 @@ new file mode 100644
 +        result->info.host_address.ipv4 = session.info.host_address.ipv4;
 +        result->discovery_address = session.discovery_address;
 +      }
-+      if (result && (result->info.id != session.info.id || result->info.key != session.info.key ||
++      if (result && (result->info.id != session.info.id ||
++                     result->info.key != session.info.key ||
 +                     result->host_xuid != session.host_xuid))
 +        result.reset();
 +      if (result && member && type == kJoin &&
@@ -4405,6 +4655,16 @@ new file mode 100644
 +  return result;
 +}
 +}  // namespace
++
++bool ApplyDiscoveryMemberBatch(SessionRecord& session,
++                               std::span<const SessionMember> members,
++                               DiscoveryAdmissionContext context) {
++  return ApplyMemberBatch(
++      session, members,
++      context.source == DiscoveryAdmissionSource::kInviteGrant
++          ? MemberUpdateSource::kInviteGrant
++          : MemberUpdateSource::kDiscoveryPublic);
++}
 +
 +uint32_t SessionRecord::FilledPublicSlots() const {
 +  std::lock_guard lock(*mutex);
@@ -4535,17 +4795,17 @@ new file mode 100644
 +  return JoinBatch(Find(id), std::span<const SessionMember>(&member, 1));
 +}
 +bool SessionRegistry::JoinBatch(const std::shared_ptr<SessionRecord>& expected,
-+                                 std::span<const SessionMember> members) {
++                                std::span<const SessionMember> members) {
 +  if (!expected)
 +    return false;
-+  // Registry -> record is the existing deletion lock order. Pin the mapping
-+  // through commit so a replaced client observation or deleted record cannot
-+  // receive an update through a stale XSession pointer.
++  // Registry -> record is the existing deletion lock order. No NAT, grant, or
++  // network operation occurs while either lock is held.
 +  std::lock_guard registry_lock(mutex_);
 +  auto it = sessions_.find(IdKey(expected->info.id));
 +  if (it == sessions_.end() || it->second != expected)
 +    return false;
-+  return ApplyMemberBatch(*expected, members, MemberUpdateSource::kTitleAllocatedPool);
++  return ApplyMemberBatch(*expected, members,
++                          MemberUpdateSource::kTitleAllocatedPool);
 +}
 +bool SessionRegistry::Leave(const std::array<uint8_t, 8>& id, uint64_t xuid) {
 +  auto session = Find(id);
@@ -4596,7 +4856,9 @@ new file mode 100644
 +
 +class LanDiscoveryService::Impl {
 + public:
-+  Impl(uint32_t title_id, uint16_t port) : title_id(title_id), port(port) {}
++  Impl(uint32_t title_id, uint16_t port,
++       std::shared_ptr<HostAdmissionGrantStore> admission_grants)
++      : title_id(title_id), port(port), admission_grants(std::move(admission_grants)) {}
 +  ~Impl() { Stop(); }
 +  bool Start(std::shared_ptr<SessionRecord> value) {
 +    Stop();
@@ -4648,6 +4910,7 @@ new file mode 100644
 +    NatProbeDetach(socket);
 +    socket = kInvalidSocket;
 +    advertised.reset();
++    admission_grants->Clear();
 +    StopClient();
 +  }
 +  void StopClient() {
@@ -4699,27 +4962,72 @@ new file mode 100644
 +                    ntohs(source.sin_port));
 +      }
 +      if (valid && (query.type == kJoin || query.type == kLeave)) {
-+        std::lock_guard lock(*advertised->mutex);
 +        const auto& wire = query.members[0];
 +        const uint32_t flags = ntohl(wire.flags);
 +        const uint64_t xuid = Swap64(wire.xuid);
-+        // The packet has no build-ID field or authenticated player identity.
-+        // Match the exact advertised incarnation; this is routing validation,
-+        // not an admission credential. Never trust the wire private bit.
-+        valid = advertised->state != SessionState::kDeleted &&
-+                ntohl(query.member_count) == 1 && !query.reserved && !query.reserved2 &&
-+                !(flags & ~6u) && xuid && xuid != advertised->host_xuid &&
-+                Swap64(query.host_xuid) == advertised->host_xuid &&
-+                std::memcmp(query.session_id, advertised->info.id.data(), 8) == 0 &&
-+                std::memcmp(query.session_key, advertised->info.key.data(), 16) == 0;
++        bool existing = false;
++        {
++          std::lock_guard lock(*advertised->mutex);
++          // Routing validation is not an admission credential. The only
++          // private authority is a separately reserved host grant below.
++          valid = advertised->state != SessionState::kDeleted &&
++                  ntohl(query.member_count) == 1 && !query.reserved &&
++                  !query.reserved2 && !(flags & ~6u) && xuid &&
++                  xuid != advertised->host_xuid &&
++                  Swap64(query.host_xuid) == advertised->host_xuid &&
++                  std::memcmp(query.session_id, advertised->info.id.data(), 8) == 0 &&
++                  std::memcmp(query.session_key, advertised->info.key.data(), 16) == 0;
++          existing = valid && std::any_of(
++                                  advertised->members.begin(), advertised->members.end(),
++                                  [&](const auto& member) { return member.xuid == xuid; });
++        }
 +        if (valid && query.type == kJoin) {
 +          SessionMember member{xuid,
-+                               std::string(wire.name, strnlen(wire.name, sizeof(wire.name))),
-+                               0, false, false, (flags & 4) != 0};
-+          valid = ApplyMemberBatch(*advertised, std::span<const SessionMember>(&member, 1),
-+                                   MemberUpdateSource::kDiscoveryPublic);
++                               std::string(wire.name,
++                                           strnlen(wire.name, sizeof(wire.name))),
++                               0, false, (flags & 2) != 0, (flags & 4) != 0};
++          HostAdmissionReservation reservation;
++          DiscoveryAdmissionContext context;
++          if (!existing) {
++            // NAT snapshot -> atomic grant reservation -> membership commit ->
++            // finalization. No pair of these lock domains is nested.
++            auto matches = NatProbeMatchAcknowledgedDiscoveryAttempts(
++                socket, {source.sin_addr.s_addr, ntohs(source.sin_port)});
++            auto directory_session = admission_grants->hosted_directory_session();
++            if (directory_session) {
++              auto authority = admission_grants->Reserve(
++                  *directory_session, uint64_t(socket), source.sin_addr.s_addr,
++                  ntohs(source.sin_port), matches, xuid);
++              if (authority.status == HostAdmissionReservationStatus::kReserved) {
++                reservation = std::move(authority.reservation);
++                context.source = DiscoveryAdmissionSource::kInviteGrant;
++              } else if (authority.status ==
++                         HostAdmissionReservationStatus::kDuplicateReservation) {
++                // The winning packet owns the one synchronous transaction.
++                // This duplicate mutates nothing and may retry after the
++                // winner publishes the resulting roster.
++                valid = false;
++              }
++            }
++          }
++          if (valid)
++            valid = ApplyDiscoveryMemberBatch(
++                *advertised, std::span<const SessionMember>(&member, 1), context);
++          if (reservation)
++            admission_grants->Finish(reservation, valid);
++          if (valid) {
++            REXSYS_INFO(
++                "LAN discovery: host accepted join xuid={:016X} source={} from {:08X}:{}",
++                xuid,
++                context.source == DiscoveryAdmissionSource::kInviteGrant
++                    ? "invite-grant"
++                    : "public",
++                source.sin_addr.s_addr, ntohs(source.sin_port));
++          }
 +        } else if (valid) {
-+          std::erase_if(advertised->members, [&](const auto& value) { return value.xuid == xuid; });
++          std::lock_guard lock(*advertised->mutex);
++          std::erase_if(advertised->members,
++                        [&](const auto& value) { return value.xuid == xuid; });
 +        }
 +      }
 +      if (valid && (query.type == kQuery || query.type == kJoin || query.type == kLeave)) {
@@ -4748,10 +5056,15 @@ new file mode 100644
 +  std::atomic<bool> client_exchange = false;
 +  std::thread client_thread;
 +  RetainedDiscoverySearchState retained_search;
++  std::shared_ptr<HostAdmissionGrantStore> admission_grants;
 +};
 +
-+LanDiscoveryService::LanDiscoveryService(uint32_t title_id, uint16_t port)
-+    : impl_(std::make_unique<Impl>(title_id, port)) {}
++LanDiscoveryService::LanDiscoveryService(
++    uint32_t title_id, uint16_t port,
++    std::shared_ptr<HostAdmissionGrantStore> admission_grants)
++    : admission_grants_(admission_grants ? std::move(admission_grants)
++                                        : std::make_shared<HostAdmissionGrantStore>()),
++      impl_(std::make_unique<Impl>(title_id, port, admission_grants_)) {}
 +LanDiscoveryService::~LanDiscoveryService() = default;
 +void LanDiscoveryService::SetTitleId(uint32_t title_id) {
 +  impl_->title_id = title_id;
@@ -4759,7 +5072,8 @@ new file mode 100644
 +bool LanDiscoveryService::Advertise(const std::shared_ptr<SessionRecord>& session) {
 +  if (!impl_->Start(session))
 +    return false;
-+  directory_.StartHosting(session, impl_->title_id, impl_->port);
++  directory_.StartHosting(session, impl_->title_id, impl_->port,
++                          admission_grants_);
 +  return true;
 +}
 +void LanDiscoveryService::StopAdvertising() {
@@ -5250,10 +5564,9 @@ new file mode 100644
 +}  // namespace rex::system::xam
 diff --git a/src/system/xam/session_directory.cpp b/src/system/xam/session_directory.cpp
 new file mode 100644
-index 0000000..0685729
 --- /dev/null
 +++ b/src/system/xam/session_directory.cpp
-@@ -0,0 +1,791 @@
+@@ -0,0 +1,1207 @@
 +#include <rex/system/xam/session_directory.h>
 +
 +#include <algorithm>
@@ -5265,6 +5578,7 @@ index 0000000..0685729
 +#include <fstream>
 +#include <future>
 +#include <iomanip>
++#include <iterator>
 +#include <mutex>
 +#include <optional>
 +#include <sstream>
@@ -5286,6 +5600,251 @@ index 0000000..0685729
 +#endif
 +
 +namespace rex::system::xam {
++
++namespace {
++bool IsLowerHex128(std::string_view value) {
++  return value.size() == 32 &&
++         std::all_of(value.begin(), value.end(), [](char ch) {
++           return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
++         });
++}
++
++std::optional<HostAdmissionGrantStore::Clock::time_point> AdmissionDeadline(
++    HostAdmissionGrantStore::Clock::time_point poll_started_at,
++    uint32_t admission_expires_in_ms) {
++  if (!admission_expires_in_ms || admission_expires_in_ms == UINT32_MAX)
++    return std::nullopt;
++  const auto remaining = std::chrono::duration_cast<HostAdmissionGrantStore::Clock::duration>(
++      std::chrono::milliseconds(admission_expires_in_ms));
++  if (remaining <= HostAdmissionGrantStore::Clock::duration::zero() ||
++      poll_started_at > HostAdmissionGrantStore::Clock::time_point::max() - remaining)
++    return std::nullopt;
++  return poll_started_at + remaining;
++}
++}  // namespace
++
++void HostAdmissionGrantStore::InvalidateGrantLocked(Grant& grant) {
++  if (grant.reservation_id) {
++    grant.invalidated_while_reserved = true;
++  } else if (!grant.consumed_xuid) {
++    grant.expires_at = {};
++  }
++}
++
++void HostAdmissionGrantStore::ApplyAuthenticatedPoll(
++    std::string_view directory_session_id, std::span<const HostAdmissionPollAttempt> attempts,
++    Clock::time_point poll_started_at) {
++  std::lock_guard lock(mutex_);
++  hosted_directory_session_ = std::string(directory_session_id);
++  std::unordered_set<std::string> seen;
++  for (const auto& attempt : attempts) {
++    if (!seen.insert(attempt.attempt_id).second)
++      continue;
++    auto found = grants_.find(attempt.attempt_id);
++    const bool installable = attempt.purpose == "invite_code_private_eligible" &&
++                             attempt.host_ready && IsLowerHex128(attempt.attempt_id) &&
++                             IsLowerHex128(attempt.admission_generation) &&
++                             attempt.lease_revision && attempt.admission_expires_in_ms;
++    const auto returned_expiry =
++        installable ? AdmissionDeadline(poll_started_at, attempt.admission_expires_in_ms)
++                    : std::nullopt;
++    if (!installable || !returned_expiry) {
++      if (found != grants_.end())
++        InvalidateGrantLocked(found->second);
++      continue;
++    }
++    // The server computed its remaining lifetime before transmitting the
++    // response. Anchor to the earlier local request time so response transit
++    // can only shorten, never extend, private authority.
++    if (found == grants_.end()) {
++      Grant grant;
++      grant.directory_session_id = directory_session_id;
++      grant.attempt_id = attempt.attempt_id;
++      grant.capability = attempt.capability;
++      grant.admission_generation = attempt.admission_generation;
++      grant.lease_revision = attempt.lease_revision;
++      grant.expires_at = *returned_expiry;
++      grants_.emplace(grant.attempt_id, std::move(grant));
++      continue;
++    }
++    auto& grant = found->second;
++    if (grant.directory_session_id != directory_session_id ||
++        grant.admission_generation != attempt.admission_generation ||
++        attempt.lease_revision < grant.lease_revision ||
++        attempt.lease_revision > grant.lease_revision + 1 || grant.consumed_xuid)
++      continue;
++    if (grant.reservation_id) {
++      if (attempt.lease_revision != grant.lease_revision)
++        grant.invalidated_while_reserved = true;
++      continue;
++    }
++    grant.capability = attempt.capability;
++    if (attempt.lease_revision == grant.lease_revision) {
++      grant.expires_at = std::min(grant.expires_at, *returned_expiry);
++    } else {
++      grant.lease_revision = attempt.lease_revision;
++      grant.expires_at = *returned_expiry;
++      grant.reserved_socket = 0;
++      grant.reserved_ipv4 = 0;
++      grant.reserved_port = 0;
++      grant.reserved_xuid = 0;
++      grant.invalidated_while_reserved = false;
++    }
++  }
++  for (auto& [attempt_id, grant] : grants_) {
++    if (grant.directory_session_id == directory_session_id && !seen.contains(attempt_id))
++      InvalidateGrantLocked(grant);
++  }
++  std::erase_if(grants_, [](const auto& item) {
++    const auto& grant = item.second;
++    return !grant.reservation_id && !grant.consumed_xuid && grant.expires_at == Clock::time_point{};
++  });
++}
++
++HostAdmissionReservationResult HostAdmissionGrantStore::Reserve(
++    std::string_view directory_session_id, uint64_t discovery_socket,
++    uint32_t peer_ipv4, uint16_t peer_port,
++    std::span<const std::string> acknowledged_attempt_ids, uint64_t xuid,
++    Clock::time_point now) {
++  HostAdmissionReservationResult result;
++  if (!xuid || !discovery_socket || !peer_ipv4 || !peer_port)
++    return result;
++  std::lock_guard lock(mutex_);
++  std::unordered_set<std::string> acknowledged(acknowledged_attempt_ids.begin(),
++                                                acknowledged_attempt_ids.end());
++  std::vector<Grant*> candidates;
++  Grant* consumed_duplicate = nullptr;
++  size_t consumed_duplicate_count = 0;
++  for (auto& [attempt_id, grant] : grants_) {
++    if (!acknowledged.contains(attempt_id) ||
++        grant.directory_session_id != directory_session_id)
++      continue;
++    if (grant.consumed_xuid) {
++      if (grant.consumed_xuid == xuid) {
++        consumed_duplicate = &grant;
++        ++consumed_duplicate_count;
++      }
++      continue;
++    }
++    if (!grant.reservation_id && now >= grant.expires_at)
++      continue;
++    if (grant.reservation_id &&
++        (grant.reserved_socket != discovery_socket || grant.reserved_ipv4 != peer_ipv4 ||
++         grant.reserved_port != peer_port || grant.reserved_xuid != xuid))
++      continue;
++    candidates.push_back(&grant);
++  }
++  if (candidates.size() > 1) {
++    result.status = HostAdmissionReservationStatus::kAmbiguous;
++    return result;
++  }
++  if (candidates.empty()) {
++    if (consumed_duplicate_count > 1)
++      result.status = HostAdmissionReservationStatus::kAmbiguous;
++    else if (consumed_duplicate)
++      result.status = HostAdmissionReservationStatus::kConsumedDuplicate;
++    return result;
++  }
++  auto& grant = *candidates.front();
++  if (grant.reservation_id) {
++    result.status = HostAdmissionReservationStatus::kDuplicateReservation;
++  } else {
++    grant.reservation_id = next_reservation_id_++;
++    if (!grant.reservation_id)
++      grant.reservation_id = next_reservation_id_++;
++    grant.reserved_socket = discovery_socket;
++    grant.reserved_ipv4 = peer_ipv4;
++    grant.reserved_port = peer_port;
++    grant.reserved_xuid = xuid;
++    result.status = HostAdmissionReservationStatus::kReserved;
++  }
++  result.reservation = {grant.directory_session_id, grant.attempt_id,
++                        grant.admission_generation, grant.lease_revision,
++                        discovery_socket, peer_ipv4, peer_port, xuid,
++                        grant.reservation_id};
++  return result;
++}
++
++void HostAdmissionGrantStore::Finish(const HostAdmissionReservation& reservation,
++                                     bool committed, Clock::time_point now) {
++  if (!reservation)
++    return;
++  std::lock_guard lock(mutex_);
++  auto found = grants_.find(reservation.attempt_id);
++  if (found == grants_.end())
++    return;
++  auto& grant = found->second;
++  if (grant.directory_session_id != reservation.directory_session_id ||
++      grant.admission_generation != reservation.admission_generation ||
++      grant.lease_revision != reservation.lease_revision ||
++      grant.reservation_id != reservation.reservation_id ||
++      grant.reserved_socket != reservation.discovery_socket ||
++      grant.reserved_ipv4 != reservation.peer_ipv4 ||
++      grant.reserved_port != reservation.peer_port ||
++      grant.reserved_xuid != reservation.xuid)
++    return;
++  if (committed) {
++    grant.consumed_xuid = reservation.xuid;
++    grant.reservation_id = 0;
++    completions_.push_back(
++        {grant.directory_session_id, grant.attempt_id, grant.capability});
++    return;
++  }
++  if (grant.invalidated_while_reserved || now >= grant.expires_at) {
++    grants_.erase(found);
++    return;
++  }
++  grant.reservation_id = 0;
++  grant.reserved_socket = 0;
++  grant.reserved_ipv4 = 0;
++  grant.reserved_port = 0;
++  grant.reserved_xuid = 0;
++}
++
++void HostAdmissionGrantStore::InvalidateSession(std::string_view directory_session_id) {
++  std::lock_guard lock(mutex_);
++  for (auto& [_, grant] : grants_)
++    if (grant.directory_session_id == directory_session_id)
++      InvalidateGrantLocked(grant);
++  std::erase_if(grants_, [](const auto& item) {
++    const auto& grant = item.second;
++    return !grant.reservation_id && !grant.consumed_xuid && grant.expires_at == Clock::time_point{};
++  });
++  std::erase_if(completions_, [&](const auto& completion) {
++    return completion.directory_session_id == directory_session_id;
++  });
++  if (hosted_directory_session_ == directory_session_id)
++    hosted_directory_session_.clear();
++}
++
++void HostAdmissionGrantStore::Clear() {
++  std::lock_guard lock(mutex_);
++  grants_.clear();
++  completions_.clear();
++  hosted_directory_session_.clear();
++}
++
++std::vector<HostAdmissionCompletion> HostAdmissionGrantStore::TakeCompletions() {
++  std::lock_guard lock(mutex_);
++  auto result = std::move(completions_);
++  completions_.clear();
++  return result;
++}
++
++std::optional<std::string> HostAdmissionGrantStore::hosted_directory_session() const {
++  std::lock_guard lock(mutex_);
++  if (hosted_directory_session_.empty())
++    return std::nullopt;
++  return hosted_directory_session_;
++}
++
++size_t HostAdmissionGrantStore::available_grant_count(Clock::time_point now) const {
++  std::lock_guard lock(mutex_);
++  return std::count_if(grants_.begin(), grants_.end(), [&](const auto& item) {
++    const auto& grant = item.second;
++    return !grant.reservation_id && !grant.consumed_xuid && now < grant.expires_at;
++  });
++}
 +
 +namespace {
 +constexpr uint32_t kDirectoryProtocolVersion = 1;
@@ -5450,21 +6009,49 @@ index 0000000..0685729
 +                                                               uint8_t participant) {
 +  if (!document.is_object())
 +    return std::nullopt;
-+  auto attempt = document.value("attempt_id", "");
-+  auto capability = document.value("capability", "");
-+  auto host = document.value("rendezvous_host", "");
-+  auto port = document.value("rendezvous_port", 0u);
-+  auto role = document.value("participant", "");
-+  auto hex = [](std::string_view text) {
-+    return text.size() == 32 && std::all_of(text.begin(), text.end(), [](unsigned char ch) {
-+             return std::isxdigit(ch) != 0;
-+           });
-+  };
-+  if (!hex(attempt) || !hex(capability) || host.empty() || host.size() > 255 || !port ||
-+      port > 65535 || role != (participant ? "client" : "host"))
++  try {
++    auto attempt = document.value("attempt_id", "");
++    auto capability = document.value("capability", "");
++    auto host = document.value("rendezvous_host", "");
++    auto port = document.value("rendezvous_port", 0u);
++    auto role = document.value("participant", "");
++    auto purpose = document.value("purpose", "");
++    if (!IsLowerHex128(attempt) || !IsLowerHex128(capability) || host.empty() ||
++        host.size() > 255 || !port || port > 65535 ||
++        role != (participant ? "client" : "host") ||
++        (purpose != "public" && purpose != "invite_code_private_eligible"))
++      return std::nullopt;
++    DirectoryTraversalAttempt result;
++    result.session_id = std::move(session_id);
++    result.attempt_id = std::move(attempt);
++    result.capability = std::move(capability);
++    result.rendezvous_host = std::move(host);
++    result.rendezvous_port = uint16_t(port);
++    result.participant = participant;
++    result.purpose = std::move(purpose);
++    auto generation = document.find("admission_generation");
++    auto revision = document.find("lease_revision");
++    auto expires = document.find("admission_expires_in_ms");
++    auto ready = document.find("host_ready");
++    if (generation != document.end() && !generation->is_null()) {
++      if (!generation->is_string() ||
++          !IsLowerHex128(generation->get_ref<const std::string&>()) ||
++          revision == document.end() || !revision->is_number_unsigned() ||
++          !revision->get<uint64_t>() || expires == document.end() ||
++          !expires->is_number_unsigned() ||
++          !expires->get<uint64_t>() || expires->get<uint64_t>() >= UINT32_MAX ||
++          ready == document.end() ||
++          !ready->is_boolean())
++        return std::nullopt;
++      result.admission_generation = generation->get<std::string>();
++      result.lease_revision = revision->get<uint64_t>();
++      result.admission_expires_in_ms = uint32_t(expires->get<uint64_t>());
++      result.host_ready = ready->get<bool>();
++    }
++    return result;
++  } catch (const nlohmann::json::exception&) {
 +    return std::nullopt;
-+  return DirectoryTraversalAttempt{std::move(session_id), std::move(attempt), std::move(capability),
-+                                   std::move(host),       uint16_t(port),     participant};
++  }
 +}
 +
 +std::optional<std::string> RandomUrlToken(size_t byte_count) {
@@ -5619,6 +6206,23 @@ index 0000000..0685729
 +  return ParseDirectorySession(document["session"], title_id, build_id);
 +}
 +
++std::optional<std::vector<DirectoryTraversalAttempt>> ParseDirectoryHostPollSnapshot(
++    std::string_view body, std::string_view directory_session_id) {
++  auto document = nlohmann::json::parse(body, nullptr, false);
++  if (!document.is_object() || !document.contains("attempts") ||
++      !document["attempts"].is_array())
++    return std::nullopt;
++  std::vector<DirectoryTraversalAttempt> attempts;
++  attempts.reserve(document["attempts"].size());
++  for (const auto& item : document["attempts"]) {
++    auto attempt = ParseTraversalAttempt(item, std::string(directory_session_id), 0);
++    if (!attempt)
++      return std::nullopt;
++    attempts.push_back(std::move(*attempt));
++  }
++  return attempts;
++}
++
 +REXCVAR_DEFINE_STRING(session_directory_url, "", "Network",
 +                      "HTTPS Harmony session-directory URL (empty disables directory access)")
 +    .validator(IsSafeDirectoryUrl)
@@ -5660,6 +6264,85 @@ index 0000000..0685729
 +  if (*status == 200 && valid_session_id)
 +    return DirectoryHeartbeatDisposition::kAccepted;
 +  return DirectoryHeartbeatDisposition::kRetrySameRegistration;
++}
++
++DirectoryHostPollDisposition ClassifyDirectoryHostPollResponse(std::optional<uint32_t> status,
++                                                               bool valid_snapshot) {
++  if (!status)
++    return DirectoryHostPollDisposition::kRetainUntilExpiry;
++  if (*status == 404)
++    return DirectoryHostPollDisposition::kRecoverRegistration;
++  if (*status != 200)
++    return DirectoryHostPollDisposition::kRetainUntilExpiry;
++  return valid_snapshot ? DirectoryHostPollDisposition::kAccepted
++                        : DirectoryHostPollDisposition::kRejectSnapshot;
++}
++
++DirectoryHostPollTransition ApplyDirectoryHostPollResult(
++    DirectoryHostPollDisposition disposition,
++    std::span<const DirectoryTraversalAttempt> attempts,
++    DirectoryHostPollRuntimeState& state,
++    HostAdmissionGrantStore* admission_grants, SessionRecord& hosted,
++    HostAdmissionGrantStore::Clock::time_point poll_started_at) {
++  DirectoryHostPollTransition transition;
++  switch (disposition) {
++    case DirectoryHostPollDisposition::kAccepted: {
++      std::unordered_set<std::string> next_host_attempts;
++      std::unordered_map<std::string, HostAdmissionPollAttempt> next_private_attempts;
++      std::vector<HostAdmissionPollAttempt> grant_snapshot;
++      for (const auto& attempt : attempts) {
++        next_host_attempts.insert(attempt.attempt_id);
++        NatProbeInstallIdentity({attempt.attempt_id, attempt.capability,
++                                 attempt.rendezvous_host, attempt.rendezvous_port, 0});
++        HostAdmissionPollAttempt host_attempt{
++            attempt.attempt_id,     attempt.capability,
++            attempt.purpose,        attempt.admission_generation,
++            attempt.lease_revision, attempt.admission_expires_in_ms,
++            attempt.host_ready};
++        grant_snapshot.push_back(host_attempt);
++        if (attempt.purpose == "invite_code_private_eligible" &&
++            !attempt.admission_generation.empty())
++          next_private_attempts.emplace(attempt.attempt_id, std::move(host_attempt));
++      }
++      for (const auto& attempt : state.host_attempts)
++        if (!next_host_attempts.contains(attempt))
++          NatProbeRetireIdentity(attempt);
++      state.host_attempts = std::move(next_host_attempts);
++      state.private_attempts = std::move(next_private_attempts);
++      if (admission_grants)
++        admission_grants->ApplyAuthenticatedPoll(
++            state.directory_session_id, grant_snapshot, poll_started_at);
++      break;
++    }
++    case DirectoryHostPollDisposition::kRejectSnapshot:
++      if (admission_grants)
++        admission_grants->ApplyAuthenticatedPoll(
++            state.directory_session_id,
++            std::span<const HostAdmissionPollAttempt>{}, poll_started_at);
++      state.private_attempts.clear();
++      break;
++    case DirectoryHostPollDisposition::kRecoverRegistration: {
++      if (auto path = ActiveInviteCodePath())
++        RemoveActiveInviteCodeFile(*path);
++      const auto invalidated_session = state.directory_session_id;
++      if (admission_grants)
++        admission_grants->InvalidateSession(invalidated_session);
++      for (const auto& attempt : state.host_attempts)
++        NatProbeRetireIdentity(attempt);
++      state.host_attempts.clear();
++      state.private_attempts.clear();
++      state.pending_completions.clear();
++      state.directory_session_id.clear();
++      state.registration_token.clear();
++      state.public_invite_code.clear();
++      state.recovering = true;
++      transition.recover_now = true;
++      break;
++    }
++    case DirectoryHostPollDisposition::kRetainUntilExpiry:
++      break;
++  }
++  return transition;
 +}
 +
 +bool WriteActiveInviteCodeFile(const std::filesystem::path& path, std::string_view code) {
@@ -5715,7 +6398,8 @@ index 0000000..0685729
 +  }
 +
 +  void StartHosting(std::shared_ptr<SessionRecord> value, uint32_t value_title_id,
-+                    uint16_t value_discovery_port) {
++                    uint16_t value_discovery_port,
++                    std::shared_ptr<HostAdmissionGrantStore> value_admission_grants) {
 +    StopHosting();
 +    if (REXCVAR_GET(session_directory_url).empty())
 +      return;
@@ -5732,6 +6416,7 @@ index 0000000..0685729
 +    return;
 +#endif
 +    hosted = std::move(value);
++    admission_grants = std::move(value_admission_grants);
 +    title_id = value_title_id;
 +    discovery_port = value_discovery_port;
 +    worker = std::jthread([this](std::stop_token stop) { HostLoop(stop); });
@@ -5743,7 +6428,9 @@ index 0000000..0685729
 +      wake.notify_all();
 +      worker.join();
 +    }
++    if (admission_grants) admission_grants->Clear();
 +    hosted.reset();
++    admission_grants.reset();
 +    if (auto path = ActiveInviteCodePath())
 +      RemoveActiveInviteCodeFile(*path);
 +  }
@@ -5855,10 +6542,14 @@ index 0000000..0685729
 +      REXSYS_WARN("Session directory: secure host registration identity unavailable");
 +      return;
 +    }
-+    std::string session_id;
-+    std::string token;
-+    std::unordered_set<std::string> host_attempts;
-+    bool recovering = false;
++    DirectoryHostPollRuntimeState poll_state;
++    auto& session_id = poll_state.directory_session_id;
++    auto& host_attempts = poll_state.host_attempts;
++    auto& polled_private_attempts = poll_state.private_attempts;
++    auto& pending_completions = poll_state.pending_completions;
++    auto& recovering = poll_state.recovering;
++    auto& token = poll_state.registration_token;
++    auto& public_invite_code = poll_state.public_invite_code;
 +    auto next_heartbeat = std::chrono::steady_clock::time_point{};
 +    auto next_registration = std::chrono::steady_clock::time_point{};
 +    auto retry_delay = kHeartbeatRetryInitial;
@@ -5952,9 +6643,13 @@ index 0000000..0685729
 +            break;
 +          case DirectoryHeartbeatDisposition::kRecoverRegistration:
 +            REXSYS_WARN("Session directory: heartbeat returned 404; recovering logical lobby");
++            if (admission_grants)
++              admission_grants->InvalidateSession(session_id);
 +            for (const auto& attempt : host_attempts)
 +              NatProbeRetireIdentity(attempt);
 +            host_attempts.clear();
++            polled_private_attempts.clear();
++            pending_completions.clear();
 +            recovering = true;
 +            next_registration = std::chrono::steady_clock::now();
 +            retry_delay = kHeartbeatRetryInitial;
@@ -5966,26 +6661,56 @@ index 0000000..0685729
 +        }
 +      }
 +      if (!session_id.empty() && !recovering) {
-+        auto pending = Request(REXCVAR_GET(session_directory_url), L"GET",
-+                               "/sessions/" + session_id + "/join-attempts", "", token);
-+        if (pending && pending->status == 200) {
-+          auto document = nlohmann::json::parse(pending->body, nullptr, false);
-+          if (document.is_object() && document.contains("attempts") &&
-+              document["attempts"].is_array()) {
-+            std::unordered_set<std::string> pending_attempts;
-+            for (const auto& item : document["attempts"]) {
-+              auto attempt = ParseTraversalAttempt(item, session_id, 0);
-+              if (attempt) {
-+                pending_attempts.insert(attempt->attempt_id);
-+                NatProbeInstallIdentity({attempt->attempt_id, attempt->capability,
-+                                         attempt->rendezvous_host, attempt->rendezvous_port, 0});
-+              }
-+            }
-+            for (const auto& attempt : host_attempts)
-+              if (!pending_attempts.contains(attempt))
-+                NatProbeRetireIdentity(attempt);
-+            host_attempts = std::move(pending_attempts);
-+          }
++        if (admission_grants) {
++          auto completed = admission_grants->TakeCompletions();
++          pending_completions.insert(pending_completions.end(),
++                                     std::make_move_iterator(completed.begin()),
++                                     std::make_move_iterator(completed.end()));
++          std::erase_if(pending_completions, [&](const auto& completion) {
++            if (completion.directory_session_id != session_id)
++              return true;
++            auto response = Request(
++                REXCVAR_GET(session_directory_url), L"DELETE",
++                "/sessions/" + session_id + "/join-attempts/" +
++                    completion.attempt_id,
++                "", completion.capability);
++            return response &&
++                   (response->status == 204 || response->status == 404);
++          });
++        }
++        nlohmann::json acknowledgements = nlohmann::json::array();
++        std::unordered_set<std::string> acknowledged_ids;
++        for (const auto& acknowledged : NatProbeAcknowledgedDiscoveryAttempts()) {
++          auto found = polled_private_attempts.find(acknowledged.attempt_id);
++          if (found == polled_private_attempts.end() ||
++              !acknowledged_ids.insert(acknowledged.attempt_id).second)
++            continue;
++          const auto& attempt = found->second;
++          acknowledgements.push_back({{"attempt_id", attempt.attempt_id},
++                                      {"admission_generation", attempt.admission_generation},
++                                      {"lease_revision", attempt.lease_revision}});
++        }
++        const auto poll_started_at = std::chrono::steady_clock::now();
++        auto pending =
++            Request(REXCVAR_GET(session_directory_url), L"POST",
++                    "/sessions/" + session_id + "/join-attempts/poll",
++                    nlohmann::json{{"acknowledged", std::move(acknowledgements)}}.dump(), token);
++        auto snapshot = pending && pending->status == 200
++                            ? ParseDirectoryHostPollSnapshot(pending->body, session_id)
++                            : std::nullopt;
++        const auto disposition = ClassifyDirectoryHostPollResponse(
++            pending ? std::optional<uint32_t>(pending->status) : std::nullopt,
++            snapshot.has_value());
++        const auto attempts = snapshot
++                                  ? std::span<const DirectoryTraversalAttempt>(*snapshot)
++                                  : std::span<const DirectoryTraversalAttempt>{};
++        auto transition = ApplyDirectoryHostPollResult(
++            disposition, attempts, poll_state, admission_grants.get(), *hosted,
++            poll_started_at);
++        if (transition.recover_now) {
++          REXSYS_WARN("Session directory: host poll returned 404; recovering logical lobby");
++          next_registration = std::chrono::steady_clock::now();
++          retry_delay = kHeartbeatRetryInitial;
 +        }
 +      }
 +      std::unique_lock lock(wait_mutex);
@@ -5993,6 +6718,8 @@ index 0000000..0685729
 +    }
 +    for (const auto& attempt : host_attempts)
 +      NatProbeRetireIdentity(attempt);
++    if (admission_grants)
++      admission_grants->InvalidateSession(session_id);
 +    if (!session_id.empty())
 +      Request(REXCVAR_GET(session_directory_url), L"DELETE", "/sessions/" + session_id, "", token);
 +    if (auto path = ActiveInviteCodePath())
@@ -6000,6 +6727,7 @@ index 0000000..0685729
 +  }
 +
 +  std::shared_ptr<SessionRecord> hosted;
++  std::shared_ptr<HostAdmissionGrantStore> admission_grants;
 +  uint32_t title_id = 0;
 +  uint16_t discovery_port = 0;
 +  std::jthread worker;
@@ -6016,8 +6744,9 @@ index 0000000..0685729
 +SessionDirectoryClient::SessionDirectoryClient() : impl_(std::make_unique<Impl>()) {}
 +SessionDirectoryClient::~SessionDirectoryClient() = default;
 +void SessionDirectoryClient::StartHosting(const std::shared_ptr<SessionRecord>& session,
-+                                          uint32_t title_id, uint16_t discovery_port) {
-+  impl_->StartHosting(session, title_id, discovery_port);
++                                          uint32_t title_id, uint16_t discovery_port,
++                                          std::shared_ptr<HostAdmissionGrantStore> admission_grants) {
++  impl_->StartHosting(session, title_id, discovery_port, std::move(admission_grants));
 +}
 +void SessionDirectoryClient::StopHosting() {
 +  impl_->StopHosting();
@@ -6441,7 +7170,6 @@ index 2d13ac8..63b7cf7 100644
  
    return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
 diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
-index 7bd264b..8783254 100644
 --- a/tests/unit/CMakeLists.txt
 +++ b/tests/unit/CMakeLists.txt
 @@ -4,6 +4,7 @@ add_executable(unit_tests
@@ -6452,12 +7180,13 @@ index 7bd264b..8783254 100644
      core/cvar_test.cpp
      core/fiber_test.cpp
      core/filesystem_test.cpp
-@@ -15,10 +16,14 @@ add_executable(unit_tests
+@@ -15,10 +16,15 @@ add_executable(unit_tests
      system/guest_path_test.cpp
      system/achievement_manager_test.cpp
      system/function_dispatcher_test.cpp
 +    system/session_test.cpp
 +    system/session_admission_test.cpp
++    system/session_invite_grant_test.cpp
 +    system/socket_test.cpp
      input/input_assignment_test.cpp
      codegen/codegen_writer_test.cpp
@@ -6465,9 +7194,9 @@ index 7bd264b..8783254 100644
      codegen/output_stamp_test.cpp
 +    codegen/dispatch_table_layout_test.cpp
  )
- 
+
  target_sources(unit_tests PRIVATE
-@@ -35,8 +40,12 @@ target_include_directories(unit_tests PRIVATE
+@@ -35,8 +41,12 @@ target_include_directories(unit_tests PRIVATE
  target_link_libraries(unit_tests PRIVATE
      rexcodegen
      rexruntime
@@ -6477,11 +7206,11 @@ index 7bd264b..8783254 100644
 +if(WIN32)
 +    target_link_libraries(unit_tests PRIVATE ws2_32)
 +endif()
- 
+
  # ReXApp is shipped as source for recomp projects, rather than compiled into
  # rexui. Keep its SDK-consumer compilation path covered by the test build.
-@@ -69,9 +78,21 @@ endif()
- 
+@@ -69,9 +79,21 @@ endif()
+
  # Discover tests
  include(Catch)
 +if(WIN32)
@@ -8660,3 +9389,957 @@ new file mode 100644
 +  }
 +}
 +} // namespace rex::system::xam
+diff --git a/tests/unit/system/session_invite_grant_test.cpp b/tests/unit/system/session_invite_grant_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/system/session_invite_grant_test.cpp
+@@ -0,0 +1,949 @@
++#include <catch2/catch_test_macros.hpp>
++
++#include <array>
++#include <barrier>
++#include <chrono>
++#include <cstring>
++#include <limits>
++#include <memory>
++#include <thread>
++
++#include <nlohmann/json.hpp>
++
++#include <rex/platform.h>
++#if REX_PLATFORM_WIN32
++#include <WinSock2.h>
++#else
++#include <arpa/inet.h>
++#endif
++
++#include <rex/system/xam/nat_probe.h>
++#include <rex/system/xam/session.h>
++#include <rex/cvar.h>
++
++namespace rex::system::xam {
++namespace {
++using Clock = HostAdmissionGrantStore::Clock;
++
++constexpr std::string_view kAttemptA = "00112233445566778899aabbccddeeff";
++constexpr std::string_view kAttemptB = "102132435465768798a9bacbdcedfe0f";
++constexpr std::string_view kAttemptC = "2031425364758697a8b9cadbecfd0e1f";
++constexpr std::string_view kCapability = "ffeeddccbbaa99887766554433221100";
++constexpr std::string_view kGeneration = "0123456789abcdef0123456789abcdef";
++
++HostAdmissionPollAttempt PrivateAttempt(std::string_view attempt = kAttemptA, uint64_t revision = 1,
++                                        uint32_t lifetime_ms = 1000) {
++  return {std::string(attempt),
++          std::string(kCapability),
++          "invite_code_private_eligible",
++          std::string(kGeneration),
++          revision,
++          lifetime_ms,
++          true};
++}
++
++DirectoryTraversalAttempt TraversalAttempt(std::string_view attempt = kAttemptA,
++                                            uint64_t revision = 1,
++                                            uint32_t lifetime_ms = 1000) {
++  return {"session-a",
++          std::string(attempt),
++          std::string(kCapability),
++          "127.0.0.1",
++          30740,
++          0,
++          "invite_code_private_eligible",
++          std::string(kGeneration),
++          revision,
++          lifetime_ms,
++          true};
++}
++
++nlohmann::json PollSnapshotDocument(nlohmann::json lifetime) {
++  return {{"attempts",
++           nlohmann::json::array(
++               {{{"attempt_id", kAttemptA},
++                 {"capability", kCapability},
++                 {"rendezvous_host", "127.0.0.1"},
++                 {"rendezvous_port", 30740},
++                 {"participant", "host"},
++                 {"purpose", "invite_code_private_eligible"},
++                 {"admission_generation", kGeneration},
++                 {"lease_revision", 1},
++                 {"admission_expires_in_ms", std::move(lifetime)},
++                 {"host_ready", true}}})}};
++}
++
++void Install(HostAdmissionGrantStore& store, Clock::time_point now,
++             HostAdmissionPollAttempt attempt = PrivateAttempt()) {
++  std::array attempts{std::move(attempt)};
++  store.ApplyAuthenticatedPoll("session-a", attempts, now);
++}
++
++HostAdmissionReservationResult Reserve(HostAdmissionGrantStore& store, uint64_t xuid,
++                                       Clock::time_point now,
++                                       std::string_view session = "session-a", uint64_t socket = 41,
++                                       uint32_t ipv4 = 0x01020304, uint16_t port = 40000,
++                                       std::span<const std::string> attempts = {}) {
++  std::array default_attempts{std::string(kAttemptA)};
++  if (attempts.empty())
++    attempts = default_attempts;
++  return store.Reserve(session, socket, ipv4, port, attempts, xuid, now);
++}
++
++SessionMember Member(uint64_t xuid, bool private_slot = false) {
++  return {xuid, "Player" + std::to_string(xuid), 0, false, private_slot, false};
++}
++
++#pragma pack(push, 1)
++struct NatPacket {
++  char magic[4];
++  uint8_t version;
++  uint8_t type;
++  uint8_t participant;
++  uint8_t role;
++  uint8_t attempt[16];
++  uint8_t credential[16];
++  uint32_t observed_ipv4;
++  uint16_t observed_port;
++  uint32_t peer_ipv4;
++  uint16_t peer_port;
++  uint32_t reserved;
++};
++#pragma pack(pop)
++static_assert(sizeof(NatPacket) == 56);
++
++uint8_t HexDigit(char value) {
++  return uint8_t(value <= '9' ? value - '0' : value - 'a' + 10);
++}
++
++void ParseHex(std::string_view value, uint8_t* output) {
++  for (size_t i = 0; i < 16; ++i)
++    output[i] = uint8_t((HexDigit(value[i * 2]) << 4) | HexDigit(value[i * 2 + 1]));
++}
++
++NatPacket Registered(std::string_view attempt, LanAddress peer,
++                     NatProbeRole role = NatProbeRole::kDiscovery) {
++  NatPacket packet{};
++  std::memcpy(packet.magic, "HNAT", 4);
++  packet.version = 1;
++  packet.type = 2;
++  packet.participant = 0;
++  packet.role = uint8_t(role);
++  ParseHex(attempt, packet.attempt);
++  ParseHex(kCapability, packet.credential);
++  packet.observed_ipv4 = htonl(0xCB007109u);
++  packet.observed_port = htons(35000);
++  packet.peer_ipv4 = peer.ipv4;
++  packet.peer_port = htons(peer.port);
++  return packet;
++}
++
++NatPacket Ack(std::string_view attempt, NatProbeRole role = NatProbeRole::kDiscovery) {
++  NatPacket packet{};
++  std::memcpy(packet.magic, "HNAT", 4);
++  packet.version = 1;
++  packet.type = 4;
++  packet.participant = 1;
++  packet.role = uint8_t(role);
++  ParseHex(attempt, packet.attempt);
++  return packet;
++}
++
++NatPacket Punch(std::string_view attempt, NatProbeRole role = NatProbeRole::kDiscovery) {
++  auto packet = Ack(attempt, role);
++  packet.type = 3;
++  return packet;
++}
++
++struct NatFixture {
++  std::vector<std::string> attempts;
++  std::vector<uint64_t> sockets;
++  ~NatFixture() {
++    for (auto socket : sockets)
++      NatProbeDetach(socket);
++    for (const auto& attempt : attempts)
++      NatProbeRetireIdentity(attempt);
++  }
++  void Add(std::string_view attempt) {
++    attempts.emplace_back(attempt);
++    REQUIRE(NatProbeInstallIdentity(
++        {std::string(attempt), std::string(kCapability), "127.0.0.1", 30740, 0}));
++  }
++  void Attach(uint64_t socket, NatProbeRole role) {
++    sockets.push_back(socket);
++    NatProbeAttach(socket, role, {htonl(0x7F000001u), uint16_t(socket)});
++  }
++  void Acknowledge(uint64_t socket, std::string_view attempt, LanAddress peer,
++                   NatProbeRole role = NatProbeRole::kDiscovery) {
++    auto registered = Registered(attempt, peer, role);
++    REQUIRE(NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&registered),
++                            sizeof(registered), htonl(0x7F000001u), 30740));
++    auto ack = Ack(attempt, role);
++    REQUIRE(NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&ack), sizeof(ack), peer.ipv4,
++                            peer.port));
++  }
++};
++
++using DiscoveryWirePacket = std::array<uint8_t, 308>;
++
++void PutBigEndian(DiscoveryWirePacket& packet, size_t offset, uint64_t value, size_t width = 4) {
++  for (size_t index = 0; index < width; ++index)
++    packet[offset + index] = uint8_t(value >> (8 * (width - index - 1)));
++}
++
++#if REX_PLATFORM_WIN32
++using TestSocket = SOCKET;
++constexpr TestSocket kBadSocket = INVALID_SOCKET;
++#else
++using TestSocket = int;
++constexpr TestSocket kBadSocket = -1;
++#endif
++
++struct SocketFixture {
++  TestSocket socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++  ~SocketFixture() {
++#if REX_PLATFORM_WIN32
++    if (socket != kBadSocket)
++      closesocket(socket);
++#else
++    if (socket != kBadSocket)
++      close(socket);
++#endif
++  }
++};
++
++struct DirectoryDisabled {
++  std::string previous = REXCVAR_GET(session_directory_url);
++  DirectoryDisabled() { REXCVAR_SET(session_directory_url, ""); }
++  ~DirectoryDisabled() { REXCVAR_SET(session_directory_url, previous); }
++};
++
++LanAddress BindLoopback(TestSocket socket) {
++  sockaddr_in local{};
++  local.sin_family = AF_INET;
++  local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++  local.sin_port = 0;
++  REQUIRE(bind(socket, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0);
++#if REX_PLATFORM_WIN32
++  int length = sizeof(local);
++#else
++  socklen_t length = sizeof(local);
++#endif
++  REQUIRE(getsockname(socket, reinterpret_cast<sockaddr*>(&local), &length) == 0);
++  return {local.sin_addr.s_addr, ntohs(local.sin_port)};
++}
++
++void SendNatControl(TestSocket socket, uint16_t port, const NatPacket& packet) {
++  sockaddr_in target{};
++  target.sin_family = AF_INET;
++  target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++  target.sin_port = htons(port);
++  REQUIRE(sendto(socket, reinterpret_cast<const char*>(&packet), sizeof(packet), 0,
++                 reinterpret_cast<sockaddr*>(&target), sizeof(target)) == sizeof(packet));
++}
++
++void AcknowledgeHostAttempt(TestSocket socket, uint16_t host_port, std::string_view attempt,
++                            LanAddress peer) {
++  SendNatControl(socket, host_port, Registered(attempt, peer));
++  SendNatControl(socket, host_port, Ack(attempt));
++}
++
++bool TransferDiscovery(TestSocket socket, uint16_t port, const DiscoveryWirePacket& packet) {
++  sockaddr_in target{};
++  target.sin_family = AF_INET;
++  target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++  target.sin_port = htons(port);
++  if (sendto(socket, reinterpret_cast<const char*>(packet.data()), int(packet.size()), 0,
++             reinterpret_cast<sockaddr*>(&target), sizeof(target)) != int(packet.size()))
++    return false;
++  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(150);
++  while (std::chrono::steady_clock::now() < deadline) {
++    fd_set sockets;
++    FD_ZERO(&sockets);
++    FD_SET(socket, &sockets);
++    const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
++        deadline - std::chrono::steady_clock::now());
++    timeval timeout{long(remaining.count() / 1000000), long(remaining.count() % 1000000)};
++    if (select(int(socket) + 1, &sockets, nullptr, nullptr, &timeout) <= 0)
++      return false;
++    DiscoveryWirePacket response{};
++    const int received = recvfrom(socket, reinterpret_cast<char*>(response.data()),
++                                  int(response.size()), 0, nullptr, nullptr);
++    if (received == int(response.size()))
++      return true;
++    // NAT punch/ack control can be queued ahead of the discovery response.
++  }
++  return false;
++}
++
++DiscoveryWirePacket JoinPacket(const SessionRecord& session, uint32_t title_id, uint64_t xuid,
++                               bool private_slot) {
++  DiscoveryWirePacket packet{};
++  PutBigEndian(packet, 0, 0x5245584Cu);
++  PutBigEndian(packet, 4, 1, 2);
++  packet[6] = 3;
++  PutBigEndian(packet, 8, title_id);
++  std::memcpy(packet.data() + 12, session.info.id.data(), 8);
++  std::memcpy(packet.data() + 20, session.info.key.data(), 16);
++  PutBigEndian(packet, 36, session.host_xuid, 8);
++  PutBigEndian(packet, 64, 1);
++  PutBigEndian(packet, 84, xuid, 8);
++  PutBigEndian(packet, 92, private_slot ? 2 : 0);
++  std::memcpy(packet.data() + 96, "WirePlayer", 10);
++  return packet;
++}
++}  // namespace
++
++TEST_CASE("authenticated poll installs only current private-ready grants",
++          "[session][invite-grant]") {
++  const auto now = Clock::time_point{} + std::chrono::seconds(10);
++  HostAdmissionGrantStore store;
++  Install(store, now);
++  CHECK(store.available_grant_count(now) == 1);
++
++  SECTION("public and unknown purposes fail closed") {
++    auto public_attempt = PrivateAttempt();
++    public_attempt.purpose = "public";
++    Install(store, now, public_attempt);
++    CHECK(store.available_grant_count(now) == 0);
++    auto unknown = PrivateAttempt(kAttemptB);
++    unknown.purpose = "future_private";
++    Install(store, now, unknown);
++    CHECK(store.available_grant_count(now) == 0);
++  }
++  SECTION("not-ready and terminal snapshots invalidate") {
++    auto not_ready = PrivateAttempt();
++    not_ready.host_ready = false;
++    Install(store, now, not_ready);
++    CHECK(store.available_grant_count(now) == 0);
++    Install(store, now);
++    store.ApplyAuthenticatedPoll("session-a", std::span<const HostAdmissionPollAttempt>{}, now);
++    CHECK(store.available_grant_count(now) == 0);
++  }
++  SECTION("stale and skipped revisions cannot replace current state") {
++    Install(store, now, PrivateAttempt(kAttemptA, 2, 500));
++    Install(store, now, PrivateAttempt(kAttemptA, 1, 100000));
++    CHECK(store.available_grant_count(now + std::chrono::milliseconds(600)) == 0);
++    store.Clear();
++    Install(store, now);
++    Install(store, now, PrivateAttempt(kAttemptA, 3, 100000));
++    CHECK(store.available_grant_count(now + std::chrono::milliseconds(1100)) == 0);
++  }
++  SECTION("generation mismatch cannot replace current state") {
++    auto mismatch = PrivateAttempt();
++    mismatch.admission_generation = "1123456789abcdef0123456789abcdef";
++    mismatch.admission_expires_in_ms = 100000;
++    Install(store, now, mismatch);
++    CHECK(store.available_grant_count(now + std::chrono::milliseconds(1100)) == 0);
++  }
++  SECTION("server lifetime is an upper bound") {
++    CHECK(store.available_grant_count(now + std::chrono::milliseconds(999)) == 1);
++    CHECK(store.available_grant_count(now + std::chrono::milliseconds(1000)) == 0);
++  }
++}
++
++TEST_CASE("poll authority distinguishes transit failure 404 and request time",
++          "[session][invite-grant][directory]") {
++  const auto poll_started = Clock::time_point{} + std::chrono::seconds(100);
++  const auto response_received = poll_started + std::chrono::seconds(4);
++  auto grants = std::make_shared<HostAdmissionGrantStore>();
++  std::array initial_grants{PrivateAttempt(kAttemptA, 1, 10000),
++                            PrivateAttempt(kAttemptB, 1, 10000)};
++  grants->ApplyAuthenticatedPoll("session-a", initial_grants, poll_started);
++
++  NatFixture nat;
++  nat.Add(kAttemptA);
++  nat.Add(kAttemptB);
++  constexpr uint64_t socket = 42301;
++  nat.Attach(socket, NatProbeRole::kDiscovery);
++  const LanAddress peer{htonl(0xCB007160u), 46500};
++  nat.Acknowledge(socket, kAttemptA, peer);
++
++  DirectoryHostPollRuntimeState state;
++  state.directory_session_id = "session-a";
++  state.registration_token = "stale-registration-token";
++  state.public_invite_code = "ABCDEF";
++  state.host_attempts = {std::string(kAttemptA), std::string(kAttemptB)};
++  state.private_attempts.emplace(kAttemptA, initial_grants[0]);
++  state.private_attempts.emplace(kAttemptB, initial_grants[1]);
++  state.pending_completions.push_back(
++      {"session-a", std::string(kAttemptB), std::string(kCapability)});
++  SessionRecord hosted;
++
++  std::array acknowledged_b{std::string(kAttemptB)};
++  auto completed = grants->Reserve("session-a", 99, 0x01020304, 40000,
++                                   acknowledged_b, 20, poll_started);
++  REQUIRE(completed.status == HostAdmissionReservationStatus::kReserved);
++  grants->Finish(completed.reservation, true, poll_started);
++
++  const auto transport = ClassifyDirectoryHostPollResponse(std::nullopt, false);
++  REQUIRE(transport == DirectoryHostPollDisposition::kRetainUntilExpiry);
++  auto retained = ApplyDirectoryHostPollResult(
++      transport, {}, state, grants.get(), hosted, response_received);
++  CHECK_FALSE(retained.recover_now);
++  CHECK_FALSE(state.recovering);
++  CHECK(state.directory_session_id == "session-a");
++  CHECK(state.pending_completions.size() == 1);
++  CHECK(NatProbeMatchAcknowledgedDiscoveryAttempts(socket, peer) ==
++        std::vector<std::string>{std::string(kAttemptA)});
++  CHECK(grants->available_grant_count(response_received) == 1);
++  CHECK(grants->available_grant_count(poll_started + std::chrono::milliseconds(9999)) == 1);
++  CHECK(grants->available_grant_count(poll_started + std::chrono::seconds(10)) == 0);
++
++  const auto missing = ClassifyDirectoryHostPollResponse(404, false);
++  REQUIRE(missing == DirectoryHostPollDisposition::kRecoverRegistration);
++  auto recovery = ApplyDirectoryHostPollResult(
++      missing, {}, state, grants.get(), hosted, response_received);
++  CHECK(recovery.recover_now);
++  CHECK(state.recovering);
++  CHECK(state.directory_session_id.empty());
++  CHECK(state.registration_token.empty());
++  CHECK(state.public_invite_code.empty());
++  CHECK(state.host_attempts.empty());
++  CHECK(state.private_attempts.empty());
++  CHECK(state.pending_completions.empty());
++  CHECK(NatProbeMatchAcknowledgedDiscoveryAttempts(socket, peer).empty());
++  CHECK(Reserve(*grants, 10, response_received).status ==
++        HostAdmissionReservationStatus::kNoMatch);
++  CHECK_FALSE(grants->hosted_directory_session());
++  CHECK(grants->TakeCompletions().empty());
++
++  // A recovered registration starts with a new authoritative snapshot and a
++  // genuinely new attempt. Neither consumed nor available state from the old
++  // registration can reappear implicitly.
++  state.directory_session_id = "session-b";
++  state.recovering = false;
++  auto replacement = TraversalAttempt(kAttemptC, 1, 10000);
++  replacement.session_id = "session-b";
++  std::array replacement_snapshot{replacement};
++  auto accepted = ApplyDirectoryHostPollResult(
++      DirectoryHostPollDisposition::kAccepted, replacement_snapshot, state,
++      grants.get(), hosted, response_received);
++  CHECK_FALSE(accepted.recover_now);
++  nat.Add(kAttemptC);
++  nat.Acknowledge(socket, kAttemptC, peer);
++  auto fresh_matches = NatProbeMatchAcknowledgedDiscoveryAttempts(socket, peer);
++  CHECK(fresh_matches == std::vector<std::string>{std::string(kAttemptC)});
++  CHECK(Reserve(*grants, 10, response_received, "session-a").status ==
++        HostAdmissionReservationStatus::kNoMatch);
++  CHECK(Reserve(*grants, 21, response_received, "session-b", socket,
++                peer.ipv4, peer.port, fresh_matches)
++            .status == HostAdmissionReservationStatus::kReserved);
++}
++
++TEST_CASE("poll duration parsing and deadline arithmetic fail closed",
++          "[session][invite-grant][directory]") {
++  auto parse_lifetime = [](nlohmann::json lifetime) {
++    return ParseDirectoryHostPollSnapshot(
++        PollSnapshotDocument(std::move(lifetime)).dump(), "session-a");
++  };
++
++  REQUIRE(parse_lifetime(10000));
++  CHECK_FALSE(parse_lifetime(0));
++  CHECK_FALSE(parse_lifetime(uint64_t(UINT32_MAX)));
++  CHECK_FALSE(parse_lifetime(uint64_t(UINT32_MAX) + 1));
++  CHECK_FALSE(parse_lifetime(-1));
++  CHECK_FALSE(parse_lifetime("10000"));
++
++  HostAdmissionGrantStore extreme;
++  const auto near_max = Clock::time_point::max() - std::chrono::milliseconds(1000);
++  Install(extreme, near_max, PrivateAttempt(kAttemptA, 1, 1001));
++  CHECK(extreme.available_grant_count(near_max) == 0);
++
++  HostAdmissionGrantStore exact_safe;
++  Install(exact_safe, near_max, PrivateAttempt(kAttemptA, 1, 1000));
++  CHECK(exact_safe.available_grant_count(near_max) == 1);
++  CHECK(exact_safe.available_grant_count(Clock::time_point::max()) == 0);
++
++  HostAdmissionGrantStore maximum;
++  Install(maximum, Clock::time_point{},
++          PrivateAttempt(kAttemptA, 1, UINT32_MAX));
++  CHECK(maximum.available_grant_count(Clock::time_point{}) == 0);
++
++  HostAdmissionGrantStore malformed_snapshot;
++  Install(malformed_snapshot, Clock::time_point{},
++          PrivateAttempt(kAttemptA, 1, 1000));
++  DirectoryHostPollRuntimeState state;
++  state.directory_session_id = "session-a";
++  SessionRecord hosted;
++  auto malformed = ParseDirectoryHostPollSnapshot(
++      PollSnapshotDocument("invalid").dump(), "session-a");
++  REQUIRE_FALSE(malformed);
++  const auto disposition = ClassifyDirectoryHostPollResponse(200, false);
++  REQUIRE(disposition == DirectoryHostPollDisposition::kRejectSnapshot);
++  ApplyDirectoryHostPollResult(disposition, {}, state, &malformed_snapshot,
++                               hosted, Clock::time_point{});
++  CHECK(malformed_snapshot.available_grant_count(Clock::time_point{}) == 0);
++}
++
++TEST_CASE("grant reservation is atomic idempotent and consumable once",
++          "[session][invite-grant][concurrency]") {
++  const auto now = Clock::time_point{} + std::chrono::seconds(20);
++  HostAdmissionGrantStore store;
++  Install(store, now);
++
++  SECTION("one different-XUID contender wins") {
++    std::barrier start(3);
++    std::array<HostAdmissionReservationResult, 2> results;
++    std::thread first([&] {
++      start.arrive_and_wait();
++      results[0] = Reserve(store, 10, now);
++    });
++    std::thread second([&] {
++      start.arrive_and_wait();
++      results[1] = Reserve(store, 11, now);
++    });
++    start.arrive_and_wait();
++    first.join();
++    second.join();
++    CHECK((results[0].status == HostAdmissionReservationStatus::kReserved) +
++              (results[1].status == HostAdmissionReservationStatus::kReserved) ==
++          1);
++  }
++  SECTION("same identity reuses one reservation") {
++    auto first = Reserve(store, 10, now);
++    auto duplicate = Reserve(store, 10, now);
++    REQUIRE(first.status == HostAdmissionReservationStatus::kReserved);
++    CHECK(duplicate.status == HostAdmissionReservationStatus::kDuplicateReservation);
++    CHECK(first.reservation.reservation_id == duplicate.reservation.reservation_id);
++  }
++  SECTION("concurrent duplicate packets share one reservation identity") {
++    std::barrier start(3);
++    std::array<HostAdmissionReservationResult, 2> results;
++    std::thread first([&] {
++      start.arrive_and_wait();
++      results[0] = Reserve(store, 10, now);
++    });
++    std::thread second([&] {
++      start.arrive_and_wait();
++      results[1] = Reserve(store, 10, now);
++    });
++    start.arrive_and_wait();
++    first.join();
++    second.join();
++    CHECK((results[0].status == HostAdmissionReservationStatus::kReserved) +
++              (results[1].status == HostAdmissionReservationStatus::kReserved) ==
++          1);
++    CHECK(results[0].reservation.reservation_id == results[1].reservation.reservation_id);
++  }
++  SECTION("capacity failure releases while lease remains live") {
++    auto first = Reserve(store, 10, now);
++    REQUIRE(first.reservation);
++    store.Finish(first.reservation, false, now + std::chrono::milliseconds(10));
++    CHECK(Reserve(store, 11, now + std::chrono::milliseconds(11)).status ==
++          HostAdmissionReservationStatus::kReserved);
++  }
++  SECTION("reservation pins nominal expiry through synchronous commit") {
++    auto first = Reserve(store, 10, now);
++    REQUIRE(first.reservation);
++    store.Finish(first.reservation, true, now + std::chrono::seconds(2));
++    CHECK(Reserve(store, 11, now + std::chrono::seconds(2)).status ==
++          HostAdmissionReservationStatus::kNoMatch);
++    CHECK(Reserve(store, 10, now + std::chrono::seconds(2)).status ==
++          HostAdmissionReservationStatus::kConsumedDuplicate);
++    CHECK(store.TakeCompletions().size() == 1);
++  }
++  SECTION("expiry before reservation rejects") {
++    CHECK(Reserve(store, 10, now + std::chrono::seconds(1)).status ==
++          HostAdmissionReservationStatus::kNoMatch);
++  }
++}
++
++TEST_CASE("grant matching fails closed on session and attempt ambiguity",
++          "[session][invite-grant][security]") {
++  const auto now = Clock::time_point{} + std::chrono::seconds(30);
++  HostAdmissionGrantStore store;
++  Install(store, now);
++  CHECK(Reserve(store, 10, now, "session-b").status == HostAdmissionReservationStatus::kNoMatch);
++
++  std::array two{PrivateAttempt(kAttemptA), PrivateAttempt(kAttemptB)};
++  store.ApplyAuthenticatedPoll("session-a", two, now);
++  std::array ids{std::string(kAttemptA), std::string(kAttemptB)};
++  CHECK(Reserve(store, 10, now, "session-a", 41, 0x01020304, 40000, ids).status ==
++        HostAdmissionReservationStatus::kAmbiguous);
++
++  store.Clear();
++  Install(store, now);
++  store.InvalidateSession("session-a");
++  CHECK(store.available_grant_count(now) == 0);
++  CHECK_FALSE(store.hosted_directory_session());
++}
++
++TEST_CASE("NAT admission correlation requires exact acknowledged discovery endpoint",
++          "[session][invite-grant][nat]") {
++  NatFixture fixture;
++  fixture.Add(kAttemptA);
++  constexpr uint64_t discovery_socket = 41001;
++  constexpr uint64_t gameplay_socket = 41002;
++  fixture.Attach(discovery_socket, NatProbeRole::kDiscovery);
++  fixture.Attach(gameplay_socket, NatProbeRole::kGameplay);
++  const LanAddress peer{htonl(0xCB007144u), 45000};
++  fixture.Acknowledge(discovery_socket, kAttemptA, peer);
++
++  auto exact = NatProbeMatchAcknowledgedDiscoveryAttempts(discovery_socket, peer);
++  REQUIRE(exact.size() == 1);
++  CHECK(exact.front() == kAttemptA);
++  CHECK(NatProbeMatchAcknowledgedDiscoveryAttempts(discovery_socket,
++                                                   {peer.ipv4, uint16_t(peer.port + 1)})
++            .empty());
++  CHECK(
++      NatProbeMatchAcknowledgedDiscoveryAttempts(discovery_socket, {htonl(0xCB007145u), peer.port})
++          .empty());
++  fixture.Acknowledge(gameplay_socket, kAttemptA, peer, NatProbeRole::kGameplay);
++  CHECK(NatProbeMatchAcknowledgedDiscoveryAttempts(gameplay_socket, peer).empty());
++
++  const LanAddress rebound{peer.ipv4, uint16_t(peer.port + 9)};
++  auto registered = Registered(kAttemptA, rebound);
++  REQUIRE(NatProbeConsume(discovery_socket, reinterpret_cast<const uint8_t*>(&registered),
++                          sizeof(registered), htonl(0x7F000001u), 30740));
++  CHECK(NatProbeMatchAcknowledgedDiscoveryAttempts(discovery_socket, peer).empty());
++  CHECK(NatProbeMatchAcknowledgedDiscoveryAttempts(discovery_socket, rebound).empty());
++  auto ack = Ack(kAttemptA);
++  REQUIRE(NatProbeConsume(discovery_socket, reinterpret_cast<const uint8_t*>(&ack), sizeof(ack),
++                          rebound.ipv4, rebound.port));
++  CHECK(NatProbeMatchAcknowledgedDiscoveryAttempts(discovery_socket, rebound).size() == 1);
++}
++
++TEST_CASE("NAT correlation returns every ambiguous exact candidate",
++          "[session][invite-grant][nat][security]") {
++  NatFixture fixture;
++  fixture.Add(kAttemptA);
++  fixture.Add(kAttemptB);
++  constexpr uint64_t socket = 42001;
++  fixture.Attach(socket, NatProbeRole::kDiscovery);
++  const LanAddress peer{htonl(0xCB007155u), 46000};
++  fixture.Acknowledge(socket, kAttemptA, peer);
++  fixture.Acknowledge(socket, kAttemptB, peer);
++  CHECK(NatProbeMatchAcknowledgedDiscoveryAttempts(socket, peer).size() == 2);
++}
++
++TEST_CASE("acknowledged admission correlation outlives rendezvous transmission",
++          "[session][invite-grant][nat]") {
++  NatFixture fixture;
++  const auto attached_before = Clock::now();
++  fixture.Add(kAttemptA);
++  constexpr uint64_t socket = 42501;
++  fixture.Attach(socket, NatProbeRole::kDiscovery);
++  const LanAddress peer{htonl(0xCB007166u), 47000};
++  fixture.Acknowledge(socket, kAttemptA, peer);
++
++  HostAdmissionGrantStore store;
++  Install(store, attached_before, PrivateAttempt(kAttemptA, 1, 60000));
++  const auto after_rendezvous = attached_before + std::chrono::seconds(21);
++  NatProbeTickAt(socket, after_rendezvous);
++  CHECK_FALSE(NatProbeRendezvousAttemptActive(socket, kAttemptA));
++  auto matches = NatProbeMatchAcknowledgedDiscoveryAttempts(socket, peer);
++  REQUIRE(matches == std::vector<std::string>{std::string(kAttemptA)});
++
++  // A current authenticated renewal, not NAT state, extends authority.
++  Install(store, after_rendezvous, PrivateAttempt(kAttemptA, 2, 60000));
++  auto reservation =
++      Reserve(store, 10, after_rendezvous, "session-a", socket, peer.ipv4, peer.port, matches);
++  REQUIRE(reservation.status == HostAdmissionReservationStatus::kReserved);
++  store.Finish(reservation.reservation, false, after_rendezvous);
++
++  store.ApplyAuthenticatedPoll("session-a", std::span<const HostAdmissionPollAttempt>{},
++                               after_rendezvous);
++  CHECK(Reserve(store, 10, after_rendezvous, "session-a", socket, peer.ipv4, peer.port, matches)
++            .status == HostAdmissionReservationStatus::kNoMatch);
++
++  fixture.Add(kAttemptB);
++  constexpr uint64_t unacknowledged_socket = 42502;
++  fixture.Attach(unacknowledged_socket, NatProbeRole::kDiscovery);
++  NatProbeTickAt(unacknowledged_socket, after_rendezvous);
++  CHECK_FALSE(NatProbeRendezvousAttemptActive(unacknowledged_socket, kAttemptB));
++  CHECK(NatProbeMatchAcknowledgedDiscoveryAttempts(unacknowledged_socket, peer).empty());
++}
++
++TEST_CASE("unacknowledged rendezvous expiry permanently rejects late control traffic",
++          "[session][invite-grant][nat][security]") {
++  NatFixture fixture;
++  const auto attached_before = Clock::now();
++  fixture.Add(kAttemptA);
++  constexpr uint64_t socket = 42701;
++  fixture.Attach(socket, NatProbeRole::kDiscovery);
++  const LanAddress peer{htonl(0xCB007177u), 47500};
++  const auto after_rendezvous = attached_before + std::chrono::seconds(21);
++  NatProbeTickAt(socket, after_rendezvous);
++  CHECK_FALSE(NatProbeRendezvousAttemptActive(socket, kAttemptA));
++
++  auto registered = Registered(kAttemptA, peer);
++  auto punch = Punch(kAttemptA);
++  auto ack = Ack(kAttemptA);
++  CHECK_FALSE(NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&registered),
++                              sizeof(registered), htonl(0x7F000001u), 30740));
++  CHECK_FALSE(NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&punch),
++                              sizeof(punch), peer.ipv4, peer.port));
++  CHECK_FALSE(NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&ack),
++                              sizeof(ack), peer.ipv4, peer.port));
++  auto expired_matches = NatProbeMatchAcknowledgedDiscoveryAttempts(socket, peer);
++  CHECK(expired_matches.empty());
++
++  HostAdmissionGrantStore grants;
++  Install(grants, after_rendezvous, PrivateAttempt(kAttemptA, 1, 60000));
++  CHECK(grants.Reserve("session-a", socket, peer.ipv4, peer.port,
++                       expired_matches, 10, after_rendezvous)
++            .status == HostAdmissionReservationStatus::kNoMatch);
++
++  // Re-polling the same server-issued attempt cannot reattach an expired
++  // generation, but a genuinely new attempt can rendezvous normally.
++  REQUIRE(NatProbeInstallIdentity(
++      {std::string(kAttemptA), std::string(kCapability), "127.0.0.1", 30740, 0}));
++  CHECK_FALSE(NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&registered),
++                              sizeof(registered), htonl(0x7F000001u), 30740));
++  fixture.Add(kAttemptB);
++  fixture.Acknowledge(socket, kAttemptB, peer);
++  auto fresh_matches = NatProbeMatchAcknowledgedDiscoveryAttempts(socket, peer);
++  REQUIRE(fresh_matches == std::vector<std::string>{std::string(kAttemptB)});
++  std::array refreshed{PrivateAttempt(kAttemptB, 1, 60000)};
++  grants.ApplyAuthenticatedPoll("session-a", refreshed, after_rendezvous);
++  CHECK(Reserve(grants, 11, after_rendezvous, "session-a", socket,
++                peer.ipv4, peer.port, fresh_matches)
++            .status == HostAdmissionReservationStatus::kReserved);
++}
++
++TEST_CASE("public discovery cannot spend private capacity from a wire flag",
++          "[session][invite-grant][admission][network][security]") {
++  DirectoryDisabled directory;
++  constexpr uint32_t title_id = 0x58410A7A;
++  constexpr uint16_t port = 39137;
++  SessionRegistry registry;
++  auto session = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 3074}, 1, 1, 2);
++  {
++    LanDiscoveryService host(title_id, port);
++    REQUIRE(host.Advertise(session));
++    SocketFixture peer;
++    REQUIRE(peer.socket != kBadSocket);
++    auto claimed_private = JoinPacket(*session, title_id, 2, true);
++    CHECK_FALSE(TransferDiscovery(peer.socket, port, claimed_private));
++    CHECK(session->members.size() == 1);
++    CHECK(session->FilledPrivateSlots() == 0);
++
++    REQUIRE(registry.Modify(session->info.id, 1, 2, 2));
++    REQUIRE(TransferDiscovery(peer.socket, port, claimed_private));
++    REQUIRE(session->members.size() == 2);
++    CHECK_FALSE(session->members.back().private_slot);
++    CHECK(session->FilledPublicSlots() == 2);
++    CHECK(session->FilledPrivateSlots() == 0);
++  }
++}
++
++TEST_CASE("authenticated grant drives the complete host admission path",
++          "[session][invite-grant][admission][network]") {
++  DirectoryDisabled directory;
++  constexpr uint32_t title_id = 0x58410A7A;
++  constexpr uint16_t port = 39138;
++  SessionRegistry registry;
++
++  SECTION("private admission commits and consumes") {
++    auto session = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 3074}, 1, 1, 1);
++    auto grants = std::make_shared<HostAdmissionGrantStore>();
++    NatFixture nat;
++    LanDiscoveryService host(title_id, port, grants);
++    REQUIRE(host.Advertise(session));
++    nat.Add(kAttemptA);
++    Install(*grants, Clock::now(), PrivateAttempt(kAttemptA, 1, 60000));
++    SocketFixture peer;
++    REQUIRE(peer.socket != kBadSocket);
++    const auto peer_address = BindLoopback(peer.socket);
++    AcknowledgeHostAttempt(peer.socket, port, kAttemptA, peer_address);
++
++    REQUIRE(TransferDiscovery(peer.socket, port, JoinPacket(*session, title_id, 2, true)));
++    REQUIRE(session->members.size() == 2);
++    CHECK(session->members.back().private_slot);
++    CHECK(grants->available_grant_count() == 0);
++    CHECK(Reserve(*grants, 3, Clock::now(), "session-a").status ==
++          HostAdmissionReservationStatus::kNoMatch);
++  }
++
++  SECTION("title-selected public fallback commits and consumes") {
++    auto session = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 3074}, 1, 3, 1);
++    session->members.push_back(Member(2, true));
++    auto grants = std::make_shared<HostAdmissionGrantStore>();
++    NatFixture nat;
++    LanDiscoveryService host(title_id, port, grants);
++    REQUIRE(host.Advertise(session));
++    nat.Add(kAttemptA);
++    Install(*grants, Clock::now(), PrivateAttempt(kAttemptA, 1, 60000));
++    SocketFixture peer;
++    REQUIRE(peer.socket != kBadSocket);
++    const auto peer_address = BindLoopback(peer.socket);
++    AcknowledgeHostAttempt(peer.socket, port, kAttemptA, peer_address);
++
++    REQUIRE(TransferDiscovery(peer.socket, port, JoinPacket(*session, title_id, 3, false)));
++    REQUIRE(session->members.size() == 3);
++    CHECK_FALSE(session->members.back().private_slot);
++    CHECK(session->FilledPrivateSlots() == 1);
++    CHECK(grants->available_grant_count() == 0);
++  }
++
++  SECTION("capacity rejection releases the reservation for retry") {
++    auto session = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 3074}, 1, 1, 0);
++    auto grants = std::make_shared<HostAdmissionGrantStore>();
++    NatFixture nat;
++    LanDiscoveryService host(title_id, port, grants);
++    REQUIRE(host.Advertise(session));
++    nat.Add(kAttemptA);
++    Install(*grants, Clock::now(), PrivateAttempt(kAttemptA, 1, 60000));
++    SocketFixture peer;
++    REQUIRE(peer.socket != kBadSocket);
++    const auto peer_address = BindLoopback(peer.socket);
++    AcknowledgeHostAttempt(peer.socket, port, kAttemptA, peer_address);
++    const auto join = JoinPacket(*session, title_id, 2, false);
++
++    CHECK_FALSE(TransferDiscovery(peer.socket, port, join));
++    CHECK(session->members.size() == 1);
++    CHECK(grants->available_grant_count() == 1);
++    REQUIRE(registry.Modify(session->info.id, 1, 2, 0));
++    REQUIRE(TransferDiscovery(peer.socket, port, join));
++    CHECK(session->members.size() == 2);
++    CHECK(grants->available_grant_count() == 0);
++  }
++
++  SECTION("ambiguous exact endpoint cannot select an invite grant") {
++    auto session = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 3074}, 1, 1, 2);
++    auto grants = std::make_shared<HostAdmissionGrantStore>();
++    NatFixture nat;
++    LanDiscoveryService host(title_id, port, grants);
++    REQUIRE(host.Advertise(session));
++    nat.Add(kAttemptA);
++    nat.Add(kAttemptB);
++    std::array attempts{PrivateAttempt(kAttemptA, 1, 60000), PrivateAttempt(kAttemptB, 1, 60000)};
++    grants->ApplyAuthenticatedPoll("session-a", attempts, Clock::now());
++    SocketFixture peer;
++    REQUIRE(peer.socket != kBadSocket);
++    const auto peer_address = BindLoopback(peer.socket);
++    AcknowledgeHostAttempt(peer.socket, port, kAttemptA, peer_address);
++    AcknowledgeHostAttempt(peer.socket, port, kAttemptB, peer_address);
++
++    CHECK_FALSE(TransferDiscovery(peer.socket, port, JoinPacket(*session, title_id, 2, true)));
++    CHECK(session->members.size() == 1);
++    CHECK(grants->available_grant_count() == 2);
++  }
++}
++
++TEST_CASE("authoritative discovery admission preserves public and invite pools",
++          "[session][invite-grant][admission]") {
++  SessionRegistry registry;
++  auto session = registry.Create(1, "Host", {}, 1, 4, 2);
++  DiscoveryAdmissionContext public_context;
++  DiscoveryAdmissionContext invite_context{DiscoveryAdmissionSource::kInviteGrant};
++  auto apply = [&](SessionMember member, DiscoveryAdmissionContext context) {
++    return ApplyDiscoveryMemberBatch(*session, std::span<const SessionMember>(&member, 1), context);
++  };
++
++  REQUIRE(apply(Member(2, true), public_context));
++  CHECK_FALSE(session->members.back().private_slot);
++  REQUIRE(apply(Member(3), public_context));
++  REQUIRE(apply(Member(4), public_context));
++  CHECK(session->FilledPublicSlots() == 4);
++  CHECK_FALSE(apply(Member(5, true), public_context));
++
++  REQUIRE(apply(Member(6, true), invite_context));
++  REQUIRE(apply(Member(7, true), invite_context));
++  CHECK(session->FilledPrivateSlots() == 2);
++  CHECK_FALSE(apply(Member(8, true), invite_context));
++
++  const auto before_size = session->members.size();
++  const auto before_private = session->members[4].private_slot;
++  REQUIRE(apply(Member(6, false), public_context));
++  CHECK(session->members.size() == before_size);
++  CHECK(session->members[4].private_slot == before_private);
++}
++
++TEST_CASE("invited public fallback is title-selected and still transactional",
++          "[session][invite-grant][admission]") {
++  SessionRecord session;
++  session.host_xuid = 1;
++  session.max_public_slots = 3;
++  session.max_private_slots = 1;
++  session.members = {Member(1), Member(2, true)};
++  DiscoveryAdmissionContext invite{DiscoveryAdmissionSource::kInviteGrant};
++  auto fallback = Member(3, false);
++  REQUIRE(ApplyDiscoveryMemberBatch(session, std::span<const SessionMember>(&fallback, 1), invite));
++  CHECK(session.FilledPublicSlots() == 2);
++  CHECK(session.FilledPrivateSlots() == 1);
++
++  auto impossible_private = Member(4, true);
++  CHECK_FALSE(ApplyDiscoveryMemberBatch(
++      session, std::span<const SessionMember>(&impossible_private, 1), invite));
++  std::array invalid_share{Member(4), Member(5)};
++  CHECK_FALSE(ApplyDiscoveryMemberBatch(session, invalid_share, invite));
++  CHECK(session.members.size() == 3);
++}
++
++TEST_CASE("successful invited public fallback consumes its exact grant",
++          "[session][invite-grant][admission][security]") {
++  const auto now = Clock::time_point{} + std::chrono::seconds(35);
++  HostAdmissionGrantStore store;
++  Install(store, now);
++  auto reservation = Reserve(store, 3, now);
++  REQUIRE(reservation.reservation);
++
++  SessionRecord session;
++  session.host_xuid = 1;
++  session.max_public_slots = 3;
++  session.max_private_slots = 1;
++  session.members = {Member(1), Member(2, true)};
++  auto fallback = Member(3, false);
++  const bool committed =
++      ApplyDiscoveryMemberBatch(session, std::span<const SessionMember>(&fallback, 1),
++                                {DiscoveryAdmissionSource::kInviteGrant});
++  REQUIRE(committed);
++  store.Finish(reservation.reservation, committed, now);
++  CHECK(Reserve(store, 4, now).status == HostAdmissionReservationStatus::kNoMatch);
++}
++
++TEST_CASE("membership final-slot race has one transactional winner",
++          "[session][invite-grant][admission][concurrency]") {
++  for (unsigned iteration = 0; iteration < 16; ++iteration) {
++    SessionRecord session;
++    session.host_xuid = 1;
++    session.max_public_slots = 2;
++    session.members = {Member(1)};
++    DiscoveryAdmissionContext public_context;
++    std::barrier start(3);
++    std::array<bool, 2> admitted{};
++    std::thread first([&] {
++      auto member = Member(2);
++      start.arrive_and_wait();
++      admitted[0] = ApplyDiscoveryMemberBatch(session, std::span<const SessionMember>(&member, 1),
++                                              public_context);
++    });
++    std::thread second([&] {
++      auto member = Member(3);
++      start.arrive_and_wait();
++      admitted[1] = ApplyDiscoveryMemberBatch(session, std::span<const SessionMember>(&member, 1),
++                                              public_context);
++    });
++    start.arrive_and_wait();
++    first.join();
++    second.join();
++    CHECK(unsigned(admitted[0]) + unsigned(admitted[1]) == 1);
++  }
++}
++
++TEST_CASE("poll invalidation racing a reservation never creates reusable authority",
++          "[session][invite-grant][concurrency]") {
++  const auto now = Clock::time_point{} + std::chrono::seconds(40);
++  HostAdmissionGrantStore store;
++  Install(store, now);
++  std::barrier start(3);
++  HostAdmissionReservationResult reserved;
++  std::thread reserver([&] {
++    start.arrive_and_wait();
++    reserved = Reserve(store, 10, now);
++  });
++  std::thread revoker([&] {
++    start.arrive_and_wait();
++    store.ApplyAuthenticatedPoll("session-a", std::span<const HostAdmissionPollAttempt>{}, now);
++  });
++  start.arrive_and_wait();
++  reserver.join();
++  revoker.join();
++  if (reserved.reservation)
++    store.Finish(reserved.reservation, true, now);
++  CHECK(Reserve(store, 11, now).status == HostAdmissionReservationStatus::kNoMatch);
++}
++
++}  // namespace rex::system::xam
