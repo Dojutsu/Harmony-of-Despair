@@ -8,7 +8,8 @@ import threading
 import unittest
 
 from tools.master_server.server import (
-    AuthenticationError, DirectoryServer, INVITE_CODE_ALPHABET, INVITE_CODE_LENGTH,
+    AttemptPurpose, AuthenticationError, DirectoryServer, INVITE_CODE_ALPHABET,
+    INVITE_CODE_LENGTH,
     InviteLookupLimiter,
     MAX_INVITE_LOOKUPS_PER_WINDOW, RENDEZVOUS_MAGIC, RENDEZVOUS_PACKET, RENDEZVOUS_REGISTER,
     RENDEZVOUS_REGISTERED, RENDEZVOUS_VERSION, RendezvousRegistry, RendezvousServer,
@@ -32,6 +33,17 @@ def payload(**updates):
                 "gameplay_port": 30742,
             }
         ],
+    }
+    value.update(updates)
+    return value
+
+
+def attempt_payload(request_id="00112233445566778899aabbccddeeff", **updates):
+    value = {
+        "request_id": request_id,
+        "title_id": "58410A7A",
+        "protocol_version": 1,
+        "build_id": "harmony-0.0.1.4-p1",
     }
     value.update(updates)
     return value
@@ -192,6 +204,279 @@ class RegistryTests(unittest.TestCase):
                          [value["session_id"] for value in registry.list({})])
 
 
+class PhaseOneRegistryTests(unittest.TestCase):
+    def make_registries(self):
+        now = [1000.0]
+        traversal = RendezvousRegistry(
+            20, lambda: now[0], rendezvous_host="rendezvous.example")
+        registry = SessionRegistry(45, lambda: now[0], traversal.remove_session)
+        session = registry.create(payload())
+        return now, registry, traversal, session
+
+    def issue(self, registry, traversal, session, request=None, source="client"):
+        return registry.issue_by_code_attempt(
+            session.invite_code,
+            attempt_payload(**(request or {})),
+            traversal,
+            source,
+        )
+
+    def test_live_replay_is_idempotent_and_does_not_extend_expiry(self):
+        now, registry, traversal, session = self.make_registries()
+        first_status, _, first = self.issue(registry, traversal, session)
+        attempt_id = bytes.fromhex(first["attempt_id"])
+        self.assertEqual(1000.0, traversal._attempts[attempt_id].issued_at)
+        original_expiry = traversal._attempts[attempt_id].expires_at
+        now[0] += 7.25
+        replay_status, _, replay = self.issue(registry, traversal, session)
+
+        self.assertEqual("created", first_status)
+        self.assertEqual("replayed", replay_status)
+        self.assertEqual(first["attempt_id"], replay["attempt_id"])
+        self.assertEqual(first["capability"], replay["capability"])
+        self.assertEqual(original_expiry, traversal._attempts[attempt_id].expires_at)
+        self.assertLess(replay["rendezvous_expires_in_ms"],
+                        first["rendezvous_expires_in_ms"])
+        self.assertEqual(1, len(traversal._attempts))
+
+    def test_expired_attempt_retains_terminal_tombstone_until_session_cleanup(self):
+        now, registry, traversal, session = self.make_registries()
+        _, _, first = self.issue(registry, traversal, session)
+        now[0] += 21
+        status, _, replay = self.issue(registry, traversal, session)
+        self.assertEqual("terminal", status)
+        self.assertIsNone(replay)
+        request = traversal._request_ids[attempt_payload()["request_id"]]
+        self.assertEqual("expired", request.terminal_reason)
+        self.assertTrue(registry.delete(session.session_id, session.registration_token))
+        self.assertEqual({}, traversal._request_ids)
+
+    def test_terminal_tombstone_blocks_replay_but_new_request_id_can_issue(self):
+        now, registry, traversal, session = self.make_registries()
+        _, _, first = self.issue(registry, traversal, session)
+        self.assertTrue(traversal.complete(
+            session.session_id, first["attempt_id"], first["capability"]))
+
+        terminal_status, _, terminal = self.issue(registry, traversal, session)
+        self.assertEqual("terminal", terminal_status)
+        self.assertIsNone(terminal)
+        now[0] += 0.3
+        new_status, _, new_attempt = self.issue(
+            registry, traversal, session,
+            {"request_id": "ffeeddccbbaa99887766554433221100"})
+        self.assertEqual("created", new_status)
+        self.assertNotEqual(first["attempt_id"], new_attempt["attempt_id"])
+
+    def test_conflicting_fingerprint_cannot_redirect_request_id(self):
+        _, registry, traversal, first_session = self.make_registries()
+        second_session = registry.create(payload())
+        first_status, _, first = self.issue(registry, traversal, first_session)
+        self.assertEqual("created", first_status)
+
+        cases = [
+            (first_session, {"title_id": "12345678"}),
+            (first_session, {"protocol_version": 2}),
+            (first_session, {"build_id": "different-build"}),
+            (second_session, {}),
+        ]
+        for target, changes in cases:
+            with self.subTest(changes=changes, code=target.invite_code):
+                status, _, attempt = self.issue(
+                    registry, traversal, target, changes, source="other-client")
+                self.assertEqual("conflict", status)
+                self.assertIsNone(attempt)
+        self.assertEqual({first["attempt_id"]},
+                         {key.hex() for key in traversal._attempts})
+
+    def test_session_cleanup_removes_attempts_capabilities_and_request_state(self):
+        _, registry, traversal, session = self.make_registries()
+        _, _, attempt = self.issue(registry, traversal, session)
+        self.assertTrue(traversal._request_ids)
+        self.assertTrue(registry.delete(session.session_id, session.registration_token))
+        self.assertEqual({}, traversal._attempts)
+        self.assertEqual({}, traversal._by_session)
+        self.assertEqual({}, traversal._request_ids)
+        self.assertEqual({}, traversal._request_ids_by_session)
+        self.assertFalse(traversal.complete(
+            session.session_id, attempt["attempt_id"], attempt["capability"]))
+
+    def test_session_expiry_removes_active_and_terminal_by_code_state(self):
+        now, registry, traversal, session = self.make_registries()
+        _, _, completed = self.issue(registry, traversal, session, source="completed")
+        _, _, active = self.issue(
+            registry, traversal, session,
+            {"request_id": "ffeeddccbbaa99887766554433221100"},
+            source="active",
+        )
+        self.assertTrue(traversal.complete(
+            session.session_id, completed["attempt_id"], completed["capability"]))
+        self.assertEqual(
+            "completed",
+            traversal._request_ids[completed["request_id"]].terminal_reason,
+        )
+        self.assertIn(bytes.fromhex(active["attempt_id"]), traversal._attempts)
+
+        now[0] += 46
+        self.assertIsNone(registry.lookup_code(session.invite_code))
+        self.assertEqual({}, traversal._attempts)
+        self.assertEqual({}, traversal._by_session)
+        self.assertEqual({}, traversal._request_ids)
+        self.assertEqual({}, traversal._request_ids_by_session)
+        self.assertFalse(any(key[0] == session.session_id for key in traversal._last_create))
+        self.assertIsNone(traversal.register(
+            bytes.fromhex(active["attempt_id"]), bytes.fromhex(active["capability"]),
+            1, 0, ("198.51.100.10", 41000),
+        ))
+        status, _, replay = self.issue(registry, traversal, session)
+        self.assertEqual("not_found", status)
+        self.assertIsNone(replay)
+
+    def test_unknown_internal_purpose_fails_closed(self):
+        _, registry, traversal, session = self.make_registries()
+        _, _, client = self.issue(registry, traversal, session)
+        attempt_id = bytes.fromhex(client["attempt_id"])
+        traversal._attempts[attempt_id].purpose = "future_private"  # type: ignore[assignment]
+        self.assertIsNone(traversal.register(
+            attempt_id, bytes.fromhex(client["capability"]), 1, 0,
+            ("198.51.100.10", 41000),
+        ))
+        self.assertEqual([], traversal.pending(session.session_id))
+        status, _, replay = self.issue(registry, traversal, session)
+        self.assertEqual("terminal", status)
+        self.assertIsNone(replay)
+
+    def test_service_restart_state_is_process_local(self):
+        _, registry, traversal, session = self.make_registries()
+        self.issue(registry, traversal, session)
+        restarted_traversal = RendezvousRegistry(rendezvous_host="rendezvous.example")
+        restarted_registry = SessionRegistry(on_remove=restarted_traversal.remove_session)
+        self.assertEqual({}, restarted_traversal._request_ids)
+        self.assertEqual([], restarted_registry.list({}))
+
+    def test_concurrent_identical_request_id_creates_exactly_one_attempt(self):
+        _, registry, traversal, session = self.make_registries()
+        barrier = threading.Barrier(8)
+        results = []
+        result_lock = threading.Lock()
+
+        def worker():
+            barrier.wait()
+            result = self.issue(registry, traversal, session)
+            with result_lock:
+                results.append(result)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(1, sum(status == "created" for status, _, _ in results))
+        self.assertEqual(7, sum(status == "replayed" for status, _, _ in results))
+        self.assertEqual(1, len({attempt["attempt_id"] for _, _, attempt in results}))
+        self.assertEqual(1, len({attempt["capability"] for _, _, attempt in results}))
+        self.assertEqual(1, len(traversal._attempts))
+
+    def test_concurrent_conflicting_fingerprints_have_one_winner(self):
+        _, registry, traversal, first_session = self.make_registries()
+        second_session = registry.create(payload())
+        barrier = threading.Barrier(2)
+        results = []
+        result_lock = threading.Lock()
+
+        def worker(session, source):
+            barrier.wait()
+            result = self.issue(registry, traversal, session, source=source)
+            with result_lock:
+                results.append(result)
+
+        threads = [
+            threading.Thread(target=worker, args=(first_session, "first")),
+            threading.Thread(target=worker, args=(second_session, "second")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual({"created", "conflict"}, {result[0] for result in results})
+        self.assertEqual(1, len(traversal._attempts))
+        self.assertEqual(1, len(traversal._request_ids))
+
+    def test_concurrent_distinct_request_ids_can_create_distinct_attempts(self):
+        _, registry, traversal, session = self.make_registries()
+        barrier = threading.Barrier(2)
+        results = []
+        result_lock = threading.Lock()
+
+        def worker(request_id, source):
+            barrier.wait()
+            result = self.issue(
+                registry, traversal, session, {"request_id": request_id}, source)
+            with result_lock:
+                results.append(result)
+
+        threads = [
+            threading.Thread(
+                target=worker,
+                args=("00000000000000000000000000000001", "first")),
+            threading.Thread(
+                target=worker,
+                args=("00000000000000000000000000000002", "second")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(["created", "created"], sorted(result[0] for result in results))
+        self.assertEqual(2, len({result[2]["attempt_id"] for result in results}))
+
+    def test_concurrent_session_delete_cannot_leave_orphan_attempt(self):
+        _, registry, traversal, session = self.make_registries()
+        barrier = threading.Barrier(2)
+        outcomes = {}
+        errors = []
+        outcome_lock = threading.Lock()
+
+        def issue():
+            try:
+                barrier.wait()
+                result = self.issue(registry, traversal, session)
+                with outcome_lock:
+                    outcomes["issue"] = result
+            except BaseException as exc:  # Surface worker failures in the test thread.
+                with outcome_lock:
+                    errors.append(exc)
+
+        def delete():
+            try:
+                barrier.wait()
+                result = registry.delete(session.session_id, session.registration_token)
+                with outcome_lock:
+                    outcomes["delete"] = result
+            except BaseException as exc:  # Surface worker failures in the test thread.
+                with outcome_lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=issue), threading.Thread(target=delete)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual([], errors)
+        self.assertTrue(outcomes["delete"])
+        self.assertIn(outcomes["issue"][0], {"created", "not_found"})
+        self.assertFalse(registry.exists(session.session_id))
+        self.assertTrue(all(
+            registry.exists(attempt.session_id)
+            for attempt in traversal._attempts.values()
+        ))
+        self.assertEqual({}, traversal._attempts)
+        self.assertEqual({}, traversal._request_ids)
+
+
 class HttpTests(unittest.TestCase):
     def setUp(self):
         self.traversal = RendezvousRegistry(rendezvous_host="rendezvous.example", rendezvous_port=30740)
@@ -215,6 +500,13 @@ class HttpTests(unittest.TestCase):
         response = connection.getresponse()
         data = response.read()
         return response.status, json.loads(data) if data else None
+
+    def create_by_code(self, request=None):
+        status, created = self.request("POST", "/sessions", payload())
+        self.assertEqual(201, status)
+        path = f"/sessions/by-code/{created['invite_code']}/join-attempts"
+        status, response = self.request("POST", path, request or attempt_payload())
+        return created, path, status, response
 
     def test_full_http_lifecycle(self):
         status, created = self.request("POST", "/sessions", payload())
@@ -291,7 +583,9 @@ class HttpTests(unittest.TestCase):
         status, client = self.request("POST", path, {})
         self.assertEqual(201, status)
         self.assertEqual("client", client["participant"])
+        self.assertEqual(AttemptPurpose.PUBLIC.value, client["purpose"])
         self.assertNotIn("host_capability", client)
+        self.assertNotIn("rendezvous_expires_in_ms", client)
         self.assertEqual("rendezvous.example", client["rendezvous_host"])
         status, _ = self.request("GET", path, token="wrong")
         self.assertEqual(404, status)
@@ -300,6 +594,8 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(1, len(pending["attempts"]))
         host = pending["attempts"][0]
         self.assertEqual("host", host["participant"])
+        self.assertEqual(AttemptPurpose.PUBLIC.value, host["purpose"])
+        self.assertNotIn("rendezvous_expires_in_ms", host)
         self.assertEqual(client["attempt_id"], host["attempt_id"])
         self.assertNotEqual(client["capability"], host["capability"])
         status, _ = self.request(
@@ -308,6 +604,188 @@ class HttpTests(unittest.TestCase):
         status, _ = self.request(
             "DELETE", f"{path}/{client['attempt_id']}", token=client["capability"])
         self.assertEqual(404, status)
+
+    def test_atomic_by_code_attempt_exposes_matching_immutable_purpose(self):
+        created, path, status, response = self.create_by_code()
+        self.assertEqual(201, status)
+        self.assertEqual(created["session_id"], response["session"]["session_id"])
+        client = response["attempt"]
+        self.assertEqual("client", client["participant"])
+        self.assertEqual(
+            AttemptPurpose.INVITE_CODE_PRIVATE_ELIGIBLE.value, client["purpose"])
+        self.assertEqual("00112233445566778899aabbccddeeff", client["request_id"])
+        self.assertIn("rendezvous_expires_in_ms", client)
+        self.assertNotIn("registration_token", response["session"])
+
+        host_path = f"/sessions/{created['session_id']}/join-attempts"
+        poll_status, pending = self.request(
+            "GET", host_path, token=created["registration_token"])
+        self.assertEqual(200, poll_status)
+        self.assertEqual(1, len(pending["attempts"]))
+        host = pending["attempts"][0]
+        self.assertEqual(client["attempt_id"], host["attempt_id"])
+        self.assertEqual(client["purpose"], host["purpose"])
+        self.assertNotEqual(client["capability"], host["capability"])
+        self.assertNotIn("request_id", host)
+        self.assertNotIn("rendezvous_expires_in_ms", host)
+        self.assertNotIn(client["capability"], host.values())
+        self.assertNotIn(host["capability"], client.values())
+
+    def test_client_cannot_supply_attempt_purpose(self):
+        status, created = self.request("POST", "/sessions", payload())
+        self.assertEqual(201, status)
+        public_path = f"/sessions/{created['session_id']}/join-attempts"
+        status, response = self.request(
+            "POST", public_path,
+            {"purpose": AttemptPurpose.INVITE_CODE_PRIVATE_ELIGIBLE.value})
+        self.assertEqual(400, status)
+        self.assertEqual("attempt purpose is server-owned", response["error"])
+
+        private_path = f"/sessions/by-code/{created['invite_code']}/join-attempts"
+        status, response = self.request(
+            "POST", private_path,
+            attempt_payload(purpose=AttemptPurpose.PUBLIC.value))
+        self.assertEqual(400, status)
+        self.assertEqual("attempt purpose is server-owned", response["error"])
+        self.assertEqual([], self.traversal.pending(created["session_id"]))
+
+    def test_by_code_request_id_validation_and_normalization(self):
+        status, created = self.request("POST", "/sessions", payload())
+        self.assertEqual(201, status)
+        path = f"/sessions/by-code/{created['invite_code']}/join-attempts"
+        malformed = [
+            "", "0" * 31, "0" * 33, "g" * 32, 1234, None,
+        ]
+        for request_id in malformed:
+            with self.subTest(request_id=request_id):
+                status, _ = self.request(
+                    "POST", path, attempt_payload(request_id=request_id))
+                self.assertEqual(400, status)
+
+        status, response = self.request(
+            "POST", path,
+            attempt_payload(request_id="AABBCCDDEEFF00112233445566778899"))
+        self.assertEqual(201, status)
+        self.assertEqual(
+            "aabbccddeeff00112233445566778899",
+            response["attempt"]["request_id"],
+        )
+        status, replay = self.request(
+            "POST", path,
+            attempt_payload(request_id="aabbccddeeff00112233445566778899"))
+        self.assertEqual(200, status)
+        self.assertEqual(response["attempt"]["attempt_id"], replay["attempt"]["attempt_id"])
+
+    def test_by_code_case_normalization_replays_the_same_attempt(self):
+        self.registry.invite_code_factory = lambda: "AB7K2Q"
+        status, created = self.request("POST", "/sessions", payload())
+        self.assertEqual(201, status)
+        request = attempt_payload()
+        upper_path = f"/sessions/by-code/{created['invite_code']}/join-attempts"
+        lower_path = f"/sessions/by-code/{created['invite_code'].lower()}/join-attempts"
+
+        status, first = self.request("POST", upper_path, request)
+        self.assertEqual(201, status)
+        attempt_id = bytes.fromhex(first["attempt"]["attempt_id"])
+        original_expiry = self.traversal._attempts[attempt_id].expires_at
+        status, replay = self.request("POST", lower_path, request)
+        self.assertEqual(200, status)
+        self.assertEqual(first["attempt"]["attempt_id"], replay["attempt"]["attempt_id"])
+        self.assertEqual(first["attempt"]["capability"], replay["attempt"]["capability"])
+        self.assertEqual(original_expiry, self.traversal._attempts[attempt_id].expires_at)
+        self.assertEqual(1, len(self.traversal._attempts))
+
+    def test_by_code_missing_code_and_traversal_unavailable_fail_without_attempt(self):
+        status, _ = self.request(
+            "POST", "/sessions/by-code/BAD/join-attempts", attempt_payload())
+        self.assertEqual(404, status)
+        status, created = self.request("POST", "/sessions", payload())
+        self.assertEqual(201, status)
+        self.traversal.rendezvous_host = ""
+        status, _ = self.request(
+            "POST", f"/sessions/by-code/{created['invite_code']}/join-attempts",
+            attempt_payload(),
+        )
+        self.assertEqual(503, status)
+        self.assertEqual({}, self.traversal._attempts)
+
+    def test_by_code_live_replay_and_fingerprint_conflicts(self):
+        created, path, status, first = self.create_by_code()
+        self.assertEqual(201, status)
+        attempt_id = bytes.fromhex(first["attempt"]["attempt_id"])
+        expiry = self.traversal._attempts[attempt_id].expires_at
+
+        status, replay = self.request("POST", path, attempt_payload())
+        self.assertEqual(200, status)
+        self.assertEqual(first["attempt"]["attempt_id"], replay["attempt"]["attempt_id"])
+        self.assertEqual(first["attempt"]["capability"], replay["attempt"]["capability"])
+        self.assertEqual(expiry, self.traversal._attempts[attempt_id].expires_at)
+
+        conflicts = [
+            attempt_payload(title_id="12345678"),
+            attempt_payload(protocol_version=2),
+            attempt_payload(build_id="different-build"),
+        ]
+        for request in conflicts:
+            with self.subTest(request=request):
+                status, _ = self.request("POST", path, request)
+                self.assertEqual(409, status)
+
+        _, second = self.request("POST", "/sessions", payload())
+        second_path = f"/sessions/by-code/{second['invite_code']}/join-attempts"
+        status, _ = self.request("POST", second_path, attempt_payload())
+        self.assertEqual(409, status)
+        self.assertEqual(1, len(self.traversal._attempts))
+        self.assertEqual(created["session_id"],
+                         self.traversal._attempts[attempt_id].session_id)
+
+    def test_by_code_terminal_replay_and_new_user_action(self):
+        created, path, status, first = self.create_by_code()
+        self.assertEqual(201, status)
+        client = first["attempt"]
+        attempt_path = (
+            f"/sessions/{created['session_id']}/join-attempts/{client['attempt_id']}")
+        status, _ = self.request("DELETE", attempt_path, token=client["capability"])
+        self.assertEqual(204, status)
+
+        status, _ = self.request("POST", path, attempt_payload())
+        self.assertEqual(410, status)
+        threading.Event().wait(0.26)
+        status, second = self.request(
+            "POST", path,
+            attempt_payload(request_id="ffeeddccbbaa99887766554433221100"))
+        self.assertEqual(201, status)
+        self.assertNotEqual(client["attempt_id"], second["attempt"]["attempt_id"])
+
+    def test_incompatible_or_expired_code_creates_no_attempt(self):
+        status, created = self.request("POST", "/sessions", payload())
+        self.assertEqual(201, status)
+        path = f"/sessions/by-code/{created['invite_code']}/join-attempts"
+        for request in (
+            attempt_payload(title_id="12345678"),
+            attempt_payload(protocol_version=2),
+            attempt_payload(build_id="different-build"),
+        ):
+            status, _ = self.request("POST", path, request)
+            self.assertEqual(404, status)
+        self.assertEqual({}, self.traversal._attempts)
+
+        last_heartbeat = self.registry._sessions[created["session_id"]].last_heartbeat
+        self.registry.clock = lambda: last_heartbeat + 46
+        status, _ = self.request("POST", path, attempt_payload())
+        self.assertEqual(404, status)
+        self.assertEqual({}, self.traversal._attempts)
+
+    def test_by_code_route_uses_existing_invite_rate_limit(self):
+        status, created = self.request("POST", "/sessions", payload())
+        self.assertEqual(201, status)
+        path = f"/sessions/by-code/{created['invite_code']}/join-attempts"
+        request = attempt_payload()
+        for index in range(MAX_INVITE_LOOKUPS_PER_WINDOW):
+            status, _ = self.request("POST", path, request)
+            self.assertEqual(201 if index == 0 else 200, status)
+        status, _ = self.request("POST", path, request)
+        self.assertEqual(429, status)
 
     def test_session_delete_removes_join_attempts(self):
         status, created = self.request("POST", "/sessions", payload())
