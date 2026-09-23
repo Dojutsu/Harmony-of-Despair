@@ -185,6 +185,8 @@ jobs:
         run: |
           & .\tools\test_launcher.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\tools\test_online_companion.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Package explicit redistributable allowlist
         shell: pwsh
@@ -237,6 +239,7 @@ jobs:
             'README.md',
             'Launch-Harmony.bat',
             'Setup-Harmony.ps1',
+            'Online-Harmony.ps1',
             'harmonyrecomp-user.example.cfg'
           )
           foreach ($name in $publicFiles) {

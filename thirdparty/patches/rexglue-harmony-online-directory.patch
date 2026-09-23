@@ -405,7 +405,7 @@ diff --git a/include/rex/system/xam/session.h b/include/rex/system/xam/session.h
 new file mode 100644
 --- /dev/null
 +++ b/include/rex/system/xam/session.h
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,252 @@
 +#pragma once
 +
 +#include <array>
@@ -420,6 +420,7 @@ new file mode 100644
 +#include <vector>
 +
 +#include <rex/cvar.h>
++#include <rex/system/xam/online_status.h>
 +#include <rex/system/xam/session_directory.h>
 +#include <rex/system/xobject.h>
 +
@@ -526,6 +527,18 @@ new file mode 100644
 +  // discovery listener. A recursive mutex keeps compound slot calculations
 +  // safe without forcing callers to copy mutable records.
 +  std::shared_ptr<std::recursive_mutex> mutex = std::make_shared<std::recursive_mutex>();
++  // Public display metadata only. Protected by mutex; never sent on the wire.
++  std::weak_ptr<OnlineStatusSignal> status_signal;
++  std::string status_invite_code;
++  void NotifyStatus() const {
++    if (auto signal = status_signal.lock()) signal->Notify();
++  }
++  void SetStatusInviteCode(std::string code) {
++    std::lock_guard lock(*mutex);
++    if (status_invite_code == code) return;
++    status_invite_code = std::move(code);
++    NotifyStatus();
++  }
 +  SessionInfo info{};
 +  // Discovery/join control endpoint. SessionInfo::host_address remains the
 +  // independent gameplay endpoint exposed to XGI/XNet.
@@ -626,6 +639,7 @@ new file mode 100644
 + public:
 +  SessionManager(KernelState* kernel_state, uint16_t discovery_port);
 +  ~SessionManager();
++  OnlineStatus& online_status() { return online_status_; }
 +  SessionRegistry& registry() { return registry_; }
 +  LanDiscoveryService& discovery() { return discovery_; }
 +  void RegisterObject(XSession* session);
@@ -635,6 +649,7 @@ new file mode 100644
 +
 + private:
 +  KernelState* kernel_state_;
++  OnlineStatus online_status_;
 +  SessionRegistry registry_;
 +  LanDiscoveryService discovery_;
 +  mutable std::mutex object_mutex_;
@@ -3161,20 +3176,20 @@ index 179b2df..d79cc0a 100644
    templateData["code_size"] = "100000";
  
 diff --git a/src/system/CMakeLists.txt b/src/system/CMakeLists.txt
-index fc46d86..c4543d4 100644
 --- a/src/system/CMakeLists.txt
 +++ b/src/system/CMakeLists.txt
-@@ -31,6 +31,9 @@ set(REXSYSTEM_SOURCES
+@@ -31,6 +31,10 @@
      # XAM services
      xam/app_manager.cpp
      xam/content_manager.cpp
 +    xam/nat_probe.cpp
++    xam/online_status.cpp
 +    xam/session.cpp
 +    xam/session_directory.cpp
      xam/user_profile.cpp
  
      ppc_types.cpp
-@@ -106,7 +109,7 @@ if(REXGLUE_ENABLE_PERF_COUNTERS)
+@@ -106,7 +110,7 @@
  endif()
  
  if(WIN32)
@@ -4265,7 +4280,7 @@ diff --git a/src/system/xam/session.cpp b/src/system/xam/session.cpp
 new file mode 100644
 --- /dev/null
 +++ b/src/system/xam/session.cpp
-@@ -0,0 +1,1296 @@
+@@ -0,0 +1,1315 @@
 +#include <rex/system/xam/session.h>
 +
 +#include <algorithm>
@@ -4400,6 +4415,10 @@ new file mode 100644
 +      member.local = false;
 +      if (source == MemberUpdateSource::kDiscoveryPublic)
 +        member.private_slot = false;
++    } else if (it != candidate.end() && member.name.empty()) {
++      // Preserve a name learned from the companion status channel when the
++      // title retries membership with no display-name field.
++      member.name = it->name;
 +    }
 +    if (it == candidate.end())
 +      candidate.push_back(std::move(member));
@@ -4410,6 +4429,7 @@ new file mode 100644
 +                             session.max_private_slots))
 +    return false;
 +  session.members.swap(candidate);
++  session.NotifyStatus();
 +  return true;
 +}
 +
@@ -4725,6 +4745,7 @@ new file mode 100644
 +    return false;
 +  std::lock_guard session_lock(*it->second->mutex);
 +  it->second->state = SessionState::kDeleted;
++  it->second->NotifyStatus();
 +  sessions_.erase(it);
 +  return true;
 +}
@@ -4735,6 +4756,7 @@ new file mode 100644
 +    std::lock_guard session_lock(*it->second->mutex);
 +    if (it->second->host_xuid == host_xuid) {
 +      it->second->state = SessionState::kDeleted;
++      it->second->NotifyStatus();
 +      it = sessions_.erase(it);
 +      ++removed;
 +    } else {
@@ -4814,6 +4836,7 @@ new file mode 100644
 +  std::lock_guard lock(*session->mutex);
 +  size_t before = session->members.size();
 +  std::erase_if(session->members, [&](const auto& m) { return m.xuid == xuid; });
++  if (before != session->members.size()) session->NotifyStatus();
 +  return before != session->members.size();
 +}
 +bool SessionRegistry::Modify(const std::array<uint8_t, 8>& id, uint32_t flags,
@@ -4827,6 +4850,7 @@ new file mode 100644
 +  session->flags = flags;
 +  session->max_public_slots = public_slots;
 +  session->max_private_slots = private_slots;
++  session->NotifyStatus();
 +  return true;
 +}
 +bool SessionRegistry::Start(const std::array<uint8_t, 8>& id) {
@@ -4835,6 +4859,7 @@ new file mode 100644
 +    return false;
 +  std::lock_guard lock(*session->mutex);
 +  session->state = SessionState::kInGame;
++  session->NotifyStatus();
 +  return true;
 +}
 +bool SessionRegistry::End(const std::array<uint8_t, 8>& id) {
@@ -4843,6 +4868,7 @@ new file mode 100644
 +    return false;
 +  std::lock_guard lock(*session->mutex);
 +  session->state = SessionState::kReporting;
++  session->NotifyStatus();
 +  return true;
 +}
 +void SessionRegistry::UpsertDiscovered(SessionRecord record) {
@@ -5026,8 +5052,11 @@ new file mode 100644
 +          }
 +        } else if (valid) {
 +          std::lock_guard lock(*advertised->mutex);
++          auto before = advertised->members.size();
 +          std::erase_if(advertised->members,
 +                        [&](const auto& value) { return value.xuid == xuid; });
++          if (before != advertised->members.size())
++            advertised->NotifyStatus();
 +        }
 +      }
 +      if (valid && (query.type == kQuery || query.type == kJoin || query.type == kLeave)) {
@@ -5532,18 +5561,23 @@ new file mode 100644
 +  if (record_ && record_ != record)
 +    kernel_state()->session_manager()->ReleaseRecord(record_);
 +  record_ = std::move(record);
++  kernel_state()->session_manager()->online_status().Attach(this, record_);
 +}
 +SessionManager::SessionManager(KernelState* state, uint16_t discovery_port)
 +    // KernelState constructs the session service before the executable module
 +    // is loaded, so the title ID is not available yet. XGI binds the actual
 +    // title ID immediately before advertising or searching.
-+    : kernel_state_(state), discovery_(0, discovery_port) {}
++    : kernel_state_(state),
++      online_status_(state->user_profile()->xuid(), state->user_profile()->name(),
++                     REXCVAR_GET(online_status_directory)),
++      discovery_(0, discovery_port) {}
 +SessionManager::~SessionManager() = default;
 +void SessionManager::RegisterObject(XSession* session) {
 +  std::lock_guard lock(object_mutex_);
 +  objects_[session->guest_object()] = session;
 +}
 +void SessionManager::UnregisterObject(XSession* session) {
++  online_status_.Detach(session);
 +  std::lock_guard lock(object_mutex_);
 +  objects_.erase(session->guest_object());
 +}
@@ -5566,7 +5600,7 @@ diff --git a/src/system/xam/session_directory.cpp b/src/system/xam/session_direc
 new file mode 100644
 --- /dev/null
 +++ b/src/system/xam/session_directory.cpp
-@@ -0,0 +1,1207 @@
+@@ -0,0 +1,1215 @@
 +#include <rex/system/xam/session_directory.h>
 +
 +#include <algorithm>
@@ -6322,6 +6356,7 @@ new file mode 100644
 +      state.private_attempts.clear();
 +      break;
 +    case DirectoryHostPollDisposition::kRecoverRegistration: {
++      hosted.SetStatusInviteCode({});
 +      if (auto path = ActiveInviteCodePath())
 +        RemoveActiveInviteCodeFile(*path);
 +      const auto invalidated_session = state.directory_session_id;
@@ -6428,6 +6463,7 @@ new file mode 100644
 +      wake.notify_all();
 +      worker.join();
 +    }
++    if (hosted) hosted->SetStatusInviteCode({});
 +    if (admission_grants) admission_grants->Clear();
 +    hosted.reset();
 +    admission_grants.reset();
@@ -6594,6 +6630,8 @@ new file mode 100644
 +              else
 +                REXSYS_INFO("Session directory: registered '{}' as {}", hosted->host_name,
 +                            session_id);
++              public_invite_code = *NormalizeInviteCode(candidate_invite_code);
++              hosted->SetStatusInviteCode(public_invite_code);
 +              REXSYS_INFO("Harmony invite code: {}", candidate_invite_code);
 +              if (auto path = ActiveInviteCodePath();
 +                  path && !WriteActiveInviteCodeFile(*path, candidate_invite_code))
@@ -6629,6 +6667,7 @@ new file mode 100644
 +            response ? std::optional<uint32_t>(response->status) : std::nullopt, valid_session_id);
 +        switch (disposition) {
 +          case DirectoryHeartbeatDisposition::kAccepted:
++            hosted->SetStatusInviteCode(public_invite_code);
 +            schedule_heartbeat();
 +            break;
 +          case DirectoryHeartbeatDisposition::kRetrySameRegistration:
@@ -6642,6 +6681,7 @@ new file mode 100644
 +            retry_delay = std::min(retry_delay * 2, kHeartbeatInterval);
 +            break;
 +          case DirectoryHeartbeatDisposition::kRecoverRegistration:
++            hosted->SetStatusInviteCode({});
 +            REXSYS_WARN("Session directory: heartbeat returned 404; recovering logical lobby");
 +            if (admission_grants)
 +              admission_grants->InvalidateSession(session_id);
@@ -6655,6 +6695,7 @@ new file mode 100644
 +            retry_delay = kHeartbeatRetryInitial;
 +            break;
 +          case DirectoryHeartbeatDisposition::kRejected:
++            hosted->SetStatusInviteCode({});
 +            REXSYS_WARN("Session directory: heartbeat rejected with HTTP {}", response->status);
 +            next_heartbeat = std::chrono::steady_clock::now() + kHeartbeatInterval;
 +            break;
@@ -6722,6 +6763,7 @@ new file mode 100644
 +      admission_grants->InvalidateSession(session_id);
 +    if (!session_id.empty())
 +      Request(REXCVAR_GET(session_directory_url), L"DELETE", "/sessions/" + session_id, "", token);
++    hosted->SetStatusInviteCode({});
 +    if (auto path = ActiveInviteCodePath())
 +      RemoveActiveInviteCodeFile(*path);
 +  }
@@ -7180,13 +7222,14 @@ diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
      core/cvar_test.cpp
      core/fiber_test.cpp
      core/filesystem_test.cpp
-@@ -15,10 +16,15 @@ add_executable(unit_tests
+@@ -15,10 +16,16 @@ add_executable(unit_tests
      system/guest_path_test.cpp
      system/achievement_manager_test.cpp
      system/function_dispatcher_test.cpp
 +    system/session_test.cpp
 +    system/session_admission_test.cpp
 +    system/session_invite_grant_test.cpp
++    system/online_status_test.cpp
 +    system/socket_test.cpp
      input/input_assignment_test.cpp
      codegen/codegen_writer_test.cpp
@@ -7194,9 +7237,17 @@ diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
      codegen/output_stamp_test.cpp
 +    codegen/dispatch_table_layout_test.cpp
  )
-
+ 
  target_sources(unit_tests PRIVATE
-@@ -35,8 +41,12 @@ target_include_directories(unit_tests PRIVATE
+@@ -27,6 +34,7 @@ target_sources(unit_tests PRIVATE
+ )
+ 
+ target_include_directories(unit_tests PRIVATE
++    ${PROJECT_SOURCE_DIR}/thirdparty
+     ${PROJECT_SOURCE_DIR}/include
+     ${PROJECT_SOURCE_DIR}/src
+     ${CMAKE_CURRENT_SOURCE_DIR}
+@@ -35,8 +43,12 @@ target_include_directories(unit_tests PRIVATE
  target_link_libraries(unit_tests PRIVATE
      rexcodegen
      rexruntime
@@ -7206,12 +7257,19 @@ diff --git a/tests/unit/CMakeLists.txt b/tests/unit/CMakeLists.txt
 +if(WIN32)
 +    target_link_libraries(unit_tests PRIVATE ws2_32)
 +endif()
-
+ 
  # ReXApp is shipped as source for recomp projects, rather than compiled into
  # rexui. Keep its SDK-consumer compilation path covered by the test build.
-@@ -69,9 +79,21 @@ endif()
-
+@@ -68,10 +80,28 @@ if(UNIX AND NOT APPLE)
+ endif()
+ 
  # Discover tests
++add_executable(online_status_lifecycle system/online_status_lifecycle.cpp)
++target_link_libraries(online_status_lifecycle PRIVATE rexruntime)
++target_include_directories(online_status_lifecycle PRIVATE ${PROJECT_SOURCE_DIR}/thirdparty)
++set_target_properties(online_status_lifecycle PROPERTIES
++    RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
++
  include(Catch)
 +if(WIN32)
 +    add_executable(recvfrom_lifetime_test kernel/recvfrom_lifetime_test.cpp)
@@ -8653,6 +8711,552 @@ index 0000000..87beb81
 +}
 +
 +}  // namespace rex::system
+diff --git a/include/rex/system/xam/online_status.h b/include/rex/system/xam/online_status.h
+new file mode 100644
+--- /dev/null
++++ b/include/rex/system/xam/online_status.h
+@@ -0,0 +1,55 @@
++#pragma once
++
++#include <condition_variable>
++#include <cstdint>
++#include <filesystem>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <rex/cvar.h>
++
++namespace rex::system::xam {
++struct SessionRecord;
++REXCVAR_DECLARE(std::string, online_status_directory);
++
++// Notifications contain no roster and retain no network/session owner.
++struct OnlineStatusSignal {
++  std::mutex mutex;
++  std::condition_variable wake;
++  bool pending = true;
++  bool stopping = false;
++  void Notify();
++};
++
++// An observational attachment index, never a membership store. Record pointers
++// follow XSession::set_record, not discovery cache replacement.
++class OnlineStatus {
++ public:
++  OnlineStatus(uint64_t local_xuid, std::string local_name,
++               std::filesystem::path directory = {});
++  ~OnlineStatus();
++  void Attach(const void* owner, std::shared_ptr<SessionRecord> record);
++  void Detach(const void* owner);
++  std::string Capture() const;
++  const std::filesystem::path& path() const { return path_; }
++
++ private:
++  void Run();
++  struct Attachment {
++    uint64_t sequence;
++    std::shared_ptr<SessionRecord> record;
++  };
++  uint64_t local_xuid_;
++  std::string local_name_;
++  mutable std::mutex mutex_;
++  std::map<const void*, Attachment> attachments_;
++  uint64_t sequence_ = 0;
++  std::shared_ptr<OnlineStatusSignal> signal_ = std::make_shared<OnlineStatusSignal>();
++  std::filesystem::path path_;
++  uint32_t process_id_ = 0;
++  std::string process_start_time_;
++  std::thread worker_;
++};
++}  // namespace rex::system::xam
+diff --git a/src/system/xam/online_status.cpp b/src/system/xam/online_status.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/system/xam/online_status.cpp
+@@ -0,0 +1,192 @@
++#include <rex/system/xam/online_status.h>
++#include <rex/system/xam/session.h>
++
++#include <algorithm>
++#include <fstream>
++#include <iomanip>
++#include <sstream>
++#include <vector>
++#include <inja/third_party/include/nlohmann/json.hpp>
++#if REX_PLATFORM_WIN32
++#include <windows.h>
++#endif
++
++namespace rex::system::xam {
++REXCVAR_DEFINE_STRING(online_status_directory, "", "General",
++                     "Optional directory for read-only process status snapshots")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++
++namespace {
++std::string Xuid(uint64_t value) {
++  std::ostringstream out;
++  out << std::uppercase << std::hex << std::setfill('0') << std::setw(16) << value;
++  return out.str();
++}
++std::string Name(std::string value) {
++  value.resize(std::min<size_t>(value.size(), 48));
++  for (char& ch : value)
++    if (static_cast<unsigned char>(ch) < 32 || ch == 127) ch = ' ';
++  return value;
++}
++bool ValidCode(const std::string& code) {
++  return code.size() == 6 &&
++         code.find_first_not_of("ABCDEFGHJKMNPQRSTUVWXYZ23456789") == std::string::npos;
++}
++const char* State(SessionState state) {
++  switch (state) {
++    case SessionState::kLobby: return "lobby";
++    case SessionState::kRegistration: return "registration";
++    case SessionState::kInGame: return "in_game";
++    case SessionState::kReporting: return "reporting";
++    default: return "offline";
++  }
++}
++bool Write(const std::filesystem::path& path, const std::string& bytes) {
++  if (bytes.size() > 64 * 1024) return false;
++  std::error_code error;
++  std::filesystem::create_directories(path.parent_path(), error);
++  if (error) return false;
++  auto temporary = path;
++  temporary += ".tmp";
++  {
++    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
++    if (!out.write(bytes.data(), bytes.size())) return false;
++    out.close();
++    if (!out) return false;
++  }
++#if REX_PLATFORM_WIN32
++  return MoveFileExW(temporary.c_str(), path.c_str(),
++                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
++#else
++  std::filesystem::rename(temporary, path, error);
++  return !error;
++#endif
++}
++}  // namespace
++
++void OnlineStatusSignal::Notify() {
++  std::lock_guard lock(mutex);
++  pending = true;
++  wake.notify_one();
++}
++
++OnlineStatus::OnlineStatus(uint64_t xuid, std::string name, std::filesystem::path directory)
++    : local_xuid_(xuid), local_name_(Name(std::move(name))) {
++#if REX_PLATFORM_WIN32
++  FILETIME created{}, exited{}, kernel{}, user{};
++  if (!directory.empty() && GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) {
++    process_id_ = GetCurrentProcessId();
++    // Decimal Windows FILETIME string, compared exactly by PowerShell. No JSON
++    // floating-point loss and no wall-clock/idle-lobby expiry heuristic.
++    process_start_time_ = std::to_string((uint64_t(created.dwHighDateTime) << 32) |
++                                       created.dwLowDateTime);
++    path_ = directory / ("online-status-" + std::to_string(process_id_) + ".json");
++    worker_ = std::thread([this] { Run(); });
++  }
++#endif
++}
++OnlineStatus::~OnlineStatus() {
++  {
++    std::lock_guard lock(signal_->mutex);
++    signal_->stopping = true;
++    signal_->wake.notify_one();
++  }
++  if (worker_.joinable()) worker_.join();
++  if (!path_.empty()) {
++    std::error_code error;
++    std::filesystem::remove(path_, error);
++    auto temporary = path_;
++    temporary += ".tmp";
++    std::filesystem::remove(temporary, error);
++  }
++}
++void OnlineStatus::Attach(const void* owner, std::shared_ptr<SessionRecord> record) {
++  if (!record) { Detach(owner); return; }
++  {
++    std::lock_guard lock(*record->mutex);
++    record->status_signal = signal_;
++  }
++  {
++    std::lock_guard lock(mutex_);
++    attachments_[owner] = {++sequence_, std::move(record)};
++  }
++  signal_->Notify();
++}
++void OnlineStatus::Detach(const void* owner) {
++  {
++    std::lock_guard lock(mutex_);
++    attachments_.erase(owner);
++  }
++  signal_->Notify();
++}
++std::string OnlineStatus::Capture() const {
++  using nlohmann::json;
++  json result = {{"mode", "offline"}, {"local_player", {{"xuid", Xuid(local_xuid_)},
++                 {"name", local_name_}}}, {"session_state", "offline"},
++                 {"player_count", 0}, {"max_players", 0}, {"host_xuid", ""},
++                 {"members", json::array()}};
++  std::vector<Attachment> attachments;
++  {
++    std::lock_guard lock(mutex_);
++    for (const auto& [owner, attachment] : attachments_) attachments.push_back(attachment);
++  }
++  std::sort(attachments.begin(), attachments.end(),
++            [](const auto& a, const auto& b) { return a.sequence > b.sequence; });
++  for (const auto& attachment : attachments) {
++    const auto& record = *attachment.record;
++    std::lock_guard lock(*record.mutex);
++    // Bound the publication without changing membership. Invalid/oversized
++    // records are not presented as a usable party.
++    if (record.state == SessionState::kDeleted || record.members.size() > 64 ||
++        std::none_of(record.members.begin(), record.members.end(),
++                     [&](const auto& m) { return m.xuid == local_xuid_; })) continue;
++    result["mode"] = record.host_xuid == local_xuid_ ? "hosting" : "joined";
++    result["session_state"] = State(record.state);
++    result["player_count"] = record.members.size();
++    result["max_players"] = uint64_t(record.max_public_slots) + record.max_private_slots;
++    result["host_xuid"] = Xuid(record.host_xuid);
++    if (record.host_xuid == local_xuid_ && ValidCode(record.status_invite_code))
++      result["invite_code"] = record.status_invite_code;
++    for (const auto& member : record.members) {
++      auto name = Name(member.name);
++      if (name.empty() && member.xuid == record.host_xuid) name = Name(record.host_name);
++      if (name.empty()) name = "Player ..." + Xuid(member.xuid).substr(12);
++      result["members"].push_back({{"xuid", Xuid(member.xuid)}, {"name", name},
++                                   {"is_host", member.xuid == record.host_xuid}});
++    }
++    break;
++  }
++  return result.dump(-1, ' ', false, json::error_handler_t::replace);
++}
++void OnlineStatus::Run() {
++  std::string previous;
++  uint64_t revision = 0;
++  bool retry = false;
++  for (;;) {
++    {
++      std::unique_lock lock(signal_->mutex);
++      auto ready = [&] { return signal_->pending || signal_->stopping; };
++      if (retry) signal_->wake.wait_for(lock, std::chrono::seconds(1), ready);
++      else signal_->wake.wait(lock, ready);
++      if (signal_->stopping) return;
++      signal_->pending = false;
++    }
++    try {
++      auto projection = Capture();
++      retry = false;
++      if (projection == previous) continue;
++      auto document = nlohmann::json::parse(projection);
++      document["schema_version"] = 1;
++      document["process_id"] = process_id_;
++      document["process_start_time"] = process_start_time_;
++      document["revision"] = revision + 1;
++      if (Write(path_, document.dump())) { previous = std::move(projection); ++revision; }
++      else retry = true;
++    } catch (...) {
++      // Optional observability must not terminate the runtime on filesystem or
++      // serialization failure. Retry is bounded to one pending current state.
++      retry = true;
++    }
++  }
++}
++}  // namespace rex::system::xam
+diff --git a/tests/unit/system/online_status_test.cpp b/tests/unit/system/online_status_test.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/system/online_status_test.cpp
+@@ -0,0 +1,217 @@
++#include <catch2/catch_test_macros.hpp>
++#include <rex/system/xam/online_status.h>
++#include <rex/system/xam/session.h>
++#include <inja/third_party/include/nlohmann/json.hpp>
++#include <chrono>
++#include <fstream>
++#include <thread>
++#if REX_PLATFORM_WIN32
++#include <winsock2.h>
++#include <windows.h>
++#endif
++
++namespace rex::system::xam {
++using nlohmann::json;
++
++TEST_CASE("online status preserves known names without changing member semantics", "[online-status]") {
++  SessionRegistry registry;
++  auto record = registry.Create(1, "Host", {}, 1, 5, 1);
++  REQUIRE(registry.Join(record->info.id, {2, "Alice", 3, false, false, false}));
++  REQUIRE(registry.Join(record->info.id, {2, "", 4, true, true, true}));
++  const auto& member = record->members.back();
++  CHECK(member.name == "Alice"); CHECK(member.user_index == 4);
++  CHECK(member.local); CHECK(member.private_slot); CHECK(member.ready);
++  CHECK(member.xuid == 2); CHECK(record->host_xuid == 1);
++  CHECK(record->members.size() == 2); CHECK(record->FilledPublicSlots() == 1);
++  CHECK(record->FilledPrivateSlots() == 1);
++  REQUIRE(registry.Join(record->info.id, {2, "Bob", 0, false, false, false}));
++  CHECK(record->members.back().name == "Bob");
++  CHECK(record->members.size() == 2); CHECK(record->FilledPrivateSlots() == 0);
++}
++
++TEST_CASE("online status follows attached membership and uses an explicit allowlist", "[online-status]") {
++  OnlineStatus status(1, "Host");
++  SessionRegistry registry;
++  auto record = registry.Create(1, "Host", {}, 1, 5, 1);
++  CHECK(json::parse(status.Capture())["mode"] == "offline");
++  status.Attach(&status, record);
++  record->traversal_capability = "SECRET_CAPABILITY";
++  record->traversal_attempt_id = "SECRET_ATTEMPT";
++  record->traversal_session_id = "PRIVATE_DIRECTORY_ID";
++  record->info.key.fill(0x42);
++  record->members[0].name.clear();
++  record->SetStatusInviteCode("AB7K2Q");
++  for (uint64_t count = 1; count <= 6; ++count) {
++    if (count > 1) REQUIRE(registry.Join(record->info.id,
++        {count, count == 2 ? "Alice" : "", 0, false, count == 6, false}));
++    auto document = json::parse(status.Capture());
++    CHECK(document["player_count"] == count); CHECK(document["max_players"] == 6);
++    CHECK(document["mode"] == "hosting"); CHECK(document["invite_code"] == "AB7K2Q");
++    CHECK(document["members"][0]["is_host"] == true);
++    CHECK(document["members"][0]["name"] == "Host");
++    if (count > 1) CHECK(document["members"][1]["name"] == "Alice");
++    if (count > 2) CHECK(document["members"][2]["name"] == "Player ...0003");
++    CHECK(document.size() == 8);
++    CHECK(document["members"][0].size() == 3);
++    CHECK(document["local_player"].size() == 2);
++    CHECK(status.Capture().find("SECRET") == std::string::npos);
++    CHECK(status.Capture().find("PRIVATE_DIRECTORY") == std::string::npos);
++  }
++  REQUIRE(registry.Leave(record->info.id, 3));
++  auto document = json::parse(status.Capture());
++  CHECK(document["player_count"] == 5);
++  for (auto& member : document["members"]) CHECK(member["xuid"] != "0000000000000003");
++  record->SetStatusInviteCode({});
++  CHECK_FALSE(json::parse(status.Capture()).contains("invite_code"));
++  REQUIRE(registry.Modify(record->info.id, 1, 7, 2));
++  CHECK(json::parse(status.Capture())["max_players"] == 9);
++  REQUIRE(registry.Start(record->info.id));
++  CHECK(json::parse(status.Capture())["session_state"] == "in_game");
++  REQUIRE(registry.End(record->info.id));
++  CHECK(json::parse(status.Capture())["session_state"] == "reporting");
++  size_t remaining = 5;
++  for (uint64_t xuid : {2, 4, 5, 6, 1}) {
++    REQUIRE(registry.Leave(record->info.id, xuid));
++    CHECK(json::parse(status.Capture())["player_count"] == --remaining);
++  }
++  REQUIRE(registry.Delete(record->info.id));
++  CHECK(json::parse(status.Capture())["mode"] == "offline");
++  status.Detach(&status);
++  CHECK(json::parse(status.Capture())["player_count"] == 0);
++}
++
++TEST_CASE("online status ignores discovery replacements until XSession reattaches", "[online-status]") {
++  OnlineStatus status(2, "Guest");
++  SessionRegistry registry;
++  SessionRecord discovered;
++  discovered.info.id[0] = 7;
++  discovered.host_xuid = 1; discovered.host_name = "Host";
++  discovered.max_public_slots = 6;
++  discovered.members = {{1, "Host"}, {2, "Guest"}};
++  registry.UpsertDiscovered(discovered);
++  auto attached = registry.Find(discovered.info.id);
++  status.Attach(&status, attached);
++  CHECK(json::parse(status.Capture())["mode"] == "joined");
++  discovered.members.push_back({3, "Later"});
++  registry.UpsertDiscovered(discovered);
++  CHECK(json::parse(status.Capture())["player_count"] == 2);
++  status.Attach(&status, registry.Find(discovered.info.id));
++  CHECK(json::parse(status.Capture())["player_count"] == 3);
++  REQUIRE(registry.Leave(discovered.info.id, 2));
++  CHECK(json::parse(status.Capture())["mode"] == "offline");
++}
++
++#if REX_PLATFORM_WIN32
++TEST_CASE("discovery join and leave notify the attached online projection", "[online-status][network]") {
++  auto old_bind = REXCVAR_GET(lan_bind_address);
++  auto old_direct = REXCVAR_GET(direct_connect_address);
++  auto old_directory = REXCVAR_GET(session_directory_url);
++  struct Restore {
++    std::string bind, direct, directory;
++    ~Restore() {
++      REXCVAR_SET(lan_bind_address, bind);
++      REXCVAR_SET(direct_connect_address, direct);
++      REXCVAR_SET(session_directory_url, directory);
++    }
++  } restore{old_bind, old_direct, old_directory};
++  REXCVAR_SET(lan_bind_address, "127.0.0.1");
++  REXCVAR_SET(direct_connect_address, "127.0.0.1");
++  REXCVAR_SET(session_directory_url, "");
++  SessionRegistry registry;
++  auto hosted = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 30742}, 1, 6, 0);
++  OnlineStatus status(1, "Host");
++  status.Attach(&status, hosted);
++  auto signal = hosted->status_signal.lock();
++  REQUIRE(signal);
++  LanDiscoveryService host(0x58410A7A, 39049), client(0x58410A7A, 39049);
++  REQUIRE(host.Advertise(hosted));
++  auto results = client.Search(200, 4);
++  REQUIRE(results.size() == 1);
++  { std::lock_guard lock(signal->mutex); signal->pending = false; }
++  REQUIRE(client.Join(results[0], {2, "Alice"}, 500));
++  { std::lock_guard lock(signal->mutex); CHECK(signal->pending); signal->pending = false; }
++  CHECK(json::parse(status.Capture())["player_count"] == 2);
++  CHECK(json::parse(status.Capture())["members"][1]["name"] == "Alice");
++  REQUIRE(client.Leave(results[0], 2, 500));
++  { std::lock_guard lock(signal->mutex); CHECK(signal->pending); }
++  CHECK(json::parse(status.Capture())["player_count"] == 1);
++  hosted->SetStatusInviteCode("AB7K2Q");
++  host.StopAdvertising();
++  // Directory may be disabled: StopHosting must still clear public invite state
++  // associated with its hosted record when it owns one. Session deletion clears
++  // the projection independently of directory availability.
++  REQUIRE(registry.Delete(hosted->info.id));
++  CHECK(json::parse(status.Capture())["mode"] == "offline");
++}
++
++namespace {
++json ReadStatus(const std::filesystem::path& path) {
++  auto file = CreateFileW(path.c_str(), GENERIC_READ,
++      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
++      FILE_ATTRIBUTE_NORMAL, nullptr);
++  if (file == INVALID_HANDLE_VALUE) return {};
++  LARGE_INTEGER size{};
++  if (!GetFileSizeEx(file, &size) || size.QuadPart > 65536) { CloseHandle(file); return {}; }
++  std::string bytes(static_cast<size_t>(size.QuadPart), '\0');
++  DWORD read = 0;
++  auto ok = ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr);
++  CloseHandle(file);
++  if (!ok || read != bytes.size()) return {};
++  return json::parse(bytes, nullptr, false);
++}
++template<class F> bool Eventually(F test) {
++  for (int i = 0; i < 200; ++i) {
++    try { if (test()) return true; } catch (const json::exception&) {}
++    std::this_thread::sleep_for(std::chrono::milliseconds(10));
++  }
++  return false;
++}
++}
++TEST_CASE("online writer coalesces mutations atomically and removes only its own file", "[online-status]") {
++  auto root = std::filesystem::temp_directory_path() /
++      ("rex-status-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
++  std::filesystem::create_directories(root);
++  const auto other = root / "online-status-other.json";
++  { std::ofstream file(other); file << "other process"; }
++  std::filesystem::path owned;
++  {
++    OnlineStatus status(1, "Host", root);
++    owned = status.path();
++    REQUIRE(Eventually([&] { return ReadStatus(owned).is_object(); }));
++    SessionRegistry registry;
++    auto record = registry.Create(1, "Host", {}, 1, 6, 0);
++    status.Attach(&status, record);
++    REQUIRE(Eventually([&] { return ReadStatus(owned).value("mode", "") == "hosting"; }));
++    auto first = ReadStatus(owned);
++    auto modified = std::filesystem::last_write_time(owned);
++    auto signal = record->status_signal.lock();
++    REQUIRE(signal);
++    for (int i = 0; i < 10000; ++i) signal->Notify();
++    std::this_thread::sleep_for(std::chrono::milliseconds(100));
++    CHECK(ReadStatus(owned)["revision"] == first["revision"]);
++    CHECK(std::filesystem::last_write_time(owned) == modified);
++    for (int i = 0; i < 100; ++i) {
++      record->SetStatusInviteCode(i % 2 ? "AB7K2Q" : "CD8M3R");
++      auto document = ReadStatus(owned);
++      REQUIRE(document.is_object());
++      CHECK(document["schema_version"] == 1);
++      CHECK(document["process_start_time"].is_string());
++    }
++    record->SetStatusInviteCode("AB7K2Q");
++    REQUIRE(Eventually([&] { return ReadStatus(owned).value("invite_code", "") == "AB7K2Q"; }));
++    // Same locked mutation seam used by the discovery listener.
++    {
++      std::lock_guard lock(*record->mutex);
++      record->members.push_back({2, "Alice"});
++      record->NotifyStatus();
++    }
++    REQUIRE(Eventually([&] { return ReadStatus(owned).value("player_count", 0) == 2; }));
++    status.Detach(&status);
++    REQUIRE(Eventually([&] { return ReadStatus(owned).value("mode", "") == "offline"; }));
++  }
++  CHECK_FALSE(std::filesystem::exists(owned));
++  CHECK(std::filesystem::exists(other));
++  std::filesystem::remove(other); std::filesystem::remove(root);
++}
++#endif
++}  // namespace rex::system::xam
+diff --git a/tests/unit/system/online_status_lifecycle.cpp b/tests/unit/system/online_status_lifecycle.cpp
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/system/online_status_lifecycle.cpp
+@@ -0,0 +1,62 @@
++// Separate process: Runtime owns its own guest mapping, so this must not share
++// the unit_tests process-wide GetTestMemory mapping.
++#include <rex/runtime.h>
++#include <rex/logging.h>
++#include <rex/system/xam/session.h>
++#include <rex/system/xam/user_profile.h>
++#include <inja/third_party/include/nlohmann/json.hpp>
++#include <chrono>
++#include <iostream>
++#include <thread>
++
++int main(int argc, char** argv) {
++  using namespace rex::system::xam;
++  if (argc != 2) return 2;
++  rex::InitLogging();
++  rex::cvar::SetFlagByName("online_status_directory", argv[1]);
++  rex::cvar::SetFlagByName("user_name", "FixtureHost");
++  rex::Runtime runtime("");
++  rex::RuntimeConfig config;
++  config.tool_mode = true;
++  if (runtime.Setup(std::move(config)) != 0) return 3;
++  auto* kernel = runtime.kernel_state();
++  auto& manager = *kernel->session_manager();
++  const auto xuid = kernel->user_profile()->xuid();
++  const auto path = manager.online_status().path();
++  auto session = rex::system::make_object<XSession>(kernel);
++  if (!session->Initialize()) return 4;
++  auto record = manager.registry().Create(xuid, "FixtureHost", {}, 1, 6, 0);
++  session->set_record(record);
++  auto capture = [&] { return nlohmann::json::parse(manager.online_status().Capture()); };
++  if (capture()["mode"] != "hosting") return 5;
++  session->set_record(nullptr);
++  if (capture()["mode"] != "offline") return 6;
++  SessionRecord remote;
++  remote.info.id[0] = 8; remote.host_xuid = 1; remote.host_name = "RemoteHost";
++  remote.max_public_slots = 6; remote.members = {{1, "RemoteHost"}, {xuid, "FixtureHost"}};
++  manager.registry().UpsertDiscovered(remote);
++  session->set_record(manager.registry().Find(remote.info.id));
++  if (capture()["mode"] != "joined") return 7;
++  remote.members.push_back({2, "Later"});
++  manager.registry().UpsertDiscovered(remote);
++  if (capture()["player_count"] != 2) return 8;
++  session->set_record(manager.registry().Find(remote.info.id));
++  if (capture()["player_count"] != 3) return 9;
++  session->set_record(nullptr);
++  if (capture()["mode"] != "offline") return 10;
++  record = manager.registry().Create(xuid, "FixtureHost", {}, 1, 6, 0);
++  session->set_record(record);
++  record->SetStatusInviteCode("AB7K2Q");
++  auto stop = path; stop += ".stop";
++  // Test harness can inspect two independent live publishers, then request a
++  // clean fixture exit. No game input, guest UI, or network traffic is needed.
++  for (int i = 0; i < 1000 && !std::filesystem::exists(stop); ++i)
++    std::this_thread::sleep_for(std::chrono::milliseconds(10));
++  session.reset();
++  runtime.Shutdown();
++  if (std::filesystem::exists(path)) return 11;
++  std::error_code error;
++  std::filesystem::remove(stop, error);
++  std::cout << "XSession attachment, replacement, release and shutdown passed\n";
++  return 0;
++}
 diff --git a/tests/unit/kernel/recvfrom_lifetime_test.cpp b/tests/unit/kernel/recvfrom_lifetime_test.cpp
 new file mode 100644
 --- /dev/null
@@ -9393,7 +9997,7 @@ diff --git a/tests/unit/system/session_invite_grant_test.cpp b/tests/unit/system
 new file mode 100644
 --- /dev/null
 +++ b/tests/unit/system/session_invite_grant_test.cpp
-@@ -0,0 +1,949 @@
+@@ -0,0 +1,951 @@
 +#include <catch2/catch_test_macros.hpp>
 +
 +#include <array>
@@ -9404,7 +10008,7 @@ new file mode 100644
 +#include <memory>
 +#include <thread>
 +
-+#include <nlohmann/json.hpp>
++#include <inja/third_party/include/nlohmann/json.hpp>
 +
 +#include <rex/platform.h>
 +#if REX_PLATFORM_WIN32
@@ -9765,6 +10369,7 @@ new file mode 100644
 +  state.pending_completions.push_back(
 +      {"session-a", std::string(kAttemptB), std::string(kCapability)});
 +  SessionRecord hosted;
++  hosted.SetStatusInviteCode("ABCDEF");
 +
 +  std::array acknowledged_b{std::string(kAttemptB)};
 +  auto completed = grants->Reserve("session-a", 99, 0x01020304, 40000,
@@ -9798,6 +10403,7 @@ new file mode 100644
 +  CHECK(state.host_attempts.empty());
 +  CHECK(state.private_attempts.empty());
 +  CHECK(state.pending_completions.empty());
++  CHECK(hosted.status_invite_code.empty());
 +  CHECK(NatProbeMatchAcknowledgedDiscoveryAttempts(socket, peer).empty());
 +  CHECK(Reserve(*grants, 10, response_received).status ==
 +        HostAdmissionReservationStatus::kNoMatch);

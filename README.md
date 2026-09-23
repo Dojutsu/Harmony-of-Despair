@@ -28,6 +28,27 @@ relay gameplay. Some carrier, hotspot, NAT, and firewall combinations can block
 direct peer traffic even when rendezvous succeeds; relay support is not
 currently implemented.
 
+## Optional Windows online companion
+
+Run `Launch-Harmony.bat --online` to open the separate Harmony Online window.
+It shows the current player name, Hosting/Joined/Offline status, public host
+invite code with Copy Code, and the current party roster. Play and Join by Code
+use the existing launcher; close a running game before using either action.
+Change Name opens the existing launcher settings for player name and game
+language. Changes apply on the next launch and preserve the player XUID.
+
+Closing this window does not close the game or change a session. Harmony works
+without the companion. If several game instances are running, select a PID in
+the window; their parties are never merged. `Player ...XXXX` means the runtime
+does not know that member's name. Earlier guests may lack later guests' names;
+no additional name-distribution networking is implemented.
+
+The window reads bounded, process-specific JSON files under
+`%LOCALAPPDATA%\HarmonyRecomp\online-status-<pid>.json`. It checks process
+creation time as well as PID, so crash leftovers are not displayed as live.
+The existing `--show-invite` action retains its legacy `active-invite-code.txt`
+for compatibility; the new companion reads only unified status snapshots.
+
 ## Bring your own game
 
 You must provide files from your own legally obtained Xbox 360 copy. The

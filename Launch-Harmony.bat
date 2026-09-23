@@ -4,6 +4,11 @@ setlocal
 set "HARMONY_ROOT=%~dp0"
 set "HARMONY_SETUP_ARG="
 
+if /i "%~1"=="--online" (
+  powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File "%HARMONY_ROOT%Online-Harmony.ps1"
+  exit /b
+)
+
 if /i "%~1"=="--setup" (
   set "HARMONY_SETUP_ARG=-Setup"
 ) else if /i "%~1"=="--reimport" (
@@ -15,7 +20,7 @@ if /i "%~1"=="--setup" (
 ) else if /i "%~1"=="--show-invite" (
   set "HARMONY_SETUP_ARG=-ShowInviteCode"
 ) else if not "%~1"=="" (
-  echo Usage: Launch-Harmony.bat [--setup^|--configure^|--join-code^|--show-invite]
+  echo Usage: Launch-Harmony.bat [--setup^|--configure^|--join-code^|--show-invite^|--online]
   exit /b 2
 )
 

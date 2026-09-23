@@ -7,6 +7,8 @@
 #include <rex/rex_app.h>
 #include <rex/system.h>
 #include <rex/system/xam/session_directory.h>
+#include <cstdlib>
+#include <filesystem>
 
 #include <functional>
 #include <optional>
@@ -56,6 +58,14 @@ class HarmonyrecompApp : public rex::ReXApp {
 
   // Override virtual hooks for customization:
   void OnPreSetup(rex::RuntimeConfig& config) override {
+#if defined(_WIN32)
+    if (rex::cvar::GetFlagSource("online_status_directory") == rex::cvar::Source::kDefault) {
+      if (const char* local = std::getenv("LOCALAPPDATA"); local && *local) {
+        rex::cvar::SetFlagByName("online_status_directory",
+            (std::filesystem::path(local) / "HarmonyRecomp").string());
+      }
+    }
+#endif
     // Default to the Xenos GPU emulation plugin when no explicit
     // gpu_plugin was provided via command line / cvar.
     // An explicit --gpu_plugin overrides this default; an empty value
