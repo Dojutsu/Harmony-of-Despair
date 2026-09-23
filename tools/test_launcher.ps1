@@ -284,16 +284,110 @@ public static class LauncherFixture
     Assert-True ($unsetLaunch.ExitCode -eq 0) 'unset language launch failed'
     Assert-LanguageArgument $unsetArguments ''
 
-    foreach ($invalidName in @('   ', '0123456789ABCDEF', "Bad`nName")) {
+    foreach ($invalidName in @('   ', '0123456789ABCDEF', "Bad`nName", 'Café',
+                               'fuck', 'FUCK', 'F.u.c.k', 'S_H_I_T', 'F-U-C-K', 'f u c k',
+                               'NIGGA', 'faggot', 'blowjob')) {
         $invalidLocal = Join-Path $testRoot ("Invalid Name " + [Guid]::NewGuid().ToString('N'))
+        $invalidArguments = Join-Path $testRoot ("invalid name arguments " + [Guid]::NewGuid().ToString('N'))
+        $env:HARMONY_TEST_ARGUMENTS_PATH = $invalidArguments
         $invalidNameResult = Invoke-Setup $invalidLocal @('-PlayerName', $invalidName)
         Assert-True ($invalidNameResult.ExitCode -eq 27) "invalid player name was accepted: length=$($invalidName.Length) exit=$($invalidNameResult.ExitCode)"
+        Assert-True (-not (Test-Path -LiteralPath $invalidArguments)) 'invalid name launched the game'
     }
+
+    foreach ($validName in @('A', '123456789012345', 'Alice', 'A-B_2',
+                            'Scunthorpe', 'Essex', 'Dickens', 'Classics', 'Passion', 'Fuchs')) {
+        $validLocal = Join-Path $testRoot ("Valid Name " + [Guid]::NewGuid().ToString('N'))
+        $validArguments = Join-Path $testRoot ("valid name arguments " + [Guid]::NewGuid().ToString('N'))
+        $env:HARMONY_TEST_ARGUMENTS_PATH = $validArguments
+        $validResult = Invoke-Setup $validLocal @('-PlayerName', $validName)
+        Assert-True ($validResult.ExitCode -eq 0) "ordinary name was rejected: $validName"
+        Assert-True ((Get-ProfileName $validLocal) -ceq $validName) 'valid name did not persist'
+        $actualNames = @(Get-GameArguments $validArguments | Where-Object { $_ -like '--user_name=*' })
+        Assert-True ($actualNames.Count -eq 1 -and $actualNames[0] -ceq "--user_name=$validName") 'valid name did not produce one correct launch argument'
+    }
+
+    $protectedProfile = Join-Path $firstLocal 'HarmonyRecomp\launcher-profile.cfg'
+    $preservedXuid = Get-ProfileXuid $firstLocal
+    $preservedName = Get-ProfileName $firstLocal
+    $protectedLanguage = Invoke-Setup $firstLocal @('-Configure', '-GameLanguage', '2')
+    Assert-True ($protectedLanguage.ExitCode -eq 0) 'could not set language for name-policy tests'
+    $profileBeforeReject = (Get-FileHash -LiteralPath $protectedProfile).Hash
+    $rejectedChange = Invoke-Setup $firstLocal @('-Configure', '-PlayerName', 'F.u.c.k')
+    Assert-True ($rejectedChange.ExitCode -eq 27) 'configure accepted a prohibited name'
+    Assert-True ((Get-FileHash -LiteralPath $protectedProfile).Hash -eq $profileBeforeReject) 'rejected configure changed profile'
+    Assert-True ((Get-ProfileLanguage $firstLocal) -eq '2') 'rejected name changed language'
+    $acceptedChange = Invoke-Setup $firstLocal @('-Configure', '-PlayerName', 'Scunthorpe')
+    Assert-True ($acceptedChange.ExitCode -eq 0) 'configure rejected innocent name'
+    Assert-True ((Get-ProfileXuid $firstLocal) -eq $preservedXuid -and
+                 (Get-ProfileLanguage $firstLocal) -eq '2') 'accepted name change altered identity or language'
+    $cancelChange = Invoke-Setup $firstLocal @('-Configure')
+    Assert-True ($cancelChange.ExitCode -eq 0 -and (Get-ProfileName $firstLocal) -eq 'Scunthorpe') 'cancel-like configure changed name'
+    $restoreName = Invoke-Setup $firstLocal @('-Configure', '-PlayerName', $preservedName, '-GameLanguage', 'default')
+    Assert-True ($restoreName.ExitCode -eq 0) 'name-policy tests could not restore profile'
+
+    $manualLocal = Join-Path $testRoot 'Manually Edited Name Local AppData'
+    $manualProfileRoot = Join-Path $manualLocal 'HarmonyRecomp'
+    [void](New-Item -ItemType Directory -Path $manualProfileRoot -Force)
+    $manualProfile = Join-Path $manualProfileRoot 'launcher-profile.cfg'
+    Set-Content -LiteralPath $manualProfile -Encoding ASCII -Value @(
+        'HARMONY_USER_XUID=2002', 'HARMONY_USER_NAME=F.u.c.k', 'HARMONY_USER_LANGUAGE=2')
+    $manualHash = (Get-FileHash -LiteralPath $manualProfile).Hash
+    $manualRead = Invoke-Setup $manualLocal @('-ReadPlayerName')
+    Assert-True ($manualRead.ExitCode -eq 0 -and -not ($manualRead.Output | Where-Object { $_ -match 'F\.u\.c\.k' })) 'companion query exposed invalid stored name'
+    Assert-True ((Get-FileHash -LiteralPath $manualProfile).Hash -eq $manualHash) 'read-only query modified manual profile'
+    $manualArguments = Join-Path $testRoot 'manual invalid name arguments.txt'
+    $env:HARMONY_TEST_ARGUMENTS_PATH = $manualArguments
+    $manualLaunch = Invoke-Setup $manualLocal
+    Assert-True ($manualLaunch.ExitCode -eq 27 -and -not (Test-Path -LiteralPath $manualArguments)) 'manual invalid name reached game launch'
+    Assert-True ((Get-ProfileLanguage $manualLocal) -eq '2') 'invalid-name rejection changed language'
+    $manualRecovery = Invoke-Setup $manualLocal @('-Configure', '-PlayerName', 'Recovered')
+    Assert-True ($manualRecovery.ExitCode -eq 0 -and (Get-ProfileXuid $manualLocal) -eq '2002' -and
+                 (Get-ProfileLanguage $manualLocal) -eq '2') 'manual profile recovery lost identity or language'
+    $manualReimport = Invoke-Setup $manualLocal @('-Setup', '-Source', $sourceRoot)
+    Assert-True ($manualReimport.ExitCode -eq 0 -and (Get-ProfileName $manualLocal) -eq 'Recovered' -and
+                 (Get-ProfileLanguage $manualLocal) -eq '2') 'reimport lost validated name or language'
+
+    $missingXuidLocal = Join-Path $testRoot 'Invalid Name Missing XUID'
+    $missingXuidProfileRoot = Join-Path $missingXuidLocal 'HarmonyRecomp'
+    [void](New-Item -ItemType Directory -Path $missingXuidProfileRoot -Force)
+    Set-Content -LiteralPath (Join-Path $missingXuidProfileRoot 'launcher-profile.cfg') -Encoding ASCII -Value @(
+        'HARMONY_USER_NAME=F.u.c.k', 'HARMONY_USER_LANGUAGE=3')
+    $missingXuidResult = Invoke-Setup $missingXuidLocal
+    Assert-True ($missingXuidResult.ExitCode -eq 27) 'invalid name with missing XUID passed validation'
+    Assert-True ((Get-ProfileXuid $missingXuidLocal) -match '^\d+$' -and
+                 (Get-ProfileName $missingXuidLocal) -eq '' -and
+                 (Get-ProfileLanguage $missingXuidLocal) -eq '3') 'XUID creation repersisted invalid name or lost language'
+
+    $invalidOverrideArguments = Join-Path $testRoot 'invalid override arguments.txt'
+    $env:HARMONY_TEST_ARGUMENTS_PATH = $invalidOverrideArguments
+    $env:HARMONY_USER_NAME = 'F.u.c.k'
+    $invalidOverride = Invoke-Setup $firstLocal
+    Assert-True ($invalidOverride.ExitCode -eq 27 -and
+                 -not (Test-Path -LiteralPath $invalidOverrideArguments)) 'invalid environment name reached game launch'
+    $env:HARMONY_USER_NAME = $null
+    $configPath = Join-Path $artifactRoot 'harmonyrecomp-user.cfg'
+    Set-Content -LiteralPath $configPath -Encoding ASCII -Value 'HARMONY_USER_NAME=F.u.c.k'
+    $invalidConfigArguments = Join-Path $testRoot 'invalid config name arguments.txt'
+    $env:HARMONY_TEST_ARGUMENTS_PATH = $invalidConfigArguments
+    $invalidConfig = Invoke-Setup $firstLocal
+    Assert-True ($invalidConfig.ExitCode -eq 27 -and
+                 -not (Test-Path -LiteralPath $invalidConfigArguments)) 'invalid config name reached game launch'
+    Remove-Item -LiteralPath $configPath
 
     $printableLocal = Join-Path $testRoot 'Printable Name Local AppData'
     $printable = Invoke-Setup $printableLocal @('-PlayerName', '  A-B_2  ', '-NoLaunch')
     Assert-True ($printable.ExitCode -eq 0) 'printable ASCII player name was rejected'
     Assert-True ((Get-ProfileName $printableLocal) -eq 'A-B_2') 'player-name whitespace was not trimmed'
+    $profileFile = Join-Path $printableLocal 'HarmonyRecomp/launcher-profile.cfg'
+    $profileHash = (Get-FileHash -LiteralPath $profileFile).Hash
+    $readName = Invoke-Setup $printableLocal @('-ReadPlayerName')
+    Assert-True ($readName.ExitCode -eq 0 -and 'A-B_2' -in $readName.Output) 'companion name query failed'
+    Assert-True ((Get-FileHash -LiteralPath $profileFile).Hash -eq $profileHash) 'name query changed identity/profile'
+    $emptyProfileRoot = Join-Path $testRoot 'Read Only Missing Profile'
+    $readMissingName = Invoke-Setup $emptyProfileRoot @('-ReadPlayerName')
+    Assert-True ($readMissingName.ExitCode -eq 0) 'missing-name query failed'
+    Assert-True (-not (Test-Path -LiteralPath $emptyProfileRoot)) 'name query created profile or imported data'
 
     Set-Content -LiteralPath (Join-Path $artifactRoot 'harmonyrecomp-user.cfg') -Encoding ASCII -Value @(
         'HARMONY_USER_XUID=2001',

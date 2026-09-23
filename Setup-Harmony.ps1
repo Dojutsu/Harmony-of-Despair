@@ -4,6 +4,7 @@ param(
     [switch]$Configure,
     [switch]$JoinByInviteCode,
     [switch]$ShowInviteCode,
+    [switch]$ReadPlayerName,
     [string]$PlayerName,
     [string]$GameLanguage,
     [string]$InviteCode,
@@ -86,7 +87,21 @@ function New-HarmonyXuid {
 function Test-HarmonyPlayerName([string]$value) {
     if ($null -eq $value) { return $false }
     $trimmed = $value.Trim()
-    return $trimmed -match '^[\x20-\x7E]{1,15}$'
+    if ($trimmed -cnotmatch '^[\x20-\x7E]{1,15}$') { return $false }
+
+    # Keep this deliberately small: whole tokens, or a word split only by
+    # obvious separators. Do not search inside unrelated words or infer leetspeak.
+    $prohibited = @(
+        'fuck', 'shit', 'cunt', 'motherfucker', 'bitch',
+        'porn', 'rape', 'blowjob', 'pussy', 'penis', 'vagina',
+        'nigger', 'nigga', 'faggot', 'fag', 'kike', 'chink', 'spic'
+    )
+    $tokens = @($trimmed.ToLowerInvariant() -split '[ _.-]+' | Where-Object { $_ })
+    foreach ($token in $tokens) {
+        if ($token -in $prohibited) { return $false }
+    }
+    if (($tokens -join '') -in $prohibited) { return $false }
+    return $true
 }
 
 function Test-HarmonyLanguage([string]$value) {
@@ -109,7 +124,18 @@ function Read-LauncherProfile {
     return $profile
 }
 
+if ($ReadPlayerName) {
+    # Read-only companion query. Reuse the profile parser without importing,
+    # creating an identity, or applying any configuration changes.
+    $storedName = (Read-LauncherProfile).Name
+    if (Test-HarmonyPlayerName $storedName) { Write-Output $storedName }
+    exit 0
+}
+
 function Write-LauncherProfile([string]$xuid, [string]$name, [string]$language) {
+    # A manually edited profile can reach this writer during XUID creation.
+    # Preserve its other fields, but never persist an unvalidated player name.
+    if ($name -and -not (Test-HarmonyPlayerName $name)) { $name = '' }
     [void](New-Item -ItemType Directory -Path $profileRoot -Force)
     $temporaryProfile = "$profilePath.$([Guid]::NewGuid().ToString('N')).tmp"
     try {
@@ -327,7 +353,7 @@ if ($Configure) {
         $configuredLanguage = $selectedSettings.Language
     }
     if (-not (Test-HarmonyPlayerName $configuredName)) {
-        Show-SetupMessage 'Player name must contain 1-15 printable ASCII characters.'
+        Show-SetupMessage 'Please choose a different player name (1-15 printable ASCII characters).'
         exit 27
     }
     if ($configuredLanguage -and -not (Test-HarmonyLanguage $configuredLanguage)) {
@@ -343,7 +369,7 @@ if (-not $explicitUserName -and -not (Test-HarmonyPlayerName $settings.HARMONY_U
     $selectedName = Read-PlayerInput 'HarmonyRecomp Player Name' 'Choose a player name (1-15 printable ASCII characters):' '' $PlayerName
     $selectedName = $selectedName.Trim()
     if (-not (Test-HarmonyPlayerName $selectedName)) {
-        Show-SetupMessage 'A player name containing 1-15 printable ASCII characters is required.'
+        Show-SetupMessage 'Please choose a different player name (1-15 printable ASCII characters).'
         exit 27
     }
     if ($launcherProfile.Xuid) {
@@ -352,7 +378,7 @@ if (-not $explicitUserName -and -not (Test-HarmonyPlayerName $settings.HARMONY_U
     }
     $settings.HARMONY_USER_NAME = $selectedName
 } elseif ($settings.HARMONY_USER_NAME -and -not (Test-HarmonyPlayerName $settings.HARMONY_USER_NAME)) {
-    Show-SetupMessage 'HARMONY_USER_NAME must contain 1-15 printable ASCII characters.'
+    Show-SetupMessage 'Please choose a different player name (1-15 printable ASCII characters).'
     exit 27
 } else {
     $settings.HARMONY_USER_NAME = $settings.HARMONY_USER_NAME.Trim()

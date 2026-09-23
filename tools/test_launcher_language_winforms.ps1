@@ -100,6 +100,18 @@ try {
     if (Test-HarmonyPlayerName $longName.Name) {
         throw 'Existing player-name validator accepted a 16-character name.'
     }
+    $beforeRejectedSave = (Get-FileHash -LiteralPath $profilePath).Hash
+    $prohibitedName = Check-SettingsDialog '2' 2 '2' $false 'F.u.c.k'
+    if (Test-HarmonyPlayerName $prohibitedName.Name) {
+        throw 'Settings dialog returned a prohibited name that passed production validation.'
+    }
+    $innocentName = Check-SettingsDialog '2' 2 '2' $false 'Scunthorpe'
+    if (-not (Test-HarmonyPlayerName $innocentName.Name)) {
+        throw 'Settings dialog innocent-name false positive.'
+    }
+    if ((Get-FileHash -LiteralPath $profilePath).Hash -cne $beforeRejectedSave) {
+        throw 'Dialog changed profile before launcher validation.'
+    }
     Write-Host 'Launcher settings WinForms passed: exact labels/IDs 1-6, persistence, default, cancel, and name validation.'
 } finally {
     $resolvedRoot = [IO.Path]::GetFullPath($profileRoot)
