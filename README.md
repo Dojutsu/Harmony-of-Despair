@@ -51,12 +51,19 @@ already-extracted TU2 directory as an advanced fallback.
 
 First launch also asks for a player name. Harmony stores the 1-15 character
 name beside the persistent player XUID in
-`%LOCALAPPDATA%\HarmonyRecomp\launcher-profile.cfg`. Change it later without
-changing the XUID by running:
+`%LOCALAPPDATA%\HarmonyRecomp\launcher-profile.cfg`. Change the name or game
+language later without changing the XUID by running:
 
 ```text
 Launch-Harmony.bat --configure
 ```
+
+The settings window offers English, Japanese, German, French, Spanish, and
+Italian. Its “Use default (English)” choice leaves the language unset and lets
+ReXGlue keep its current default. A selected language is saved as
+`HARMONY_USER_LANGUAGE=1` through `6` in the launcher profile and takes effect
+on the next game launch. Existing profiles without this line remain unchanged;
+the launcher passes no language override for them.
 
 To join a friend's hosted session using its six-character invite code, run:
 

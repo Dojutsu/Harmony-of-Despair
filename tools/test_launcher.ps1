@@ -73,6 +73,22 @@ function Get-ProfileName([string]$localAppData) {
     return ($line -split '=', 2)[1]
 }
 
+function Get-ProfileLanguage([string]$localAppData) {
+    $profile = Join-Path $localAppData 'HarmonyRecomp\launcher-profile.cfg'
+    $line = Get-Content -LiteralPath $profile | Where-Object { $_ -match '^HARMONY_USER_LANGUAGE=' }
+    if (-not $line) { return '' }
+    return ($line -split '=', 2)[1]
+}
+
+function Assert-LanguageArgument([string]$path, [string]$expected) {
+    $matches = @(Get-GameArguments $path | Where-Object { $_ -like '--user_language=*' })
+    if ($expected) {
+        Assert-True ($matches.Count -eq 1 -and $matches[0] -ceq "--user_language=$expected") "wrong language argument: $($matches -join ', ')"
+    } else {
+        Assert-True ($matches.Count -eq 0) 'unset language emitted a user_language argument'
+    }
+}
+
 function Get-GameArguments([string]$path) {
     Assert-True (Test-Path -LiteralPath $path -PathType Leaf) "fake game did not record arguments at $path"
     return @(Get-Content -LiteralPath $path)
@@ -137,6 +153,8 @@ public static class LauncherFixture
     Assert-True ($firstValue -ne 0) 'generated XUID is zero'
     Assert-True (($firstValue -band [uint64]0x00C0000000000000) -eq 0) 'generated XUID has a prohibited bit set'
     Assert-True ((Get-ProfileName $firstLocal) -eq 'Alice') 'first launch did not persist the player name'
+    Assert-True ((Get-ProfileLanguage $firstLocal) -eq '') 'first launch selected a language without user choice'
+    Assert-LanguageArgument $firstArguments ''
 
     $arguments = Get-GameArguments $firstArguments
     foreach ($required in @(
@@ -172,6 +190,7 @@ public static class LauncherFixture
     Assert-True ((Get-ProfileXuid $firstLocal) -eq $firstXuid) 'second launch changed the persistent XUID'
     Assert-True ("--user_xuid=$firstXuid" -in (Get-GameArguments $secondArguments)) 'second launch did not use the persistent XUID'
     Assert-True ('--user_name=Alice' -in (Get-GameArguments $secondArguments)) 'second launch did not reuse the player name'
+    Assert-LanguageArgument $secondArguments ''
 
     $reimportArguments = Join-Path $testRoot 'reimport arguments.txt'
     $env:HARMONY_TEST_ARGUMENTS_PATH = $reimportArguments
@@ -198,6 +217,22 @@ public static class LauncherFixture
     Assert-True ($xuidOnly.ExitCode -eq 0) "XUID-only profile launch exited $($xuidOnly.ExitCode)"
     Assert-True ((Get-ProfileXuid $xuidOnlyLocal) -eq '2002') 'name prompt changed XUID-only profile identity'
     Assert-True ((Get-ProfileName $xuidOnlyLocal) -eq 'LegacyUser') 'XUID-only profile did not persist prompted name'
+    Assert-True ((Get-ProfileLanguage $xuidOnlyLocal) -eq '') 'legacy profile gained a language'
+    Assert-LanguageArgument $xuidOnlyArguments ''
+
+    $languageOnlyLocal = Join-Path $testRoot 'Name And Language Only Local AppData'
+    $languageOnlyProfileRoot = Join-Path $languageOnlyLocal 'HarmonyRecomp'
+    [void](New-Item -ItemType Directory -Path $languageOnlyProfileRoot -Force)
+    Set-Content -LiteralPath (Join-Path $languageOnlyProfileRoot 'launcher-profile.cfg') -Encoding ASCII -Value @(
+        'HARMONY_USER_NAME=ExistingName', 'HARMONY_USER_LANGUAGE=2')
+    $languageOnlyArguments = Join-Path $testRoot 'name and language only arguments.txt'
+    $env:HARMONY_TEST_ARGUMENTS_PATH = $languageOnlyArguments
+    $languageOnlyLaunch = Invoke-Setup $languageOnlyLocal
+    Assert-True ($languageOnlyLaunch.ExitCode -eq 0) 'profile missing XUID could not launch'
+    Assert-True ((Get-ProfileXuid $languageOnlyLocal) -match '^\d+$') 'missing XUID was not generated'
+    Assert-True ((Get-ProfileName $languageOnlyLocal) -eq 'ExistingName') 'XUID generation dropped name'
+    Assert-True ((Get-ProfileLanguage $languageOnlyLocal) -eq '2') 'XUID generation dropped language'
+    Assert-LanguageArgument $languageOnlyArguments '2'
 
     $configureArguments = Join-Path $testRoot 'configure should not launch.txt'
     $env:HARMONY_TEST_ARGUMENTS_PATH = $configureArguments
@@ -206,6 +241,48 @@ public static class LauncherFixture
     Assert-True ((Get-ProfileXuid $firstLocal) -eq $firstXuid) 'configure changed the persistent XUID'
     Assert-True ((Get-ProfileName $firstLocal) -eq 'Bob') 'configure did not update the player name'
     Assert-True (-not (Test-Path -LiteralPath $configureArguments)) 'configure launched the game'
+
+    foreach ($language in 1..6) {
+        $configuredLanguage = Invoke-Setup $firstLocal @('-Configure', '-GameLanguage', [string]$language)
+        Assert-True ($configuredLanguage.ExitCode -eq 0) "language $language could not be saved"
+        Assert-True ((Get-ProfileLanguage $firstLocal) -ceq [string]$language) "language $language did not round-trip through profile"
+        Assert-True ((Get-ProfileName $firstLocal) -eq 'Bob') "language $language changed player name"
+        $languageArguments = Join-Path $testRoot "language $language arguments.txt"
+        $env:HARMONY_TEST_ARGUMENTS_PATH = $languageArguments
+        $languageLaunch = Invoke-Setup $firstLocal
+        Assert-True ($languageLaunch.ExitCode -eq 0) "language $language launch failed"
+        Assert-LanguageArgument $languageArguments ([string]$language)
+    }
+    $renamed = Invoke-Setup $firstLocal @('-Configure', '-PlayerName', 'Carol')
+    Assert-True ($renamed.ExitCode -eq 0) 'renaming configured profile failed'
+    Assert-True ((Get-ProfileLanguage $firstLocal) -eq '6') 'renaming dropped language'
+    $languageReimport = Invoke-Setup $firstLocal @('-Setup', '-Source', $sourceRoot)
+    Assert-True ($languageReimport.ExitCode -eq 0) 'reimport with language failed'
+    Assert-True ((Get-ProfileLanguage $firstLocal) -eq '6') 'reimport dropped language'
+    $badLanguage = Invoke-Setup $firstLocal @('-Configure', '-GameLanguage', '12')
+    Assert-True ($badLanguage.ExitCode -eq 27) 'unsupported language choice was accepted'
+    Assert-True ((Get-ProfileLanguage $firstLocal) -eq '6') 'invalid choice changed profile'
+    $profileWithLanguage = Join-Path $firstLocal 'HarmonyRecomp\launcher-profile.cfg'
+    foreach ($invalid in @('0', '7', '12', '999', 'garbage', '1 --log_level=trace')) {
+        $originalProfile = Get-Content -LiteralPath $profileWithLanguage -Raw
+        [IO.File]::WriteAllText($profileWithLanguage,
+            ($originalProfile -replace 'HARMONY_USER_LANGUAGE=6', "HARMONY_USER_LANGUAGE=$invalid"),
+            [Text.UTF8Encoding]::new($false))
+        $invalidArguments = Join-Path $testRoot "invalid language $invalid arguments.txt"
+        $env:HARMONY_TEST_ARGUMENTS_PATH = $invalidArguments
+        $invalidLaunch = Invoke-Setup $firstLocal
+        Assert-True ($invalidLaunch.ExitCode -eq 0) "invalid stored language $invalid broke launch"
+        Assert-LanguageArgument $invalidArguments ''
+        [IO.File]::WriteAllText($profileWithLanguage, $originalProfile, [Text.UTF8Encoding]::new($false))
+    }
+    $unsetLanguage = Invoke-Setup $firstLocal @('-Configure', '-GameLanguage', 'default')
+    Assert-True ($unsetLanguage.ExitCode -eq 0) "clearing language failed: exit=$($unsetLanguage.ExitCode) $($unsetLanguage.Output -join ' ')"
+    Assert-True ((Get-ProfileLanguage $firstLocal) -eq '') 'clearing language left profile selection'
+    $unsetArguments = Join-Path $testRoot 'unset language arguments.txt'
+    $env:HARMONY_TEST_ARGUMENTS_PATH = $unsetArguments
+    $unsetLaunch = Invoke-Setup $firstLocal
+    Assert-True ($unsetLaunch.ExitCode -eq 0) 'unset language launch failed'
+    Assert-LanguageArgument $unsetArguments ''
 
     foreach ($invalidName in @('   ', '0123456789ABCDEF', "Bad`nName")) {
         $invalidLocal = Join-Path $testRoot ("Invalid Name " + [Guid]::NewGuid().ToString('N'))
@@ -306,7 +383,7 @@ public static class LauncherFixture
     Assert-True ($batchText -match 'synthetic setup boundary') 'batch launcher hid the setup error'
     Assert-True ($batchText -match 'failed with exit code 21') 'batch launcher omitted the preserved exit code'
 
-    Write-Host 'Launcher tests passed: 10 scenarios.'
+    Write-Host 'Launcher tests passed: base flows plus language IDs 1-6, invalid values, and legacy profiles.'
 } finally {
     foreach ($name in @('LOCALAPPDATA') + $recognizedEnvironment) {
         [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process')

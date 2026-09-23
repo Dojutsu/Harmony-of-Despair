@@ -5,6 +5,7 @@ param(
     [switch]$JoinByInviteCode,
     [switch]$ShowInviteCode,
     [string]$PlayerName,
+    [string]$GameLanguage,
     [string]$InviteCode,
     [switch]$NoLaunch,
     [switch]$NoDialogs
@@ -88,30 +89,39 @@ function Test-HarmonyPlayerName([string]$value) {
     return $trimmed -match '^[\x20-\x7E]{1,15}$'
 }
 
+function Test-HarmonyLanguage([string]$value) {
+    return $value -match '^[1-6]$'
+}
+
 function Read-LauncherProfile {
-    $profile = @{ Xuid = ''; Name = '' }
+    $profile = @{ Xuid = ''; Name = ''; Language = '' }
     if (Test-Path -LiteralPath $profilePath -PathType Leaf) {
         foreach ($line in Get-Content -LiteralPath $profilePath) {
             if ($line -match '^\s*HARMONY_USER_XUID=(\d+)\s*$') {
                 $profile.Xuid = $Matches[1]
             } elseif ($line -match '^\s*HARMONY_USER_NAME=(.*)$') {
                 $profile.Name = $Matches[1].Trim()
+            } elseif ($line -match '^\s*HARMONY_USER_LANGUAGE=(.*)$') {
+                $profile.Language = $Matches[1].Trim()
             }
         }
     }
     return $profile
 }
 
-function Write-LauncherProfile([string]$xuid, [string]$name) {
+function Write-LauncherProfile([string]$xuid, [string]$name, [string]$language) {
     [void](New-Item -ItemType Directory -Path $profileRoot -Force)
     $temporaryProfile = "$profilePath.$([Guid]::NewGuid().ToString('N')).tmp"
     try {
-        $contents = @(
+        $profileLines = @(
             '# Generated per-install player identity. These values are not credentials.'
             "HARMONY_USER_XUID=$xuid"
             "HARMONY_USER_NAME=$name"
-            ''
-        ) -join "`r`n"
+        )
+        if (Test-HarmonyLanguage $language) {
+            $profileLines += "HARMONY_USER_LANGUAGE=$language"
+        }
+        $contents = (@($profileLines) + '') -join "`r`n"
         [IO.File]::WriteAllText($temporaryProfile, $contents, [Text.UTF8Encoding]::new($false))
         Move-Item -LiteralPath $temporaryProfile -Destination $profilePath -Force
     } finally {
@@ -127,6 +137,61 @@ function Read-PlayerInput([string]$title, [string]$prompt, [string]$defaultValue
     if ($NoDialogs -or -not [Environment]::UserInteractive) { return '' }
     Add-Type -AssemblyName Microsoft.VisualBasic
     return [Microsoft.VisualBasic.Interaction]::InputBox($prompt, $title, $defaultValue)
+}
+
+function Show-HarmonySettings([string]$currentName, [string]$currentLanguage) {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    [System.Windows.Forms.Application]::EnableVisualStyles()
+    $form = [System.Windows.Forms.Form]::new()
+    $form.Text = 'HarmonyRecomp Settings'
+    $form.ClientSize = [System.Drawing.Size]::new(330, 170)
+    $form.FormBorderStyle = 'FixedDialog'
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+    $form.StartPosition = 'CenterScreen'
+    $form.Font = [System.Drawing.Font]::new('Segoe UI', 9)
+    try {
+        $nameLabel = [System.Windows.Forms.Label]::new()
+        $nameLabel.Text = 'Player Name'
+        $nameLabel.SetBounds(16, 12, 290, 20)
+        $form.Controls.Add($nameLabel)
+        $nameBox = [System.Windows.Forms.TextBox]::new()
+        $nameBox.Text = $currentName
+        $nameBox.SetBounds(16, 34, 298, 25)
+        $form.Controls.Add($nameBox)
+        $languageLabel = [System.Windows.Forms.Label]::new()
+        $languageLabel.Text = 'Game Language (applies on next launch)'
+        $languageLabel.SetBounds(16, 68, 298, 20)
+        $form.Controls.Add($languageLabel)
+        $languageBox = [System.Windows.Forms.ComboBox]::new()
+        $languageBox.DropDownStyle = 'DropDownList'
+        $languageBox.SetBounds(16, 91, 298, 25)
+        [void]$languageBox.Items.AddRange([object[]]@(
+            'Use default (English)', 'English', 'Japanese', 'German',
+            'French', 'Spanish', 'Italian'))
+        $languageBox.SelectedIndex = if (Test-HarmonyLanguage $currentLanguage) { [int]$currentLanguage } else { 0 }
+        $form.Controls.Add($languageBox)
+        $save = [System.Windows.Forms.Button]::new()
+        $save.Text = 'Save'
+        $save.SetBounds(158, 129, 75, 28)
+        $save.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $form.Controls.Add($save)
+        $cancel = [System.Windows.Forms.Button]::new()
+        $cancel.Text = 'Cancel'
+        $cancel.SetBounds(239, 129, 75, 28)
+        $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        $form.Controls.Add($cancel)
+        $form.AcceptButton = $save
+        $form.CancelButton = $cancel
+        if ($form.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+        return [pscustomobject]@{
+            Name = $nameBox.Text.Trim()
+            Language = if ($languageBox.SelectedIndex -eq 0) { '' } else { [string]$languageBox.SelectedIndex }
+        }
+    } finally {
+        $form.Dispose()
+    }
 }
 
 if ($ShowInviteCode) {
@@ -191,7 +256,7 @@ $launcherProfile = Read-LauncherProfile
 try {
     if (-not $launcherProfile.Xuid) {
         $launcherProfile.Xuid = New-HarmonyXuid
-        Write-LauncherProfile $launcherProfile.Xuid $launcherProfile.Name
+        Write-LauncherProfile $launcherProfile.Xuid $launcherProfile.Name $launcherProfile.Language
     } elseif (-not (Test-HarmonyXuid $launcherProfile.Xuid)) {
         throw "The launcher profile does not contain a valid HARMONY_USER_XUID: $profilePath"
     }
@@ -247,15 +312,30 @@ if ($Configure) {
         Show-SetupMessage 'A persistent player identity is required before the player name can be changed.'
         exit 27
     }
-    $configuredName = Read-PlayerInput 'HarmonyRecomp Player Name' 'Enter a player name (1-15 printable ASCII characters):' $launcherProfile.Name $PlayerName
-    $configuredName = $configuredName.Trim()
-    if (-not $configuredName) { exit 0 }
+    if ($NoDialogs -or -not [Environment]::UserInteractive -or
+        $PSBoundParameters.ContainsKey('PlayerName') -or
+        $PSBoundParameters.ContainsKey('GameLanguage')) {
+        if (-not $PlayerName -and -not $PSBoundParameters.ContainsKey('GameLanguage')) { exit 0 }
+        $configuredName = if ($PlayerName) { $PlayerName.Trim() } else { $launcherProfile.Name }
+        $configuredLanguage = if ($PSBoundParameters.ContainsKey('GameLanguage')) {
+            if ($GameLanguage -eq 'default') { '' } else { $GameLanguage }
+        } else { $launcherProfile.Language }
+    } else {
+        $selectedSettings = Show-HarmonySettings $launcherProfile.Name $launcherProfile.Language
+        if ($null -eq $selectedSettings) { exit 0 }
+        $configuredName = $selectedSettings.Name
+        $configuredLanguage = $selectedSettings.Language
+    }
     if (-not (Test-HarmonyPlayerName $configuredName)) {
         Show-SetupMessage 'Player name must contain 1-15 printable ASCII characters.'
         exit 27
     }
-    Write-LauncherProfile $launcherProfile.Xuid $configuredName
-    Show-SetupMessage "Player name saved as: $configuredName"
+    if ($configuredLanguage -and -not (Test-HarmonyLanguage $configuredLanguage)) {
+        Show-SetupMessage 'Game language must be an ID from 1 through 6.'
+        exit 27
+    }
+    Write-LauncherProfile $launcherProfile.Xuid $configuredName $configuredLanguage
+    Show-SetupMessage 'Launcher settings saved. Changes apply on the next launch.'
     exit 0
 }
 
@@ -267,7 +347,7 @@ if (-not $explicitUserName -and -not (Test-HarmonyPlayerName $settings.HARMONY_U
         exit 27
     }
     if ($launcherProfile.Xuid) {
-        Write-LauncherProfile $launcherProfile.Xuid $selectedName
+        Write-LauncherProfile $launcherProfile.Xuid $selectedName $launcherProfile.Language
         $launcherProfile.Name = $selectedName
     }
     $settings.HARMONY_USER_NAME = $selectedName
@@ -304,6 +384,9 @@ $arguments = @(
 )
 if ($settings.HARMONY_USER_XUID) { $arguments += "--user_xuid=$($settings.HARMONY_USER_XUID)" }
 if ($settings.HARMONY_USER_NAME) { $arguments += "--user_name=$($settings.HARMONY_USER_NAME)" }
+if (Test-HarmonyLanguage $launcherProfile.Language) {
+    $arguments += "--user_language=$($launcherProfile.Language)"
+}
 if ($settings.HARMONY_SESSION_DIRECTORY_INVITE_CODE) {
     $inviteCode = $settings.HARMONY_SESSION_DIRECTORY_INVITE_CODE.ToUpperInvariant()
     if ($inviteCode -notmatch
