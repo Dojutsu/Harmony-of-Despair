@@ -95,11 +95,22 @@ jobs:
 
       - name: Install the established Windows toolchain
         shell: pwsh
-        run: choco install llvm cmake ninja -y
+        run: |
+          choco install llvm --version=22.1.8 -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          choco install cmake ninja -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Configure
         shell: pwsh
-        run: cmake --preset win-amd64-relwithdebinfo -DREXSDK_DIR="$env:GITHUB_WORKSPACE/_deps/rexglue-sdk" -DREXGLUE_USE_PREGENERATED=ON
+        run: |
+          $llvm = Join-Path $env:ProgramFiles 'LLVM/bin'
+          $version = & "$llvm/clang++.exe" --version
+          if ($LASTEXITCODE -ne 0 -or ($version -join ' ') -notmatch 'clang version 22\.1\.8\b') {
+            throw 'The Windows build requires LLVM/Clang 22.1.8.'
+          }
+          cmake --preset win-amd64-relwithdebinfo -DREXSDK_DIR="$env:GITHUB_WORKSPACE/_deps/rexglue-sdk" -DREXGLUE_USE_PREGENERATED=ON "-DCMAKE_C_COMPILER=$llvm/clang.exe" "-DCMAKE_CXX_COMPILER=$llvm/clang++.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build
         shell: pwsh
