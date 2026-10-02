@@ -2,7 +2,7 @@
   "schema": 1,
   "repository": "ssh://git@git.example.invalid:2222/harmony/rexglue-sdk.git",
   "branch": "harmony/reconcile-multiplayer-2026-09-22",
-  "commit": "85b0459fd834faeb13ceaf0f152f98ee56853a67",
+  "commit": "7ea08238e41474b4d46f2ed1e4f6177172b86574",
   "overlay_base": "c94f5ebdcb3c9d1a460ca48e04f9758448f8d518",
   "overlay": "patches/rexglue-harmony-online-directory.patch",
   "checkout": "out/reconcile-sdk",
