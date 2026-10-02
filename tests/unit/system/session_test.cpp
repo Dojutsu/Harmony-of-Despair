@@ -9,10 +9,164 @@
 #endif
 
 #include <rex/system/xam/session.h>
+#include <rex/system/xam/nat_probe.h>
 #include <rex/system/xam/user_profile.h>
 #include <rex/cvar.h>
 
 namespace rex::system::xam {
+
+TEST_CASE("NAT acknowledgement follows the peer endpoint", "[session][network][nat]") {
+  const LanAddress discovery_a{htonl(0xCB007101u), 8006};
+  const LanAddress discovery_b{htonl(0xCB007101u), 8019};
+  const LanAddress discovery_c{htonl(0xCB007101u), 8021};
+  const LanAddress gameplay{htonl(0xCB007101u), 30742};
+  NatProbeEndpointState discovery;
+  NatProbeEndpointState gameplay_state;
+
+  CHECK(discovery.UpdatePeer(discovery_a));
+  CHECK(discovery.Acknowledge(discovery_a));
+  CHECK(discovery.acknowledged());
+  CHECK_FALSE(discovery.UpdatePeer(discovery_a));
+  CHECK(discovery.acknowledged());
+
+  CHECK(gameplay_state.UpdatePeer(gameplay));
+  CHECK(gameplay_state.Acknowledge(gameplay));
+  CHECK(discovery.UpdatePeer(discovery_b));
+  CHECK_FALSE(discovery.acknowledged());
+  CHECK(discovery.peer() == discovery_b);
+  CHECK(gameplay_state.acknowledged());
+
+  CHECK_FALSE(discovery.Acknowledge(discovery_a));
+  CHECK_FALSE(discovery.acknowledged());
+  CHECK(discovery.Acknowledge(discovery_b));
+  CHECK(discovery.acknowledged());
+  CHECK(discovery.UpdatePeer(discovery_c));
+  CHECK_FALSE(discovery.acknowledged());
+  CHECK_FALSE(discovery.UpdatePeer({}));
+  CHECK(discovery.peer() == discovery_c);
+  CHECK_FALSE(discovery.UpdatePeer(discovery_c));
+
+  const LanAddress gameplay_new{htonl(0xCB007101u), 49153};
+  CHECK(gameplay_state.UpdatePeer(gameplay_new));
+  CHECK_FALSE(gameplay_state.acknowledged());
+  CHECK(discovery.peer() == discovery_c);
+}
+
+TEST_CASE("repeated NAT search uses acknowledgement for the newest mapping",
+          "[session][network][nat]") {
+  constexpr uint32_t original_window_ms = 250;
+  const LanAddress client_a{htonl(0xCB007171u), 8006};
+  const LanAddress client_b{htonl(0xCB007171u), 8019};
+  const LanAddress host{htonl(0xC6336401u), 30741};
+  NatProbeEndpointState host_discovery;
+
+  REQUIRE(host_discovery.UpdatePeer(client_a));
+  REQUIRE(host_discovery.Acknowledge(client_a));
+  REQUIRE(host_discovery.acknowledged());
+
+  REQUIRE(host_discovery.UpdatePeer(client_b));
+  CHECK_FALSE(host_discovery.acknowledged());
+  CHECK_FALSE(host_discovery.Acknowledge(client_a));
+  REQUIRE(host_discovery.Acknowledge(client_b));
+  REQUIRE(host_discovery.acknowledged());
+
+  SearchTimingBudget search_two(original_window_ms, true);
+  LateTraversalQueryState late_query(true);
+  REQUIRE(search_two.InNatExtension(962));
+  CHECK(late_query.TakeAcknowledgedPeer(search_two.IsActive(962), host) == host);
+  CHECK_FALSE(late_query.TakeAcknowledgedPeer(search_two.IsActive(963), host));
+}
+
+TEST_CASE("a replacement search retires only the previous discovery generation",
+          "[session][network][nat]") {
+  RetainedDiscoverySearchState discovery;
+  RetainedDiscoverySearchState gameplay;
+
+  discovery.Retain(2);
+  gameplay.Retain(100);
+  REQUIRE(discovery.IsRetained(2));
+
+  CHECK(discovery.Retire() == 2);
+  CHECK_FALSE(discovery.generation());
+  CHECK(gameplay.IsRetained(100));
+
+  discovery.Retain(3);
+  CHECK(discovery.IsRetained(3));
+  CHECK_FALSE(discovery.IsRetained(2));
+  CHECK_FALSE(discovery.Retire() == 2);
+  CHECK_FALSE(discovery.generation());
+  CHECK(gameplay.IsRetained(100));
+}
+
+TEST_CASE("late traversal acknowledgement triggers one bounded discovery query",
+          "[session][network][nat]") {
+  const LanAddress peer{htonl(0xCB007171u), 49152};
+  LateTraversalQueryState state(true);
+
+  CHECK_FALSE(state.TakeAcknowledgedPeer(true, std::nullopt));
+  CHECK(state.TakeAcknowledgedPeer(true, peer) == peer);
+  CHECK_FALSE(state.TakeAcknowledgedPeer(true, peer));
+}
+
+TEST_CASE("late traversal query is suppressed outside the active search window",
+          "[session][network][nat]") {
+  const LanAddress peer{htonl(0xCB007171u), 49152};
+  LateTraversalQueryState expired(true);
+  LateTraversalQueryState lan(false);
+  LateTraversalQueryState initially_ready(true, peer);
+
+  CHECK_FALSE(expired.TakeAcknowledgedPeer(false, peer));
+  CHECK_FALSE(lan.TakeAcknowledgedPeer(true, peer));
+  CHECK_FALSE(initially_ready.TakeAcknowledgedPeer(true, peer));
+}
+
+TEST_CASE("NAT search timing adds a bounded traversal-only grace window",
+          "[session][network][nat]") {
+  constexpr uint32_t original_window_ms = 250;
+  SearchTimingBudget lan(original_window_ms, false);
+  SearchTimingBudget nat(original_window_ms, true);
+
+  CHECK(lan.original_window_ms() == original_window_ms);
+  CHECK(lan.total_window_ms() == original_window_ms);
+  CHECK(lan.IsActive(249));
+  CHECK_FALSE(lan.IsActive(250));
+  CHECK_FALSE(lan.InNatExtension(249));
+
+  CHECK(nat.original_window_ms() == original_window_ms);
+  CHECK(nat.total_window_ms() == original_window_ms + SearchTimingBudget::kNatGraceMs);
+  CHECK(nat.IsActive(249));
+  CHECK(nat.InNatExtension(250));
+  CHECK(nat.InNatExtension(nat.total_window_ms() - 1));
+  CHECK_FALSE(nat.IsActive(nat.total_window_ms()));
+  CHECK_FALSE(nat.InNatExtension(nat.total_window_ms()));
+}
+
+TEST_CASE("late acknowledgement query obeys the NAT extended deadline",
+          "[session][network][nat]") {
+  constexpr uint32_t original_window_ms = 250;
+  const LanAddress peer{htonl(0xCB007171u), 49152};
+  SearchTimingBudget nat(original_window_ms, true);
+
+  SECTION("acknowledgement before original deadline behaves normally") {
+    LateTraversalQueryState query(true);
+    CHECK(query.TakeAcknowledgedPeer(nat.IsActive(200), peer) == peer);
+    CHECK_FALSE(query.TakeAcknowledgedPeer(nat.IsActive(201), peer));
+  }
+
+  SECTION("acknowledgement inside extension triggers exactly once") {
+    LateTraversalQueryState query(true);
+    CHECK(nat.InNatExtension(962));
+    CHECK(query.TakeAcknowledgedPeer(nat.IsActive(962), peer) == peer);
+    CHECK_FALSE(query.TakeAcknowledgedPeer(nat.IsActive(963), peer));
+  }
+
+  SECTION("invalid or post-deadline acknowledgement does not trigger") {
+    LateTraversalQueryState invalid(true);
+    LateTraversalQueryState expired(true);
+    CHECK_FALSE(invalid.TakeAcknowledgedPeer(nat.IsActive(962), std::nullopt));
+    CHECK_FALSE(expired.TakeAcknowledgedPeer(nat.IsActive(nat.total_window_ms()), peer));
+  }
+}
 
 TEST_CASE("explicit LAN bind address is the network identity source of truth", "[session][network]") {
   auto previous = REXCVAR_GET(lan_bind_address);
@@ -134,6 +288,25 @@ TEST_CASE("host advertisement follows the actual guest UDP socket port", "[sessi
   CHECK(hosted->info.host_address.port == 59395);
 }
 
+TEST_CASE("public traversal updates only a discovered remote gameplay endpoint",
+          "[session][network]") {
+  SessionRegistry registry;
+  auto local = registry.Create(0x1001, "DesktopHost", {0xD500000A, 30742}, 1, 6, 0);
+  SessionRecord remote_record;
+  remote_record.info.id = {1, 2, 3, 4, 5, 6, 7, 8};
+  remote_record.info.host_address = {0x1301000A, 30742};
+  remote_record.host_xuid = 0x1002;
+  remote_record.max_public_slots = 6;
+  auto remote_id = remote_record.info.id;
+  registry.UpsertDiscovered(std::move(remote_record));
+
+  const LanAddress mapped{0x710000CB, 49152};
+  CHECK(registry.UpdateRemoteGameplayEndpoint(0x1001, mapped) == 1);
+  CHECK(registry.Find(remote_id)->info.host_address == mapped);
+  CHECK(local->info.host_address == LanAddress{0xD500000A, 30742});
+  CHECK(registry.UpdateRemoteGameplayEndpoint(0x1001, mapped) == 0);
+}
+
 TEST_CASE("abandoned local session ID cannot be rediscovered through another address",
           "[session]") {
   SessionRegistry registry;
@@ -224,9 +397,14 @@ TEST_CASE("direct connect discovers and joins a host without LAN broadcast",
   CHECK(results[0].info.id == hosted->info.id);
   CHECK(results[0].info.host_address.ipv4 == htonl(INADDR_LOOPBACK));
   CHECK(results[0].info.host_address.port == 30742);
+  CHECK(results[0].discovery_address.ipv4 == htonl(INADDR_LOOPBACK));
+  CHECK(results[0].discovery_address.port == discovery_port);
 
   SessionMember client_member{0x1002, "ROGAlly", 0, true, false, false};
-  auto joined = client.Join(results[0], client_member, 500);
+  // Deliberately use a service configured with a different fallback port.
+  // Join must retain the endpoint that actually answered search.
+  LanDiscoveryService joining_client(title_id, discovery_port + 1);
+  auto joined = joining_client.Join(results[0], client_member, 500);
   REQUIRE(joined);
   CHECK(joined->info.host_address.ipv4 == htonl(INADDR_LOOPBACK));
   CHECK(joined->members.size() == 2);

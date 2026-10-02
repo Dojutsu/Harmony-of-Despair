@@ -9,6 +9,8 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <algorithm>
+
 #include <rex/kernel/xam/apps/xgi_app.h>
 #include <rex/logging.h>
 #include <rex/system/xam/session.h>
@@ -20,6 +22,15 @@ namespace xam {
 using namespace rex::system;
 using namespace rex::system::xam;
 namespace apps {
+
+bool InitializeEmptyStatsReadResults(std::span<uint8_t> results) {
+  constexpr size_t kStatsReadResultsHeaderSize = 8;
+  if (results.size() < kStatsReadResultsHeaderSize) {
+    return false;
+  }
+  std::fill(results.begin(), results.end(), uint8_t{0});
+  return true;
+}
 using namespace rex::system;
 
 namespace {
@@ -715,6 +726,10 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       REXKRNL_DEBUG("XUserReadStats({}, {}, {:08X}, {}, {:08X}, {}, {:08X})", title_id, xuids_count,
                     xuids_ptr, specs_count, specs_ptr, results_size, results_ptr);
 
+      if (!results_ptr || !InitializeEmptyStatsReadResults(std::span<uint8_t>(
+                              memory_->TranslateVirtual(results_ptr), results_size))) {
+        return X_E_INVALIDARG;
+      }
       return X_E_SUCCESS;
     }
     case 0x000B0025: {

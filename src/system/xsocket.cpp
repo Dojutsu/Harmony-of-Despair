@@ -16,6 +16,7 @@
 #include <rex/platform.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xsocket.h>
+#include <rex/system/xam/nat_probe.h>
 // #include <rex/system/xnet.h>
 
 #include <rex/net/socket.h>
@@ -67,6 +68,7 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
 
 X_STATUS XSocket::Close() {
   REXSYS_INFO("XSocket::Close: native={}", native_handle_);
+  xam::NatProbeDetach(native_handle_);
   int ret = rex::net::socket_close(native_handle_);
   if (ret != 0) {
     return X_STATUS_UNSUCCESSFUL;
@@ -151,6 +153,11 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
     bound_port_ = actual_address.sin_port;
     REXSYS_INFO("XSocket::Bind: native={} local={:08X}:{}", native_handle_,
                 ntohl(actual_address.sin_addr.s_addr), ntohs(actual_address.sin_port));
+    if (type_ == Type::X_SOCK_DGRAM &&
+        xam::NatProbeIsGameplayPort(ntohs(actual_address.sin_port))) {
+      xam::NatProbeAttach(native_handle_, xam::NatProbeRole::kGameplay,
+                          {actual_address.sin_addr.s_addr, ntohs(actual_address.sin_port)});
+    }
   } else {
     bound_port_ = name->sin_port;
     REXSYS_ERROR("XSocket::Bind: getsockname failed native={} error={}", native_handle_,
@@ -230,10 +237,16 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
   }
   */
 
+retry_native_receive:
+  xam::NatProbeTick(native_handle_);
   sockaddr_in nfrom;
   socklen_t nfromlen = sizeof(sockaddr_in);
   int ret = recvfrom(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
                      (sockaddr*)&nfrom, &nfromlen);
+  if (ret > 0 && xam::NatProbeConsume(native_handle_, buf, ret, nfrom.sin_addr.s_addr,
+                                      ntohs(nfrom.sin_port))) {
+    goto retry_native_receive;
+  }
   if (ret >= 0 && from) {
     from->sin_family = nfrom.sin_family;
     from->sin_addr = ntohl(nfrom.sin_addr.s_addr);  // BE <- BE
@@ -307,6 +320,7 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
   }
   */
 
+  xam::NatProbeTick(native_handle_);
   sockaddr_in nto;
   if (to) {
     // N_XSOCKADDR_IN exposes logical host-order values through endian_store,
@@ -317,6 +331,19 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
         native_port_ != 0 && uint16_t(to->sin_port) == guest_port_ ? native_port_
                                                                    : uint16_t(to->sin_port);
     nto.sin_port = htons(destination_port);
+    if (auto peer = xam::NatProbePeer(native_handle_)) {
+      nto.sin_addr.s_addr = peer->ipv4;
+      nto.sin_port = htons(peer->port);
+      if (xam::NatProbeIsClient()) {
+        auto* profile = kernel_state()->user_profile();
+        auto* sessions = kernel_state()->session_manager();
+        if (profile && sessions &&
+            sessions->registry().UpdateRemoteGameplayEndpoint(profile->xuid(), *peer)) {
+          REXSYS_INFO("NAT traversal: mapped gameplay endpoint placed in SessionInfo {:08X}:{}",
+                      peer->ipv4, peer->port);
+        }
+      }
+    }
   }
 
   return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,

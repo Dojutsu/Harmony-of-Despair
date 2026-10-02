@@ -29,6 +29,56 @@ struct LanAddress {
   bool operator==(const LanAddress&) const = default;
 };
 
+class LateTraversalQueryState {
+ public:
+  LateTraversalQueryState(bool traversal_enabled,
+                          std::optional<LanAddress> initially_queried_peer = std::nullopt)
+      : traversal_enabled_(traversal_enabled), queried_peer_(initially_queried_peer) {}
+
+  std::optional<LanAddress> TakeAcknowledgedPeer(
+      bool search_active, std::optional<LanAddress> acknowledged_peer);
+
+ private:
+  bool traversal_enabled_ = false;
+  bool late_query_sent_ = false;
+  std::optional<LanAddress> queried_peer_;
+};
+
+class SearchTimingBudget {
+ public:
+  static constexpr uint32_t kNatGraceMs = 1250;
+
+  SearchTimingBudget(uint32_t original_window_ms, bool traversal_enabled)
+      : original_window_ms_(original_window_ms),
+        total_window_ms_(original_window_ms + (traversal_enabled ? kNatGraceMs : 0)) {}
+
+  uint32_t original_window_ms() const { return original_window_ms_; }
+  uint32_t total_window_ms() const { return total_window_ms_; }
+  bool IsActive(uint32_t elapsed_ms) const { return elapsed_ms < total_window_ms_; }
+  bool InNatExtension(uint32_t elapsed_ms) const {
+    return elapsed_ms >= original_window_ms_ && IsActive(elapsed_ms);
+  }
+
+ private:
+  uint32_t original_window_ms_ = 0;
+  uint32_t total_window_ms_ = 0;
+};
+
+class RetainedDiscoverySearchState {
+ public:
+  void Retain(uint64_t generation) { generation_ = generation; }
+  std::optional<uint64_t> Retire() {
+    auto generation = generation_;
+    generation_.reset();
+    return generation;
+  }
+  bool IsRetained(uint64_t generation) const { return generation_ == generation; }
+  std::optional<uint64_t> generation() const { return generation_; }
+
+ private:
+  std::optional<uint64_t> generation_;
+};
+
 struct SessionInfo {
   std::array<uint8_t, 8> id{};
   LanAddress host_address{};
@@ -54,6 +104,9 @@ struct SessionRecord {
   // safe without forcing callers to copy mutable records.
   std::shared_ptr<std::recursive_mutex> mutex = std::make_shared<std::recursive_mutex>();
   SessionInfo info{};
+  // Discovery/join control endpoint. SessionInfo::host_address remains the
+  // independent gameplay endpoint exposed to XGI/XNet.
+  LanAddress discovery_address{};
   uint64_t nonce = 0;
   uint64_t host_xuid = 0;
   std::string host_name;
@@ -77,6 +130,7 @@ class SessionRegistry {
   bool Delete(const std::array<uint8_t, 8>& id);
   size_t DeleteHostedBy(uint64_t host_xuid);
   size_t UpdateHostedPort(uint64_t host_xuid, uint16_t port);
+  size_t UpdateRemoteGameplayEndpoint(uint64_t local_xuid, LanAddress address);
   std::shared_ptr<SessionRecord> Find(const std::array<uint8_t, 8>& id) const;
   std::vector<std::shared_ptr<SessionRecord>> List() const;
   std::vector<std::shared_ptr<SessionRecord>> ListRemote(uint64_t local_xuid) const;

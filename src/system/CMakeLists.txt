@@ -31,6 +31,7 @@ set(REXSYSTEM_SOURCES
     # XAM services
     xam/app_manager.cpp
     xam/content_manager.cpp
+    xam/nat_probe.cpp
     xam/session.cpp
     xam/session_directory.cpp
     xam/user_profile.cpp

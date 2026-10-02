@@ -10,6 +10,8 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <span>
+
 #include <rex/system/kernel_state.h>
 #include <rex/system/xam/app_manager.h>
 
@@ -17,6 +19,11 @@ namespace rex {
 namespace kernel {
 namespace xam {
 namespace apps {
+
+// X_USER_STATS_READ_RESULTS begins with a count and a pointer. An empty
+// response has both fields cleared; clear the full caller-owned buffer as well
+// so no uninitialized per-user/per-view records can be observed by the title.
+bool InitializeEmptyStatsReadResults(std::span<uint8_t> results);
 
 class XgiApp : public system::xam::App {
  public:

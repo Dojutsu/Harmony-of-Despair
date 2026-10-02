@@ -10,6 +10,7 @@
 #include <rex/logging.h>
 #include <rex/cvar.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/xam/nat_probe.h>
 
 #if REX_PLATFORM_WIN32
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
@@ -30,6 +31,17 @@ static constexpr SOCKET kInvalidSocket = -1;
 #endif
 
 namespace rex::system::xam {
+
+std::optional<LanAddress> LateTraversalQueryState::TakeAcknowledgedPeer(
+    bool search_active, std::optional<LanAddress> acknowledged_peer) {
+  if (!traversal_enabled_ || !search_active || late_query_sent_ || !acknowledged_peer ||
+      queried_peer_ == acknowledged_peer) {
+    return std::nullopt;
+  }
+  late_query_sent_ = true;
+  queried_peer_ = acknowledged_peer;
+  return acknowledged_peer;
+}
 
 REXCVAR_DEFINE_STRING(lan_bind_address, "", "Network",
                       "Physical IPv4 address used for LAN discovery and gameplay traffic")
@@ -216,13 +228,14 @@ std::optional<SessionRecord> Decode(const DiscoveryPacket& packet, uint32_t titl
 
 std::optional<SessionRecord> Exchange(const SessionRecord& session, const SessionMember* member,
                                       uint8_t type, uint32_t title_id, uint16_t discovery_port,
-                                      uint32_t timeout_ms) {
+                                      uint32_t timeout_ms, SOCKET retained_socket = kInvalidSocket) {
   if (!EnsureSocketRuntime())
     return std::nullopt;
-  SOCKET socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  const bool owns_socket = retained_socket == kInvalidSocket;
+  SOCKET socket = owns_socket ? ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) : retained_socket;
   if (socket == kInvalidSocket)
     return std::nullopt;
-  if (!BindLanSocket(socket, 0)) {
+  if (owns_socket && !BindLanSocket(socket, 0)) {
     REXSYS_ERROR("LAN discovery: failed to bind join socket to configured interface");
     CloseSocket(socket);
     return std::nullopt;
@@ -239,12 +252,24 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
   }
   sockaddr_in target{};
   target.sin_family = AF_INET;
-  target.sin_addr.s_addr = session.info.host_address.ipv4;
-  target.sin_port = htons(discovery_port);
+  uint32_t target_ipv4 = session.discovery_address.ipv4
+                                   ? session.discovery_address.ipv4
+                                   : session.info.host_address.ipv4;
+  uint16_t target_port = session.discovery_address.port
+                                   ? session.discovery_address.port
+                                   : discovery_port;
+  if (auto peer = NatProbePeer(socket)) {
+    target_ipv4 = peer->ipv4;
+    target_port = peer->port;
+    REXSYS_INFO("NAT traversal: Join using acknowledged discovery endpoint {:08X}:{}", target_ipv4,
+                target_port);
+  }
+  target.sin_addr.s_addr = target_ipv4;
+  target.sin_port = htons(target_port);
   int sent = sendto(socket, reinterpret_cast<const char*>(&packet), sizeof(packet), 0,
                     reinterpret_cast<sockaddr*>(&target), sizeof(target));
   REXSYS_INFO("LAN discovery: {} request bytes={} to {:08X}:{} xuid={:016X}",
-              type == kJoin ? "join" : "leave", sent, target.sin_addr.s_addr, discovery_port,
+              type == kJoin ? "join" : "leave", sent, target.sin_addr.s_addr, target_port,
               member ? member->xuid : 0);
   auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   std::optional<SessionRecord> result;
@@ -254,6 +279,11 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
     DiscoveryPacket response{};
     int count = recvfrom(socket, reinterpret_cast<char*>(&response), sizeof(response), 0,
                          reinterpret_cast<sockaddr*>(&source), &length);
+    if (count > 0 && NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&response), count,
+                                     source.sin_addr.s_addr, ntohs(source.sin_port))) {
+      NatProbeTick(socket);
+      continue;
+    }
     if (count == sizeof(response)) {
       result = Decode(response, title_id, source.sin_addr.s_addr);
       if (result) {
@@ -261,6 +291,7 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
         // direct-connect search may have intentionally replaced the address
         // embedded by a multi-homed host.
         result->info.host_address.ipv4 = session.info.host_address.ipv4;
+        result->discovery_address = session.discovery_address;
       }
       if (result && result->info.id == session.info.id) {
         REXSYS_INFO("LAN discovery: {} response from {:08X}:{} members={}",
@@ -271,10 +302,11 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
-  CloseSocket(socket);
+  if (owns_socket)
+    CloseSocket(socket);
   if (!result)
     REXSYS_WARN("LAN discovery: {} request timed out for {:08X}:{}",
-                type == kJoin ? "join" : "leave", session.info.host_address.ipv4, discovery_port);
+                type == kJoin ? "join" : "leave", target_ipv4, target_port);
   return result;
 }
 }  // namespace
@@ -363,6 +395,19 @@ size_t SessionRegistry::UpdateHostedPort(uint64_t host_xuid, uint16_t port) {
     std::lock_guard session_lock(*session->mutex);
     if (session->host_xuid == host_xuid && session->state != SessionState::kDeleted) {
       session->info.host_address.port = port;
+      ++updated;
+    }
+  }
+  return updated;
+}
+size_t SessionRegistry::UpdateRemoteGameplayEndpoint(uint64_t local_xuid, LanAddress address) {
+  std::lock_guard lock(mutex_);
+  size_t updated = 0;
+  for (auto& [id, session] : sessions_) {
+    std::lock_guard session_lock(*session->mutex);
+    if (session->host_xuid != local_xuid && !local_session_ids_.contains(id) &&
+        session->state != SessionState::kDeleted && session->info.host_address != address) {
+      session->info.host_address = address;
       ++updated;
     }
   }
@@ -490,6 +535,12 @@ class LanDiscoveryService::Impl {
       return false;
     }
     SetNonBlocking(socket);
+    sockaddr_in local_address{};
+    socket_len_t local_length = sizeof(local_address);
+    if (getsockname(socket, reinterpret_cast<sockaddr*>(&local_address), &local_length) == 0) {
+      NatProbeAttach(socket, NatProbeRole::kDiscovery,
+                     {local_address.sin_addr.s_addr, ntohs(local_address.sin_port)});
+    }
     running = true;
     REXSYS_INFO("LAN discovery: advertising on UDP {} as {:08X}:{}", port,
                 advertised->info.host_address.ipv4, advertised->info.host_address.port);
@@ -501,16 +552,52 @@ class LanDiscoveryService::Impl {
     if (thread.joinable())
       thread.join();
     CloseSocket(socket);
+    NatProbeDetach(socket);
     socket = kInvalidSocket;
     advertised.reset();
+    StopClient();
+  }
+  void StopClient() {
+    client_running = false;
+    if (client_thread.joinable())
+      client_thread.join();
+    if (client_socket != kInvalidSocket) {
+      const auto generation = retained_search.Retire();
+      REXSYS_INFO("NAT traversal: retiring retained discovery search generation={} socket={}",
+                  generation.value_or(0), client_socket);
+      NatProbeDetach(client_socket);
+      CloseSocket(client_socket);
+      client_socket = kInvalidSocket;
+    }
+  }
+  void RunClient() {
+    while (client_running) {
+      NatProbeTick(client_socket);
+      if (!client_exchange) {
+        sockaddr_in source{};
+        socket_len_t length = sizeof(source);
+        std::array<uint8_t, sizeof(DiscoveryPacket)> packet{};
+        int count = recvfrom(client_socket, reinterpret_cast<char*>(packet.data()),
+                             int(packet.size()), 0, reinterpret_cast<sockaddr*>(&source), &length);
+        if (count > 0)
+          NatProbeConsume(client_socket, packet.data(), count, source.sin_addr.s_addr,
+                          ntohs(source.sin_port));
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
   }
   void Run() {
     while (running) {
+      NatProbeTick(socket);
       sockaddr_in source{};
       socket_len_t length = sizeof(source);
       DiscoveryPacket query{};
       int count = recvfrom(socket, reinterpret_cast<char*>(&query), sizeof(query), 0,
                            reinterpret_cast<sockaddr*>(&source), &length);
+      if (count > 0 && NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&query), count,
+                                       source.sin_addr.s_addr, ntohs(source.sin_port))) {
+        continue;
+      }
       bool valid = count == sizeof(query) && ntohl(query.magic) == kDiscoveryMagic &&
                    ntohs(query.version) == kDiscoveryVersion && ntohl(query.title_id) == title_id &&
                    advertised;
@@ -564,6 +651,11 @@ class LanDiscoveryService::Impl {
   std::atomic<bool> running = false;
   std::thread thread;
   std::shared_ptr<SessionRecord> advertised;
+  SOCKET client_socket = kInvalidSocket;
+  std::atomic<bool> client_running = false;
+  std::atomic<bool> client_exchange = false;
+  std::thread client_thread;
+  RetainedDiscoverySearchState retained_search;
 };
 
 LanDiscoveryService::LanDiscoveryService(uint32_t title_id, uint16_t port)
@@ -586,9 +678,17 @@ bool LanDiscoveryService::IsAdvertising() const {
   return impl_->running;
 }
 std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint32_t max_results) {
+  static std::atomic<uint64_t> next_search_attempt{0};
+  const uint64_t search_attempt = ++next_search_attempt;
+  const auto search_started = std::chrono::steady_clock::now();
   std::vector<SessionRecord> results;
   if (!EnsureSocketRuntime())
     return results;
+  // A retained discovery socket belongs to the completed Search that created
+  // it and remains alive only so Join/Leave can reuse its punched mapping. A
+  // replacement Search supersedes that attempt before creating a new socket;
+  // otherwise both probes keep registering under the same participant/role.
+  impl_->StopClient();
   SOCKET socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (socket == kInvalidSocket)
     return results;
@@ -627,9 +727,16 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
     }
   }
   const bool direct = !selected_address.empty();
-  if (direct) {
+  const bool traversal = NatProbeEnabled();
+  const SearchTimingBudget timing(timeout_ms, traversal);
+  REXSYS_INFO(
+      "Discovery: search attempt={} started response_window_ms={} nat_grace_ms={} "
+      "nat_enabled={}",
+      search_attempt, timing.original_window_ms(),
+      timing.total_window_ms() - timing.original_window_ms(), traversal);
+  if (direct || traversal) {
     if (!BindLanSocket(socket, 0)) {
-      REXSYS_ERROR("Direct connect: failed to bind search socket to configured interface");
+      REXSYS_ERROR("Discovery: failed to bind search socket to configured interface");
       CloseSocket(socket);
       return results;
     }
@@ -641,7 +748,13 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
   // 255.255.255.255 datagram from a socket bound to a unicast address, and the
   // listener has the same requirement. Advertisements, XNADDR, join exchange,
   // and gameplay transport still use the explicit selected address.
-  SetNonBlocking(socket);
+    SetNonBlocking(socket);
+  sockaddr_in local_address{};
+  socket_len_t local_length = sizeof(local_address);
+  if (getsockname(socket, reinterpret_cast<sockaddr*>(&local_address), &local_length) == 0) {
+    NatProbeAttach(socket, NatProbeRole::kDiscovery,
+                   {local_address.sin_addr.s_addr, ntohs(local_address.sin_port)});
+  }
   sockaddr_in target{};
   target.sin_family = AF_INET;
   if (direct) {
@@ -654,6 +767,38 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
     target.sin_addr.s_addr = htonl(INADDR_BROADCAST);
   }
   target.sin_port = htons(selected_discovery_port);
+  bool traversal_target = false;
+  std::optional<LanAddress> initially_queried_traversal_peer;
+  if (traversal) {
+    auto rendezvous_deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(std::min(timeout_ms, 2000u));
+    while (std::chrono::steady_clock::now() < rendezvous_deadline) {
+      NatProbeTick(socket);
+      sockaddr_in source{};
+      socket_len_t source_length = sizeof(source);
+      std::array<uint8_t, sizeof(DiscoveryPacket)> packet{};
+      int count = recvfrom(socket, reinterpret_cast<char*>(packet.data()), int(packet.size()), 0,
+                           reinterpret_cast<sockaddr*>(&source), &source_length);
+      if (count > 0)
+        NatProbeConsume(socket, packet.data(), count, source.sin_addr.s_addr,
+                        ntohs(source.sin_port));
+      if (auto peer = NatProbePeer(socket)) {
+        target.sin_addr.s_addr = peer->ipv4;
+        target.sin_port = htons(peer->port);
+        traversal_target = true;
+        initially_queried_traversal_peer = peer;
+        REXSYS_INFO("NAT traversal: search attempt={} ready during initial wait peer={:08X}:{}",
+                    search_attempt, peer->ipv4, peer->port);
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (!traversal_target) {
+      REXSYS_INFO("NAT traversal: search attempt={} initial rendezvous wait expired without readiness",
+                  search_attempt);
+    }
+  }
+  LateTraversalQueryState late_traversal_query(traversal, initially_queried_traversal_peer);
   DiscoveryPacket query{};
   query.magic = htonl(kDiscoveryMagic);
   query.version = htons(kDiscoveryVersion);
@@ -661,17 +806,22 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
   query.title_id = htonl(impl_->title_id);
   int query_sent = sendto(socket, reinterpret_cast<const char*>(&query), sizeof(query), 0,
                           reinterpret_cast<sockaddr*>(&target), sizeof(target));
-  if (direct) {
-    REXSYS_INFO("Direct connect: search query bytes={} to {:08X}:{} title={:08X}", query_sent,
-                target.sin_addr.s_addr, selected_discovery_port, impl_->title_id);
+  if (direct || traversal_target) {
+    REXSYS_INFO(
+        "Direct connect: search attempt={} initial query bytes={} to {:08X}:{} title={:08X} "
+        "traversal_ready={}",
+        search_attempt, query_sent, target.sin_addr.s_addr, ntohs(target.sin_port),
+        impl_->title_id, traversal_target);
   } else {
-    REXSYS_INFO("LAN discovery: search broadcast bytes={} UDP {} title={:08X}", query_sent,
-                impl_->port, impl_->title_id);
+    REXSYS_INFO(
+        "LAN discovery: search attempt={} initial broadcast bytes={} UDP {} title={:08X} "
+        "traversal_ready={}",
+        search_attempt, query_sent, impl_->port, impl_->title_id, traversal_target);
   }
   // Also probe the local listener for deterministic same-host tests/tools.
   // Stable XUID/session-ID filtering prevents this from surfacing as a remote
   // result in the title.
-  if (!direct) {
+  if (!direct && !traversal_target) {
     target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     sendto(socket, reinterpret_cast<const char*>(&query), sizeof(query), 0,
            reinterpret_cast<sockaddr*>(&target), sizeof(target));
@@ -716,17 +866,56 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
       }
     }
   };
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  const auto response_window_started = std::chrono::steady_clock::now();
+  const auto original_deadline =
+      response_window_started + std::chrono::milliseconds(timing.original_window_ms());
+  const auto deadline =
+      response_window_started + std::chrono::milliseconds(timing.total_window_ms());
+  REXSYS_INFO(
+      "Discovery: search attempt={} original_deadline_ms={} final_deadline_ms={} "
+      "from_response_window_start",
+      search_attempt, timing.original_window_ms(), timing.total_window_ms());
+  bool extension_logged = false;
   while (std::chrono::steady_clock::now() < deadline && results.size() < max_results) {
+    const auto now = std::chrono::steady_clock::now();
+    if (traversal && !extension_logged && now >= original_deadline) {
+      extension_logged = true;
+      REXSYS_INFO(
+          "NAT traversal: search attempt={} original deadline reached; entering bounded {} ms "
+          "extension",
+          search_attempt, SearchTimingBudget::kNatGraceMs);
+    }
+    NatProbeTick(socket);
     send_directory_probes();
     sockaddr_in source{};
     socket_len_t length = sizeof(source);
     DiscoveryPacket response{};
     int count = recvfrom(socket, reinterpret_cast<char*>(&response), sizeof(response), 0,
                          reinterpret_cast<sockaddr*>(&source), &length);
+    bool consumed_probe =
+        count > 0 && NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&response), count,
+                                     source.sin_addr.s_addr, ntohs(source.sin_port));
+    if (auto peer = late_traversal_query.TakeAcknowledgedPeer(now < deadline,
+                                                              NatProbePeer(socket))) {
+      target.sin_addr.s_addr = peer->ipv4;
+      target.sin_port = htons(peer->port);
+      traversal_target = true;
+      int sent = sendto(socket, reinterpret_cast<const char*>(&query), sizeof(query), 0,
+                        reinterpret_cast<sockaddr*>(&target), sizeof(target));
+      REXSYS_INFO(
+          "NAT traversal: search attempt={} late acknowledged peer={:08X}:{}; one-time discovery "
+          "query bytes={}",
+          search_attempt, peer->ipv4, peer->port, sent);
+    }
+    if (consumed_probe) {
+      continue;
+    }
     if (count == sizeof(response)) {
       auto decoded = Decode(response, impl_->title_id, source.sin_addr.s_addr);
-      if (decoded && direct) {
+      if (decoded) {
+        decoded->discovery_address = {source.sin_addr.s_addr, ntohs(source.sin_port)};
+      }
+      if (decoded && (direct || traversal_target)) {
         // The manually supplied endpoint is authoritative. This preserves the
         // complete host-provided session identity while avoiding a private or
         // otherwise unreachable address embedded by a multi-homed host.
@@ -756,23 +945,54 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
                     decoded->host_name, decoded->host_xuid, decoded->info.host_address.ipv4,
                     decoded->info.host_address.port);
         results.push_back(std::move(*decoded));
+        if (traversal) {
+          REXSYS_INFO(
+              "NAT traversal: search attempt={} added remote session count={} retained discovery "
+              "endpoint={:08X}:{}",
+              search_attempt, results.size(), source.sin_addr.s_addr, ntohs(source.sin_port));
+        }
       }
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
-  CloseSocket(socket);
+  const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - search_started)
+                              .count();
+  REXSYS_INFO("Discovery: search attempt={} completed results={} elapsed_ms={} reason={}",
+              search_attempt, results.size(), elapsed_ms,
+              results.size() >= max_results
+                  ? "max_results"
+                  : (traversal ? "nat_deadline" : "original_deadline"));
+  if (NatProbeEnabled()) {
+    impl_->client_socket = socket;
+    impl_->retained_search.Retain(search_attempt);
+    impl_->client_running = true;
+    REXSYS_INFO("NAT traversal: retained discovery search generation={} socket={} for Join/Leave",
+                search_attempt, socket);
+    impl_->client_thread = std::thread([impl = impl_.get()] { impl->RunClient(); });
+  } else {
+    CloseSocket(socket);
+  }
   return results;
 }
 std::optional<SessionRecord> LanDiscoveryService::Join(const SessionRecord& session,
                                                        const SessionMember& member,
                                                        uint32_t timeout_ms) {
-  return Exchange(session, &member, kJoin, impl_->title_id, impl_->port, timeout_ms);
+  impl_->client_exchange = true;
+  auto result = Exchange(session, &member, kJoin, impl_->title_id, impl_->port, timeout_ms,
+                         impl_->client_socket);
+  impl_->client_exchange = false;
+  return result;
 }
 std::optional<SessionRecord> LanDiscoveryService::Leave(const SessionRecord& session, uint64_t xuid,
                                                         uint32_t timeout_ms) {
   SessionMember member;
   member.xuid = xuid;
-  return Exchange(session, &member, kLeave, impl_->title_id, impl_->port, timeout_ms);
+  impl_->client_exchange = true;
+  auto result = Exchange(session, &member, kLeave, impl_->title_id, impl_->port, timeout_ms,
+                         impl_->client_socket);
+  impl_->client_exchange = false;
+  return result;
 }
 uint32_t LanDiscoveryService::DetermineLanIpv4() {
   const auto& configured = REXCVAR_GET(lan_bind_address);
