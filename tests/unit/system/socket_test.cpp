@@ -1,5 +1,9 @@
+#include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstring>
+#include <ranges>
+#include <span>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -13,6 +17,17 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
+
+namespace rex::kernel::xam {
+struct XNADDR;
+u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mapped_void xid,
+                                    mapped_void in_addr);
+u32 NetDll_XNetInAddrToXnAddr_entry(u32 caller, u32 address, ppc_ptr_t<XNADDR> xn_addr,
+                                    mapped_void xid);
+u32 NetDll_XNetUnregisterInAddr_entry(u32 caller, u32 address);
+u32 NetDll_XNetConnect_entry(u32 caller, u32 address);
+u32 NetDll_XNetGetConnectStatus_entry(u32 caller, u32 address);
+}  // namespace rex::kernel::xam
 
 namespace rex::system {
 namespace {
@@ -62,7 +77,153 @@ void CloseNativeSocket(uintptr_t socket) {
 #endif
 }
 
+std::array<uint8_t, 36> XnAddr(uint32_t guest_ipv4, uint16_t port,
+                               uint64_t online_id) {
+  std::array<uint8_t, 36> address{};
+  const uint32_t network_ipv4 = htonl(guest_ipv4);
+  std::memcpy(address.data(), &network_ipv4, sizeof(network_ipv4));
+  std::memcpy(address.data() + 4, &network_ipv4, sizeof(network_ipv4));
+  const uint16_t network_port = htons(port);
+  std::memcpy(address.data() + 8, &network_port, sizeof(network_port));
+  std::memcpy(address.data() + 16, &online_id, sizeof(online_id));
+  return address;
+}
+
+bool Selector7DescriptorIdentityIsValid(const std::array<uint8_t, 38>& descriptor) {
+  const bool all_zero = std::all_of(descriptor.begin() + 10, descriptor.begin() + 16,
+                                    [](uint8_t value) { return value == 0; });
+  const bool all_ff = std::all_of(descriptor.begin() + 10, descriptor.begin() + 16,
+                                  [](uint8_t value) { return value == 0xFF; });
+  return !all_zero && !all_ff;
+}
+
+struct Selector7IntroductionResult {
+  bool identifier_resolved;
+  bool descriptor_accepted;
+  bool handler_succeeded;
+  bool common_rejection;
+};
+
+Selector7IntroductionResult ModelSelector7Introduction(
+    uint32_t identifier, std::span<const uint32_t> known_identifiers,
+    const std::array<uint8_t, 38>& descriptor) {
+  const bool identifier_resolved =
+      std::ranges::find(known_identifiers, identifier) != known_identifiers.end();
+  const bool descriptor_accepted = Selector7DescriptorIdentityIsValid(descriptor);
+  const bool handler_succeeded = identifier_resolved && descriptor_accepted;
+  return {identifier_resolved, descriptor_accepted, handler_succeeded, !handler_succeeded};
+}
+
 }  // namespace
+
+TEST_CASE("XNet address handles preserve distinct peer mappings and network byte order",
+          "[network][xnet]") {
+  using namespace rex::kernel::xam;
+  constexpr uint32_t kHost = 0x0A0000D5u;
+  constexpr uint32_t kGuestA = 0x0A00001Cu;
+  constexpr uint32_t kUnknown = 0x0A00009Fu;
+  auto host = XnAddr(kHost, 30742, 0xE812BE180C2286BDu);
+  auto guest_a = XnAddr(kGuestA, 30742, 0x59260F9AAF14B646u);
+  std::array<uint8_t, 4> host_handle_bytes{};
+  std::array<uint8_t, 4> guest_a_handle_bytes{};
+
+  REQUIRE(NetDll_XNetXnAddrToInAddr_entry(
+              1, ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(host.data())), nullptr,
+              mapped_void::from_host(host_handle_bytes.data())) == 0);
+  REQUIRE(NetDll_XNetXnAddrToInAddr_entry(
+              1, ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(guest_a.data())), nullptr,
+              mapped_void::from_host(guest_a_handle_bytes.data())) == 0);
+
+  CHECK(host_handle_bytes == std::array<uint8_t, 4>{0x0A, 0x00, 0x00, 0xD5});
+  CHECK(guest_a_handle_bytes == std::array<uint8_t, 4>{0x0A, 0x00, 0x00, 0x1C});
+  CHECK(NetDll_XNetConnect_entry(1, kHost) == 0);
+  CHECK(NetDll_XNetGetConnectStatus_entry(1, kHost) == 2);
+  CHECK(NetDll_XNetConnect_entry(1, kGuestA) == 0);
+  CHECK(NetDll_XNetGetConnectStatus_entry(1, kGuestA) == 2);
+
+  std::array<uint8_t, 36> host_round_trip{};
+  std::array<uint8_t, 36> guest_a_round_trip{};
+  REQUIRE(NetDll_XNetInAddrToXnAddr_entry(
+              1, kHost,
+              ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(host_round_trip.data())),
+              nullptr) == 0);
+  REQUIRE(NetDll_XNetInAddrToXnAddr_entry(
+              1, kGuestA,
+              ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(guest_a_round_trip.data())),
+              nullptr) == 0);
+  CHECK(host_round_trip == host);
+  CHECK(guest_a_round_trip == guest_a);
+  CHECK(NetDll_XNetGetConnectStatus_entry(1, kHost) == 2);
+
+  std::array<uint8_t, 36> unknown{};
+  REQUIRE(NetDll_XNetInAddrToXnAddr_entry(
+              1, kUnknown,
+              ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(unknown.data())), nullptr) ==
+          0);
+  CHECK(std::equal(unknown.begin(), unknown.begin() + 4,
+                   std::array<uint8_t, 4>{0x0A, 0x00, 0x00, 0x9F}.begin()));
+  CHECK(std::equal(unknown.begin() + 4, unknown.begin() + 8,
+                   std::array<uint8_t, 4>{0x0A, 0x00, 0x00, 0x9F}.begin()));
+
+  constexpr uint32_t kUnknownB = 0x0A0000A0u;
+  std::array<uint8_t, 36> unknown_again{};
+  std::array<uint8_t, 36> unknown_b{};
+  REQUIRE(NetDll_XNetInAddrToXnAddr_entry(
+              1, kUnknown,
+              ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(unknown_again.data())),
+              nullptr) == 0);
+  REQUIRE(NetDll_XNetInAddrToXnAddr_entry(
+              1, kUnknownB,
+              ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(unknown_b.data())), nullptr) ==
+          0);
+  const auto unknown_enet = std::span(unknown).subspan(10, 6);
+  const auto unknown_again_enet = std::span(unknown_again).subspan(10, 6);
+  const auto unknown_b_enet = std::span(unknown_b).subspan(10, 6);
+  CHECK(std::ranges::any_of(unknown_enet, [](uint8_t value) { return value != 0; }));
+  CHECK(std::ranges::any_of(unknown_enet, [](uint8_t value) { return value != 0xFF; }));
+  CHECK(std::ranges::equal(unknown_enet, unknown_again_enet));
+  CHECK_FALSE(std::ranges::equal(unknown_enet, unknown_b_enet));
+  CHECK(unknown[10] == 0x02);
+  CHECK((unknown[10] & 0x01) == 0);
+  CHECK((unknown[10] & 0x02) != 0);
+
+  std::array<uint8_t, 38> selector7_descriptor{};
+  std::copy(unknown.begin(), unknown.end(), selector7_descriptor.begin());
+  selector7_descriptor[36] = 0x03;
+  selector7_descriptor[37] = 0xE8;
+  CHECK(Selector7DescriptorIdentityIsValid(selector7_descriptor));
+  const std::array<uint32_t, 2> established_identifiers{kHost, kUnknown};
+  const auto selector7_result =
+      ModelSelector7Introduction(kUnknown, established_identifiers, selector7_descriptor);
+  CHECK(selector7_result.identifier_resolved);
+  CHECK(selector7_result.descriptor_accepted);
+  CHECK(selector7_result.handler_succeeded);
+  CHECK_FALSE(selector7_result.common_rejection);
+
+  std::array<uint8_t, 36> zero_address{};
+  std::array<uint8_t, 36> maximum_address{};
+  REQUIRE(NetDll_XNetInAddrToXnAddr_entry(
+              1, 0,
+              ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(zero_address.data())),
+              nullptr) == 0);
+  REQUIRE(NetDll_XNetInAddrToXnAddr_entry(
+              1, UINT32_MAX,
+              ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(maximum_address.data())),
+              nullptr) == 0);
+  CHECK(std::ranges::any_of(std::span(zero_address).subspan(10, 6),
+                            [](uint8_t value) { return value != 0; }));
+  CHECK_FALSE(std::ranges::equal(std::span(zero_address).subspan(10, 6),
+                                std::span(maximum_address).subspan(10, 6)));
+
+  // A registered descriptor remains byte-for-byte authoritative.
+  CHECK(host_round_trip == host);
+  CHECK(guest_a_round_trip == guest_a);
+
+  CHECK(NetDll_XNetUnregisterInAddr_entry(1, kHost) == 0);
+  CHECK(NetDll_XNetUnregisterInAddr_entry(1, kGuestA) == 0);
+  CHECK(NetDll_XNetGetConnectStatus_entry(1, kHost) == 0);
+  CHECK(NetDll_XNetGetConnectStatus_entry(1, kGuestA) == 0);
+}
 
 TEST_CASE("gameplay NAT control drain preserves queued guest datagrams",
           "[network][socket][nat]") {

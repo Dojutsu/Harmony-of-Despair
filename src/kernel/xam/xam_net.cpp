@@ -68,14 +68,14 @@ enum {
 };
 
 // https://github.com/pmrowla/hl2sdk-csgo/blob/master/common/xbox/xboxstubs.h
-typedef struct {
+struct XNADDR {
   // FYI: IN_ADDR should be in network-byte order.
   in_addr ina;                    // IP address (zero if not static/DHCP)
   in_addr inaOnline;              // Online IP address (zero if not online)
   rex::be<uint16_t> wPortOnline;  // Online port
   uint8_t abEnet[6];              // Ethernet MAC address
   uint8_t abOnline[20];           // Online identification
-} XNADDR;
+};
 
 typedef struct {
   rex::be<int32_t> status;
@@ -191,6 +191,17 @@ XNetStartupParams xnet_startup_params = {};
 std::mutex xnet_registry_mutex;
 std::unordered_map<uint32_t, XNADDR> xnet_address_registry;
 std::unordered_map<uint64_t, std::array<uint8_t, 16>> xnet_key_registry;
+
+std::array<uint8_t, 6> SyntheticEthernetAddress(uint32_t address) {
+  // The XNet address is the stable peer key available to this API. Preserve
+  // all 32 bits so distinct address handles cannot collide, and mark the
+  // result as a locally administered unicast address. The final byte is a
+  // stable check byte rather than an ephemeral socket or port value.
+  const uint32_t network_address = htonl(address);
+  const auto* bytes = reinterpret_cast<const uint8_t*>(&network_address);
+  return {0x02, bytes[0], bytes[1], bytes[2], bytes[3],
+          uint8_t(bytes[0] ^ bytes[1] ^ bytes[2] ^ bytes[3] ^ 0xA5)};
+}
 
 struct PendingRecvFrom {
   uint32_t socket_handle = 0;
@@ -829,7 +840,7 @@ u32 NetDll_XNetXnAddrToMachineId_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr, m
 void NetDll_XNetInAddrToString_entry(u32 caller, u32 address, mapped_string string_out,
                                      u32 string_size) {
   in_addr native{};
-  native.s_addr = address;
+  native.s_addr = htonl(address);
   const char* buffer = inet_ntoa(native);
   rex::string::copy_truncating(string_out, buffer ? buffer : "0.0.0.0", string_size);
 }
@@ -844,8 +855,9 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
   if (!address)
     return 0x2741;
   std::memcpy(in_addr.host_address(), &address, sizeof(address));
+  const uint32_t guest_address = ntohl(address);
   std::lock_guard lock(xnet_registry_mutex);
-  xnet_address_registry[address] = *xn_addr;
+  xnet_address_registry[guest_address] = *xn_addr;
   return 0;
 }
 
@@ -861,8 +873,10 @@ u32 NetDll_XNetInAddrToXnAddr_entry(u32 caller, u32 address, ppc_ptr_t<XNADDR> x
     *xn_addr = it->second;
   } else {
     xn_addr.Zero();
-    xn_addr->ina.s_addr = address;
-    xn_addr->inaOnline.s_addr = address;
+    xn_addr->ina.s_addr = htonl(address);
+    xn_addr->inaOnline.s_addr = htonl(address);
+    const auto ethernet_address = SyntheticEthernetAddress(address);
+    std::memcpy(xn_addr->abEnet, ethernet_address.data(), ethernet_address.size());
   }
   return 0;
 }
