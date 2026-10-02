@@ -536,6 +536,35 @@ TEST_CASE("directory heartbeat failures preserve one logical host registration",
   CHECK(ClassifyDirectoryHeartbeatResponse(200, true) == Disposition::kAccepted);
 }
 
+TEST_CASE("invite-code directory responses use normal compatibility validation",
+          "[session][directory]") {
+  REQUIRE(NormalizeDirectoryInviteCode("ab7k2q"));
+  CHECK(*NormalizeDirectoryInviteCode("ab7k2q") == "AB7K2Q");
+  CHECK_FALSE(NormalizeDirectoryInviteCode("BAD"));
+  CHECK_FALSE(NormalizeDirectoryInviteCode("ABC10O"));
+
+  constexpr uint32_t title_id = 0x58410A7A;
+  constexpr std::string_view build_id = "harmony-test";
+  constexpr std::string_view valid = R"({"session":{"session_id":"session-token","server_name":"Alice","player_count":1,"max_players":6,"title_id":"58410A7A","protocol_version":1,"build_id":"harmony-test","connectivity_candidates":[{"type":"public","address":"203.0.113.7","discovery_port":30741,"gameplay_port":30742}]}})";
+  auto parsed = ParseInviteCodeSessionResponse(valid, title_id, build_id);
+  REQUIRE(parsed);
+  CHECK(parsed->session_id == "session-token");
+  CHECK(parsed->server_name == "Alice");
+  REQUIRE(parsed->connectivity_candidates.size() == 1);
+  CHECK(parsed->connectivity_candidates[0].type == "public");
+
+  std::string wrong_title(valid);
+  wrong_title.replace(wrong_title.find("58410A7A"), 8, "58410A7B");
+  CHECK_FALSE(ParseInviteCodeSessionResponse(wrong_title, title_id, build_id));
+  CHECK_FALSE(ParseInviteCodeSessionResponse(valid, title_id, "other-build"));
+
+  std::string unsafe_candidate(valid);
+  unsafe_candidate.replace(unsafe_candidate.find("203.0.113.7"), 11, "127.0.0.1");
+  CHECK_FALSE(ParseInviteCodeSessionResponse(unsafe_candidate, title_id, build_id));
+  CHECK_FALSE(ParseInviteCodeSessionResponse("{}", title_id, build_id));
+  CHECK_FALSE(ParseInviteCodeSessionResponse("not-json", title_id, build_id));
+}
+
 TEST_CASE("stopping a LAN advertisement removes the hosted session", "[session][network]") {
   constexpr uint32_t title_id = 0x58410A7A;
   constexpr uint16_t discovery_port = 39042;

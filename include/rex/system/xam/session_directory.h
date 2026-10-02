@@ -17,6 +17,7 @@ REXCVAR_DECLARE(std::string, session_directory_build_id);
 REXCVAR_DECLARE(std::string, session_directory_publish_address);
 REXCVAR_DECLARE(std::string, session_directory_candidate_type);
 REXCVAR_DECLARE(uint32_t, session_directory_session_index);
+REXCVAR_DECLARE(std::string, session_directory_invite_code);
 
 struct DirectoryCandidate {
   std::string type;
@@ -57,6 +58,10 @@ enum class DirectoryHeartbeatDisposition {
 // timing in unit tests.
 DirectoryHeartbeatDisposition ClassifyDirectoryHeartbeatResponse(std::optional<uint32_t> status,
                                                                  bool valid_session_id);
+std::optional<std::string> NormalizeDirectoryInviteCode(std::string_view value);
+std::optional<DirectorySession> ParseInviteCodeSessionResponse(std::string_view body,
+                                                               uint32_t title_id,
+                                                               std::string_view build_id);
 
 class SessionDirectoryClient {
  public:
@@ -71,6 +76,8 @@ class SessionDirectoryClient {
   std::vector<DirectorySession> List(uint32_t title_id) const;
   void RequestList(uint32_t title_id) const;
   std::optional<std::vector<DirectorySession>> CachedList(uint32_t title_id) const;
+  std::optional<DirectorySession> ResolveInviteCode(std::string_view code,
+                                                    uint32_t title_id) const;
   std::optional<DirectoryTraversalAttempt> CreateJoinAttempt(const std::string& session_id) const;
   void CompleteJoinAttempt(const DirectoryTraversalAttempt& attempt) const;
 

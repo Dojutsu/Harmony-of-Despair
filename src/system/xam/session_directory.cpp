@@ -36,6 +36,8 @@ constexpr auto kHeartbeatInterval = std::chrono::seconds(15);
 constexpr auto kHeartbeatRetryInitial = std::chrono::seconds(1);
 constexpr auto kTraversalPollInterval = std::chrono::milliseconds(250);
 constexpr auto kListCacheLifetime = std::chrono::seconds(5);
+constexpr std::string_view kInviteCodeAlphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+constexpr size_t kInviteCodeLength = 6;
 
 bool IsSafeDirectoryUrl(std::string_view value) {
   if (value.empty())
@@ -82,6 +84,97 @@ bool IsPrintableName(std::string_view value) {
   return !value.empty() && value.size() <= 48 &&
          std::all_of(value.begin(), value.end(),
                      [](unsigned char ch) { return ch >= 0x20 && ch != 0x7F; });
+}
+
+std::optional<std::string> NormalizeInviteCode(std::string_view value) {
+  if (value.size() != kInviteCodeLength)
+    return std::nullopt;
+  std::string normalized(value);
+  for (char& ch : normalized) {
+    ch = char(std::toupper(static_cast<unsigned char>(ch)));
+    if (kInviteCodeAlphabet.find(ch) == std::string_view::npos)
+      return std::nullopt;
+  }
+  return normalized;
+}
+
+bool IsInviteCodeSetting(std::string_view value) {
+  return value.empty() || NormalizeInviteCode(value).has_value();
+}
+
+std::optional<DirectorySession> ParseDirectorySession(const nlohmann::json& item,
+                                                      uint32_t title_id,
+                                                      std::string_view build_id) {
+  try {
+    if (!item.is_object())
+      return std::nullopt;
+    auto session_id = item.find("session_id");
+    auto server_name = item.find("server_name");
+    auto item_title_id = item.find("title_id");
+    auto protocol = item.find("protocol_version");
+    auto item_build = item.find("build_id");
+    auto player_count = item.find("player_count");
+    auto max_players = item.find("max_players");
+    if (session_id == item.end() || !session_id->is_string() ||
+        !IsUrlToken(session_id->get_ref<const std::string&>(), 64) ||
+        server_name == item.end() || !server_name->is_string() ||
+        !IsPrintableName(server_name->get_ref<const std::string&>()) ||
+        item_title_id == item.end() || !item_title_id->is_string() ||
+        item_title_id->get<std::string>() != TitleIdString(title_id) ||
+        protocol == item.end() || !protocol->is_number_unsigned() ||
+        protocol->get<uint64_t>() != kDirectoryProtocolVersion || item_build == item.end() ||
+        !item_build->is_string() || item_build->get<std::string>() != build_id ||
+        player_count == item.end() || !player_count->is_number_unsigned() ||
+        max_players == item.end() || !max_players->is_number_unsigned())
+      return std::nullopt;
+    uint64_t players = player_count->get<uint64_t>();
+    uint64_t capacity = max_players->get<uint64_t>();
+    if (!capacity || capacity > 64 || players > capacity)
+      return std::nullopt;
+    DirectorySession session;
+    session.session_id = session_id->get<std::string>();
+    session.server_name = server_name->get<std::string>().substr(0, 48);
+    session.player_count = uint32_t(players);
+    session.max_players = uint32_t(capacity);
+    session.title_id = title_id;
+    session.protocol_version = kDirectoryProtocolVersion;
+    session.build_id = std::string(build_id);
+    auto candidates = item.find("connectivity_candidates");
+    if (candidates != item.end() && candidates->is_array()) {
+      for (const auto& candidate : *candidates) {
+        if (!candidate.is_object())
+          continue;
+        DirectoryCandidate parsed;
+        auto type = candidate.find("type");
+        auto address = candidate.find("address");
+        auto discovery = candidate.find("discovery_port");
+        auto gameplay = candidate.find("gameplay_port");
+        if (type == candidate.end() || !type->is_string() || address == candidate.end() ||
+            !address->is_string() || discovery == candidate.end() ||
+            !discovery->is_number_unsigned() || gameplay == candidate.end() ||
+            !gameplay->is_number_unsigned())
+          continue;
+        uint64_t discovery_value = discovery->get<uint64_t>();
+        uint64_t gameplay_value = gameplay->get<uint64_t>();
+        if (!discovery_value || discovery_value > 65535 || !gameplay_value ||
+            gameplay_value > 65535)
+          continue;
+        parsed.type = type->get<std::string>();
+        parsed.address = address->get<std::string>();
+        parsed.discovery_port = uint16_t(discovery_value);
+        parsed.gameplay_port = uint16_t(gameplay_value);
+        if ((parsed.type == "direct" || parsed.type == "tailscale" ||
+             parsed.type == "public") &&
+            !parsed.address.empty() && IsIpv4(parsed.address))
+          session.connectivity_candidates.push_back(std::move(parsed));
+      }
+    }
+    return session.connectivity_candidates.empty()
+               ? std::nullopt
+               : std::optional<DirectorySession>(std::move(session));
+  } catch (const nlohmann::json::exception&) {
+    return std::nullopt;
+  }
 }
 
 std::optional<DirectoryTraversalAttempt> ParseTraversalAttempt(const nlohmann::json& document,
@@ -245,6 +338,19 @@ nlohmann::json RegistrationPayload(const SessionRecord& session, uint32_t title_
 }
 }  // namespace
 
+std::optional<std::string> NormalizeDirectoryInviteCode(std::string_view value) {
+  return NormalizeInviteCode(value);
+}
+
+std::optional<DirectorySession> ParseInviteCodeSessionResponse(std::string_view body,
+                                                               uint32_t title_id,
+                                                               std::string_view build_id) {
+  auto document = nlohmann::json::parse(body, nullptr, false);
+  if (!document.is_object() || !document.contains("session"))
+    return std::nullopt;
+  return ParseDirectorySession(document["session"], title_id, build_id);
+}
+
 REXCVAR_DEFINE_STRING(session_directory_url, "", "Network",
                       "HTTPS Harmony session-directory URL (empty disables directory access)")
     .validator(IsSafeDirectoryUrl)
@@ -269,6 +375,10 @@ REXCVAR_DEFINE_STRING(session_directory_candidate_type, "tailscale", "Network",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_UINT32(session_directory_session_index, kNoSessionIndex, "Network",
                       "Directory result index to resolve through Direct Connect")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(session_directory_invite_code, "", "Network",
+                      "Resolve one directory lobby by its six-character invite code")
+    .validator(IsInviteCodeSetting)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 DirectoryHeartbeatDisposition ClassifyDirectoryHeartbeatResponse(std::optional<uint32_t> status,
@@ -349,79 +459,24 @@ class SessionDirectoryClient::Impl {
       return result;
     }
     for (const auto& item : document["sessions"]) {
-      try {
-        if (!item.is_object())
-          continue;
-        auto session_id = item.find("session_id");
-        auto server_name = item.find("server_name");
-        auto title_id = item.find("title_id");
-        auto protocol = item.find("protocol_version");
-        auto item_build = item.find("build_id");
-        auto player_count = item.find("player_count");
-        auto max_players = item.find("max_players");
-        if (session_id == item.end() || !session_id->is_string() ||
-            !IsUrlToken(session_id->get_ref<const std::string&>(), 64) ||
-            server_name == item.end() || !server_name->is_string() ||
-            !IsPrintableName(server_name->get_ref<const std::string&>()) ||
-            title_id == item.end() || !title_id->is_string() ||
-            title_id->get<std::string>() != TitleIdString(value_title_id) ||
-            protocol == item.end() || !protocol->is_number_unsigned() ||
-            protocol->get<uint64_t>() != kDirectoryProtocolVersion || item_build == item.end() ||
-            !item_build->is_string() || item_build->get<std::string>() != build_id ||
-            player_count == item.end() || !player_count->is_number_unsigned() ||
-            max_players == item.end() || !max_players->is_number_unsigned())
-          continue;
-        uint64_t players = player_count->get<uint64_t>();
-        uint64_t capacity = max_players->get<uint64_t>();
-        if (!capacity || capacity > 64 || players > capacity)
-          continue;
-        DirectorySession session;
-        session.session_id = session_id->get<std::string>();
-        session.server_name = server_name->get<std::string>().substr(0, 48);
-        session.player_count = uint32_t(players);
-        session.max_players = uint32_t(capacity);
-        session.title_id = value_title_id;
-        session.protocol_version = kDirectoryProtocolVersion;
-        session.build_id = build_id;
-        auto candidates = item.find("connectivity_candidates");
-        if (candidates != item.end() && candidates->is_array()) {
-          for (const auto& candidate : *candidates) {
-            if (!candidate.is_object())
-              continue;
-            DirectoryCandidate parsed;
-            auto type = candidate.find("type");
-            auto address = candidate.find("address");
-            auto discovery = candidate.find("discovery_port");
-            auto gameplay = candidate.find("gameplay_port");
-            if (type == candidate.end() || !type->is_string() || address == candidate.end() ||
-                !address->is_string() || discovery == candidate.end() ||
-                !discovery->is_number_unsigned() || gameplay == candidate.end() ||
-                !gameplay->is_number_unsigned())
-              continue;
-            uint64_t discovery_value = discovery->get<uint64_t>();
-            uint64_t gameplay_value = gameplay->get<uint64_t>();
-            if (!discovery_value || discovery_value > 65535 || !gameplay_value ||
-                gameplay_value > 65535)
-              continue;
-            parsed.type = type->get<std::string>();
-            parsed.address = address->get<std::string>();
-            parsed.discovery_port = uint16_t(discovery_value);
-            parsed.gameplay_port = uint16_t(gameplay_value);
-            if ((parsed.type == "direct" || parsed.type == "tailscale" ||
-                 parsed.type == "public") &&
-                !parsed.address.empty() && IsIpv4(parsed.address) && parsed.discovery_port &&
-                parsed.gameplay_port)
-              session.connectivity_candidates.push_back(std::move(parsed));
-          }
-        }
-        if (!session.connectivity_candidates.empty())
-          result.push_back(std::move(session));
-      } catch (const nlohmann::json::exception&) {
-        // Directory responses are untrusted. Ignore only the malformed record.
-      }
+      if (auto session = ParseDirectorySession(item, value_title_id, build_id))
+        result.push_back(std::move(*session));
     }
     REXSYS_INFO("Session directory: query returned {} compatible session(s)", result.size());
     return result;
+  }
+
+  std::optional<DirectorySession> ResolveInviteCode(std::string_view code,
+                                                    uint32_t value_title_id) const {
+    auto normalized = NormalizeInviteCode(code);
+    const auto& url = REXCVAR_GET(session_directory_url);
+    const auto& build_id = REXCVAR_GET(session_directory_build_id);
+    if (!normalized || url.empty() || build_id.empty())
+      return std::nullopt;
+    auto response = Request(url, L"GET", "/sessions/by-code/" + *normalized, "");
+    if (!response || response->status != 200)
+      return std::nullopt;
+    return ParseInviteCodeSessionResponse(response->body, value_title_id, build_id);
   }
 
   void RequestList(uint32_t value_title_id) const {
@@ -523,7 +578,9 @@ class SessionDirectoryClient::Impl {
           if (document.is_object()) {
             auto candidate_session_id = document.value("session_id", "");
             auto candidate_token = document.value("registration_token", "");
-            if (IsUrlToken(candidate_session_id, 64) && IsUrlToken(candidate_token, 128)) {
+            auto candidate_invite_code = document.value("invite_code", "");
+            if (IsUrlToken(candidate_session_id, 64) && IsUrlToken(candidate_token, 128) &&
+                NormalizeInviteCode(candidate_invite_code)) {
               bool changed = !session_id.empty() && candidate_session_id != session_id;
               session_id = std::move(candidate_session_id);
               token = std::move(candidate_token);
@@ -537,6 +594,7 @@ class SessionDirectoryClient::Impl {
               else
                 REXSYS_INFO("Session directory: registered '{}' as {}", hosted->host_name,
                             session_id);
+              REXSYS_INFO("Harmony invite code: {}", candidate_invite_code);
             }
           }
         }
@@ -659,6 +717,10 @@ void SessionDirectoryClient::RequestList(uint32_t title_id) const {
 std::optional<std::vector<DirectorySession>> SessionDirectoryClient::CachedList(
     uint32_t title_id) const {
   return impl_->CachedList(title_id);
+}
+std::optional<DirectorySession> SessionDirectoryClient::ResolveInviteCode(
+    std::string_view code, uint32_t title_id) const {
+  return impl_->ResolveInviteCode(code, title_id);
 }
 std::optional<DirectoryTraversalAttempt> SessionDirectoryClient::CreateJoinAttempt(
     const std::string& session_id) const {

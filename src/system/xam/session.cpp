@@ -699,6 +699,7 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
   bool directory_selected = false;
   bool directory_browse = false;
   std::vector<DirectoryTraversalAttempt> directory_attempts;
+  const auto& invite_code = REXCVAR_GET(session_directory_invite_code);
   const bool automatic_public_traversal =
       selected_address.empty() && !REXCVAR_GET(session_directory_url).empty() &&
       REXCVAR_GET(session_directory_candidate_type) == "public" &&
@@ -724,7 +725,7 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
       } else {
         REXSYS_WARN("Session directory: selected index {} is unavailable", index);
       }
-    } else {
+    } else if (REXCVAR_GET(session_directory_invite_code).empty()) {
       // Normal guest searches never wait on HTTPS. A completed cache entry is
       // converted into ordinary discovery probes below; a slow or unavailable
       // directory leaves LAN broadcast unaffected.
@@ -733,7 +734,15 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
     }
   }
   if (automatic_public_traversal) {
-    auto sessions = directory_.List(impl_->title_id);
+    std::vector<DirectorySession> sessions;
+    if (invite_code.empty()) {
+      sessions = directory_.List(impl_->title_id);
+    } else if (auto invited = directory_.ResolveInviteCode(invite_code, impl_->title_id)) {
+      REXSYS_INFO("Session directory: invite code resolved '{}'", invited->server_name);
+      sessions.push_back(std::move(*invited));
+    } else {
+      REXSYS_WARN("Session directory: invite code did not resolve to a compatible lobby");
+    }
     size_t issued = 0;
     for (const auto& session : sessions) {
       if (issued >= max_results || session.connectivity_candidates.empty() ||
@@ -746,8 +755,9 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
         directory_attempts.push_back(*attempt), ++issued;
     }
     directory_browse = false;
-    REXSYS_INFO("Session directory: Search generation={} obtained {} traversal attempt(s)",
-                search_attempt, issued);
+    REXSYS_INFO(
+        "Session directory: Search generation={} obtained {} traversal attempt(s) mode={}",
+        search_attempt, issued, invite_code.empty() ? "public-list" : "invite-code");
   }
   const bool direct = !selected_address.empty();
   const bool traversal = NatProbeEnabled();
