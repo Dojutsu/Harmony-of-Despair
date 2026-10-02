@@ -5,3 +5,8 @@ data/player_dll/
 
 # Local launcher configuration (may contain user-specific paths)
 harmonyrecomp-user.cfg
+
+# Packaged distributions and Python bytecode
+/dist/
+__pycache__/
+*.pyc
