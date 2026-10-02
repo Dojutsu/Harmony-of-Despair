@@ -90,3 +90,8 @@ catch_discover_tests(unit_tests
         LABELS "unit"
         TIMEOUT 60
 )
+
+add_executable(xgi_slot_array_test kernel/xgi_slot_array_test.cpp)
+target_link_libraries(xgi_slot_array_test PRIVATE rexruntime)
+set_target_properties(xgi_slot_array_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
+add_test(NAME xgi_slot_array COMMAND xgi_slot_array_test)

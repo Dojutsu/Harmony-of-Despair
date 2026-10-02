@@ -37,6 +37,32 @@ namespace {
 constexpr uint32_t kSessionCreateHost = 1;
 constexpr uint32_t kInvalidUserIndex = 0xFFFFFFFFu;
 
+// Validate the complete array before a join can mutate membership. Use widened
+// arithmetic and the heap's page-access check before translating guest memory.
+bool ReadableJoinArray(memory::Memory* memory, uint32_t address, uint32_t count,
+                       uint32_t width) {
+  const uint64_t size = uint64_t{count} * width;
+  if (!size || size > UINT32_MAX || uint64_t{address} + size > (uint64_t{1} << 32))
+    return false;
+  auto* heap = memory->LookupHeap(address);
+  if (!heap || heap->QueryRangeAccess(address, uint32_t(uint64_t{address} + size - 1)) ==
+                   memory::PageAccess::kNoAccess)
+    return false;
+  // Decommitted pages can retain protection metadata. Check commitment too,
+  // advancing by whole regions from a page-aligned address.
+  uint64_t cursor = address - (address - heap->heap_base()) % heap->page_size();
+  const uint64_t end = uint64_t{address} + size;
+  while (cursor < end) {
+    memory::HeapAllocationInfo info{};
+    if (!heap->QueryRegionInfo(uint32_t(cursor), &info) || !info.region_size ||
+        !(info.state & memory::kMemoryAllocationCommit))
+      return false;
+    cursor += info.region_size;
+  }
+  return true;
+}
+
+
 #pragma pack(push, 1)
 struct GuestSessionInfo {
   uint8_t session_id[8];
@@ -364,7 +390,9 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       return X_E_SUCCESS;
     }
     case 0x000B0012: {
-      assert_true(!buffer_length || buffer_length == 20);
+      if ((buffer_length && buffer_length != 20) ||
+          !ReadableJoinArray(memory_, buffer_ptr, 1, 20))
+        return X_E_INVALIDARG;
       uint32_t session_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
       uint32_t user_count = memory::load_and_swap<uint32_t>(buffer + 4);
       uint32_t xuid_array_ptr = memory::load_and_swap<uint32_t>(buffer + 8);
@@ -378,6 +406,12 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       auto* object = LookupSession(kernel_state_, session_ptr);
       if (!object || !object->record() || !user_count)
         return X_E_INVALIDARG;
+      if (user_count > UINT32_MAX / 4 ||
+          (private_slots_array && !ReadableJoinArray(memory_, private_slots_array, user_count, 4)) ||
+          (!is_local && !ReadableJoinArray(memory_, xuid_array_ptr, user_count, 8)) ||
+          (is_local && user_index_array &&
+           !ReadableJoinArray(memory_, user_index_array, user_count, 4)))
+        return X_E_INVALIDARG;
       auto session = object->record();
       for (uint32_t i = 0; i < user_count; ++i) {
         uint64_t xuid = is_local ? kernel_state_->user_profile()->xuid()
@@ -388,7 +422,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                                         memory_->TranslateVirtual(user_index_array + i * 4))
                                   : kInvalidUserIndex;
         bool private_slot =
-            private_slots_array && *memory_->TranslateVirtual(private_slots_array + i) != 0;
+            private_slots_array && memory::load_and_swap<uint32_t>(
+                                       memory_->TranslateVirtual(private_slots_array + 4 * i)) != 0;
         SessionMember member{
             xuid,         is_local ? kernel_state_->user_profile()->name() : std::string{},
             user_index,   is_local,
