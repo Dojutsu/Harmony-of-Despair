@@ -246,6 +246,7 @@ bool TryCompleteRecvFrom(PendingRecvFrom& pending, bool wait) {
     pending.complete = true;
     return true;
   }
+
   if (wait && !socket->WaitReadable(0, true))
     return false;
 
@@ -640,6 +641,7 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
     XThread::SetLastError(0x2736);
     return -1;
   }
+
   if (!buffers || !num_buffers || !to_ptr) {
     XThread::SetLastError(0x2726);  // WSAEINVAL
     return -1;
@@ -1092,10 +1094,16 @@ u32 NetDll_closesocket_entry(u32 caller, u32 socket_handle) {
   std::lock_guard lock(pending_recv_mutex);
   auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
   if (!socket) {
+    REXKRNL_WARN("GAMEPLAY_SOCKET_CLOSE_REQUEST caller={:08X} guest_socket={} found=0",
+                 caller, socket_handle);
     // WSAENOTSOCK
     XThread::SetLastError(0x2736);
     return -1;
   }
+
+  REXKRNL_INFO(
+      "GAMEPLAY_SOCKET_CLOSE_REQUEST caller={:08X} guest_socket={} native={} found=1",
+      caller, socket_handle, socket->native_handle());
 
   // TODO: Absolutely delete this object. It is no longer valid after calling
   // closesocket.

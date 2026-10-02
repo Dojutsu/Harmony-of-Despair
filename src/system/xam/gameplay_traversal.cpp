@@ -120,60 +120,122 @@ bool IsGameplayLogicalAddress(uint32_t ipv4) {
 }
 
 void RegisterGameplaySocketCandidate(uint64_t local_xuid, uint64_t socket, uint16_t guest_port) {
-  if (!local_xuid || !guest_port) return;
+  if (!local_xuid) {
+    REXSYS_WARN("GAMEPLAY_SOCKET_CANDIDATE_REJECT reason=missing_xuid socket={} port={}",
+                socket, guest_port);
+    return;
+  }
+  if (!guest_port) {
+    REXSYS_WARN("GAMEPLAY_SOCKET_CANDIDATE_REJECT reason=missing_port socket={} xuid={:016X}",
+                socket, local_xuid);
+    return;
+  }
   std::lock_guard lock(gameplay_mutex);
   if (std::none_of(socket_candidates.begin(), socket_candidates.end(),
-                  [&](const auto& candidate) { return candidate.socket == socket; }))
+                  [&](const auto& candidate) { return candidate.socket == socket; })) {
     socket_candidates.push_back({local_xuid, socket, guest_port});
+    REXSYS_INFO("GAMEPLAY_SOCKET_CANDIDATE_ADDED socket={} xuid={:016X} port={}",
+                socket, local_xuid, guest_port);
+  } else {
+    REXSYS_WARN("GAMEPLAY_SOCKET_CANDIDATE_DUPLICATE socket={} xuid={:016X} port={}",
+                socket, local_xuid, guest_port);
+  }
 }
 
 bool TrackGameplayAdmission(const std::shared_ptr<SessionRecord>& session, uint64_t xuid) {
+  REXSYS_INFO("GAMEPLAY_ADMISSION_TRACK_BEGIN session_present={} xuid={:016X}",
+              session != nullptr, xuid);
+  if (!session) {
+    REXSYS_WARN("GAMEPLAY_ADMISSION_TRACK_REJECT reason=missing_session xuid={:016X}", xuid);
+    return false;
+  }
+  if (!xuid) {
+    REXSYS_WARN("GAMEPLAY_ADMISSION_TRACK_REJECT reason=missing_xuid");
+    return false;
+  }
   Scope candidate;
   candidate.session = session;
   candidate.xuid = xuid;
   std::lock_guard lock(gameplay_mutex);
   Reap();
-  if (!MemberCurrent(candidate)) return false;
+  if (!MemberCurrent(candidate)) {
+    REXSYS_WARN("GAMEPLAY_ADMISSION_TRACK_REJECT reason=member_not_current xuid={:016X}", xuid);
+    return false;
+  }
   auto found = std::find_if(scopes.begin(), scopes.end(), [&](const auto& scope) {
     return scope.session.lock() == session && scope.xuid == xuid;
   });
-  if (found != scopes.end()) return !found->closed;
+  if (found != scopes.end()) {
+    const bool accepted = !found->closed;
+    REXSYS_INFO("GAMEPLAY_ADMISSION_TRACK_RESULT success={} reason={} xuid={:016X}",
+                accepted, accepted ? "already_tracked" : "scope_closed", xuid);
+    return accepted;
+  }
   scopes.push_back(std::move(candidate));
+  REXSYS_INFO("GAMEPLAY_ADMISSION_TRACK_RESULT success=1 reason=created xuid={:016X}", xuid);
   return true;
 }
 
 bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
                                    const GameplayAuthorization& authorization) {
-  if (!session || !authorization.xuid || !authorization.host_xuid ||
-      authorization.directory_session.empty() || authorization.member_nonce.size() != 32 ||
-      authorization.member_capability.size() != 32 ||
-      !IsGameplayLogicalAddress(authorization.logical.ipv4) ||
-      authorization.expires_at <= Clock::now() || authorization.peers.size() > 5) return false;
+  auto reject = [&](const char* reason) {
+    REXSYS_WARN(
+        "GAMEPLAY_AUTH_INSTALL_REJECT reason={} session={} xuid={:016X} host={:016X} "
+        "admission={} attempt={} peers={}",
+        reason, authorization.directory_session, authorization.xuid,
+        authorization.host_xuid, authorization.admission_generation,
+        authorization.admission_attempt, authorization.peers.size());
+    return false;
+  };
+  if (!session) return reject("missing_session");
+  if (!authorization.xuid) return reject("missing_xuid");
+  if (!authorization.host_xuid) return reject("missing_host_xuid");
+  if (authorization.directory_session.empty()) return reject("missing_directory_session");
+  if (authorization.member_nonce.size() != 32) return reject("invalid_member_nonce");
+  if (authorization.member_capability.size() != 32)
+    return reject("invalid_member_capability");
+  if (!IsGameplayLogicalAddress(authorization.logical.ipv4))
+    return reject("invalid_logical_address");
+  if (authorization.expires_at <= Clock::now()) return reject("authorization_expired");
+  if (authorization.peers.size() > 5) return reject("too_many_peers");
   std::unordered_set<uint64_t> peers{authorization.xuid};
   std::unordered_set<uint32_t> addresses{authorization.logical.ipv4};
   std::unordered_set<std::string> links;
-  for (const auto& peer : authorization.peers)
-    if (!peer.xuid || !peers.insert(peer.xuid).second ||
-        !addresses.insert(peer.logical.ipv4).second || !IsGameplayLogicalAddress(peer.logical.ipv4) ||
-        peer.member_nonce.size() != 32 || peer.traversal.attempt_id.size() != 32 ||
-        peer.traversal.capability.size() != 32 || peer.traversal.participant > 1 ||
-        !links.insert(peer.traversal.attempt_id).second) return false;
+  for (const auto& peer : authorization.peers) {
+    if (!peer.xuid) return reject("peer_missing_xuid");
+    if (!peers.insert(peer.xuid).second) return reject("duplicate_peer_xuid");
+    if (!addresses.insert(peer.logical.ipv4).second) return reject("duplicate_logical_address");
+    if (!IsGameplayLogicalAddress(peer.logical.ipv4)) return reject("invalid_peer_logical_address");
+    if (peer.member_nonce.size() != 32) return reject("invalid_peer_nonce");
+    if (peer.traversal.attempt_id.size() != 32) return reject("invalid_peer_attempt");
+    if (peer.traversal.capability.size() != 32) return reject("invalid_peer_capability");
+    if (peer.traversal.participant > 1) return reject("invalid_peer_participant");
+    if (!links.insert(peer.traversal.attempt_id).second) return reject("duplicate_peer_attempt");
+  }
   Scope candidate;
   candidate.session = session;
   candidate.xuid = authorization.xuid;
   candidate.authorization = authorization;
   std::lock_guard lock(gameplay_mutex);
   Reap();
-  if (!MemberCurrent(candidate)) return false;
+  if (!MemberCurrent(candidate)) return reject("member_not_current");
   auto found = std::find_if(scopes.begin(), scopes.end(), [&](const auto& s) {
     return s.session.lock() == session && s.xuid == authorization.xuid;
   });
   if (found != scopes.end()) {
-    if (found->closed || (!found->authorization.member_nonce.empty() &&
-        (found->authorization.member_nonce != authorization.member_nonce ||
-         found->authorization.directory_session != authorization.directory_session ||
-         found->authorization.admission_attempt != authorization.admission_attempt ||
-         found->authorization.admission_generation != authorization.admission_generation))) return false;
+    if (found->closed) return reject("scope_closed");
+    if (!found->authorization.member_nonce.empty() &&
+        found->authorization.member_nonce != authorization.member_nonce)
+      return reject("member_nonce_changed");
+    if (!found->authorization.member_nonce.empty() &&
+        found->authorization.directory_session != authorization.directory_session)
+      return reject("directory_session_changed");
+    if (!found->authorization.member_nonce.empty() &&
+        found->authorization.admission_attempt != authorization.admission_attempt)
+      return reject("admission_attempt_changed");
+    if (!found->authorization.member_nonce.empty() &&
+        found->authorization.admission_generation != authorization.admission_generation)
+      return reject("admission_generation_changed");
     candidate.socket = found->socket;
     candidate.guest_port = found->guest_port;
     // Preserve existing acknowledged link state; retire only omitted links.
@@ -190,18 +252,32 @@ bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
                 authorization.admission_generation, authorization.peers.size());
   }
   ClaimSocketCandidate(*found);
-  return InstallRoutes(*found);
+  const bool installed = InstallRoutes(*found);
+  REXSYS_INFO(
+      "GAMEPLAY_AUTH_INSTALL_RESULT success={} session={} xuid={:016X} admission={} "
+      "attempt={} socket={} port={}",
+      installed, authorization.directory_session, authorization.xuid,
+      authorization.admission_generation, authorization.admission_attempt,
+      found->socket.value_or(0), found->guest_port);
+  return installed;
 }
 
 bool BindGameplaySocket(const std::shared_ptr<SessionRecord>& session, uint64_t local_xuid,
                         uint64_t socket, uint16_t guest_port) {
-  if (!session || !local_xuid || !guest_port) return false;
+  auto reject = [&](const char* reason) {
+    REXSYS_WARN("GAMEPLAY_SOCKET_BIND_REJECT reason={} socket={} xuid={:016X} port={}",
+                reason, socket, local_xuid, guest_port);
+    return false;
+  };
+  if (!session) return reject("missing_session");
+  if (!local_xuid) return reject("missing_xuid");
+  if (!guest_port) return reject("missing_port");
   std::lock_guard lock(gameplay_mutex);
   Reap();
   // One socket may serve exactly one session/local-member incarnation.
   for (const auto& scope : scopes)
     if (scope.socket == socket && (scope.session.lock() != session || scope.xuid != local_xuid))
-      return false;
+      return reject("socket_owned_by_other_scope");
   auto found = std::find_if(scopes.begin(), scopes.end(), [&](const auto& s) {
     return s.session.lock() == session && s.xuid == local_xuid;
   });
@@ -209,11 +285,12 @@ bool BindGameplaySocket(const std::shared_ptr<SessionRecord>& session, uint64_t 
     Scope candidate;
     candidate.session = session;
     candidate.xuid = local_xuid;
-    if (!MemberCurrent(candidate)) return false;  // Only a host may prebind before tickets exist.
+    if (!MemberCurrent(candidate)) return reject("member_not_current_for_new_scope");
     scopes.push_back(std::move(candidate));
     found = std::prev(scopes.end());
   }
-  if (!MemberCurrent(*found) || (found->socket && found->socket != socket)) return false;
+  if (!MemberCurrent(*found)) return reject("member_not_current");
+  if (found->socket && found->socket != socket) return reject("scope_has_other_socket");
   for (auto& candidate : socket_candidates)
     if (candidate.socket == socket) candidate.owned = true;
   found->socket = socket;
@@ -221,18 +298,32 @@ bool BindGameplaySocket(const std::shared_ptr<SessionRecord>& session, uint64_t 
   REXSYS_INFO("GAMEPLAY_SOCKET_BOUND socket={} xuid={:016X} session={} admission={}",
               socket, local_xuid, found->authorization.directory_session,
               found->authorization.admission_generation);
-  return InstallRoutes(*found);
+  const bool installed = InstallRoutes(*found);
+  REXSYS_INFO("GAMEPLAY_SOCKET_BIND_RESULT success={} socket={} xuid={:016X} port={}",
+              installed, socket, local_xuid, guest_port);
+  return installed;
 }
 
 void CloseGameplaySocket(uint64_t socket) {
   std::lock_guard lock(gameplay_mutex);
+  bool associated = false;
   std::erase_if(socket_candidates, [&](const auto& candidate) { return candidate.socket == socket; });
   for (auto& scope : scopes)
     if (scope.socket == socket) {
+      associated = true;
+      REXSYS_INFO(
+          "GAMEPLAY_SOCKET_CLOSE_ASSOCIATION socket={} xuid={:016X} session={} admission={} "
+          "attempt={} authorized={}",
+          socket, scope.xuid, scope.authorization.directory_session,
+          scope.authorization.admission_generation,
+          scope.authorization.admission_attempt,
+          !scope.authorization.member_nonce.empty());
       RemoveRoutes(scope);
       scope.closed = true;  // A recycled native handle cannot inherit this ticket.
       scope.socket.reset();
     }
+  if (!associated)
+    REXSYS_INFO("GAMEPLAY_SOCKET_CLOSE_ASSOCIATION socket={} associated=0", socket);
 }
 
 void RevokeGameplayAuthorization(const std::shared_ptr<SessionRecord>& session, uint64_t local_xuid) {

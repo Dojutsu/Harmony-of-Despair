@@ -1761,10 +1761,20 @@ class SessionDirectoryClient::Impl {
   void QueueGameplayAdmission(const std::shared_ptr<SessionRecord>& session,
       uint32_t user_index, uint64_t xuid, const DirectoryTraversalAttempt& attempt,
       const std::string& generation) {
-    if (REXCVAR_GET(session_directory_url).empty() || !session || !xuid ||
-        !IsUrlToken(attempt.session_id, 64) || !GameplayHexValid(attempt.attempt_id, 32) ||
-        !GameplayHexValid(attempt.capability, 32) || !GameplayHexValid(generation, 32)) return;
-    if (!TrackGameplayAdmission(session, xuid)) return;
+    auto reject = [&](const char* reason) {
+      REXSYS_WARN(
+          "GAMEPLAY_ADMISSION_QUEUE_REJECT reason={} user={} xuid={:016X} session={} "
+          "attempt={} admission={}",
+          reason, user_index, xuid, attempt.session_id, attempt.attempt_id, generation);
+    };
+    if (REXCVAR_GET(session_directory_url).empty()) return reject("directory_disabled");
+    if (!session) return reject("missing_session");
+    if (!xuid) return reject("missing_xuid");
+    if (!IsUrlToken(attempt.session_id, 64)) return reject("invalid_directory_session");
+    if (!GameplayHexValid(attempt.attempt_id, 32)) return reject("invalid_attempt_id");
+    if (!GameplayHexValid(attempt.capability, 32)) return reject("invalid_attempt_capability");
+    if (!GameplayHexValid(generation, 32)) return reject("invalid_admission_generation");
+    if (!TrackGameplayAdmission(session, xuid)) return reject("track_gameplay_admission_failed");
     auto context = std::make_shared<GameplayClientContext>();
     context->session = session;
     context->user_index = user_index;
@@ -1779,6 +1789,9 @@ class SessionDirectoryClient::Impl {
         if (old->user_index == user_index) old->cancelled = true;
       gameplay_clients.push_back(std::move(context));
     }
+    REXSYS_INFO(
+        "GAMEPLAY_ADMISSION_QUEUED user={} xuid={:016X} session={} attempt={} admission={}",
+        user_index, xuid, attempt.session_id, attempt.attempt_id, generation);
     client_admission_wake.notify_all();
   }
 
@@ -1786,7 +1799,10 @@ class SessionDirectoryClient::Impl {
     nlohmann::json payload;
     {
       std::lock_guard lock(*hosted->mutex);
-      if (hosted->state == SessionState::kDeleted) return false;
+      if (hosted->state == SessionState::kDeleted) {
+        REXSYS_WARN("GAMEPLAY_HOST_SYNC_REJECT reason=session_deleted session={}", id);
+        return false;
+      }
       payload = {{"xbox_session", GameplayHex(hosted->info.id)},
                  {"host_xuid", GameplayXuid(hosted->host_xuid)},
                  {"members", nlohmann::json::array()}};
@@ -1801,10 +1817,25 @@ class SessionDirectoryClient::Impl {
     const auto started = std::chrono::steady_clock::now();
     auto response = Request(REXCVAR_GET(session_directory_url), L"POST",
         "/sessions/" + id + "/gameplay/sync", payload.dump(), token);
-    if (!response || response->status != 200) return false;
+    REXSYS_INFO("GAMEPLAY_HOST_SYNC_RESPONSE session={} members={} transport={} status={}",
+                id, payload["members"].size(), response.has_value(),
+                response ? response->status : 0);
+    if (!response) return false;
+    if (response->status != 200) return false;
     auto authorization = ParseGameplayAuthorization(response->body, started);
-    return authorization && authorization->directory_session == id &&
-        InstallGameplayAuthorization(hosted, *authorization);
+    if (!authorization) {
+      REXSYS_WARN("GAMEPLAY_HOST_SYNC_REJECT reason=invalid_authorization session={}", id);
+      return false;
+    }
+    if (authorization->directory_session != id) {
+      REXSYS_WARN("GAMEPLAY_HOST_SYNC_REJECT reason=session_mismatch session={} returned={}",
+                  id, authorization->directory_session);
+      return false;
+    }
+    const bool installed = InstallGameplayAuthorization(hosted, *authorization);
+    REXSYS_INFO("GAMEPLAY_HOST_SYNC_INSTALL session={} xuid={:016X} success={}",
+                id, authorization->xuid, installed);
+    return installed;
   }
 
   void PollGameplayClients() {
@@ -1813,22 +1844,43 @@ class SessionDirectoryClient::Impl {
     for (const auto& context : snapshot) {
       auto session = context->session.lock();
       bool current = session && !context->cancelled;
-      if (current && client_admission_user_identity)
-        current = client_admission_user_identity(context->user_index) == context->xuid;
+      const char* invalid_reason = current ? nullptr :
+          (context->cancelled ? "cancelled" : "session_expired");
+      if (current && client_admission_user_identity &&
+          client_admission_user_identity(context->user_index) != context->xuid) {
+        current = false;
+        invalid_reason = "user_identity_mismatch";
+      }
       if (current) {
         std::lock_guard lock(*session->mutex);
-        current = session->state != SessionState::kDeleted && session->info.id == context->xbox &&
-            std::any_of(session->members.begin(), session->members.end(), [&](const auto& member) {
-              const auto& binding = member.gameplay_admission;
-              return member.local && member.xuid == context->xuid && binding &&
-                  binding->directory_session_id == context->attempt.session_id &&
-                  binding->attempt_id == context->attempt.attempt_id && binding->admission_generation == context->generation;
-            });
+        if (session->state == SessionState::kDeleted) {
+          current = false;
+          invalid_reason = "session_deleted";
+        } else if (session->info.id != context->xbox) {
+          current = false;
+          invalid_reason = "xbox_session_mismatch";
+        } else if (!std::any_of(session->members.begin(), session->members.end(),
+                       [&](const auto& member) {
+                         const auto& binding = member.gameplay_admission;
+                         return member.local && member.xuid == context->xuid && binding &&
+                             binding->directory_session_id == context->attempt.session_id &&
+                             binding->attempt_id == context->attempt.attempt_id &&
+                             binding->admission_generation == context->generation;
+                       })) {
+          current = false;
+          invalid_reason = "local_member_binding_mismatch";
+        }
       }
       const auto now = std::chrono::steady_clock::now();
-      if (context->authorization)
-        current = current && GameplayAuthorizationCurrent(session, context->xuid, context->authorization->member_nonce);
-      else current = current && now < context->claim_deadline;
+      if (context->authorization && current &&
+          !GameplayAuthorizationCurrent(session, context->xuid,
+                                        context->authorization->member_nonce)) {
+        current = false;
+        invalid_reason = "authorization_no_longer_current";
+      } else if (!context->authorization && current && now >= context->claim_deadline) {
+        current = false;
+        invalid_reason = "claim_deadline_expired";
+      }
       if (current && now < context->next_poll) continue;
       nlohmann::json body{{"xbox_session", GameplayHex(context->xbox)},
           {"xuid", GameplayXuid(context->xuid)}, {"attempt_id", context->attempt.attempt_id},
@@ -1840,21 +1892,56 @@ class SessionDirectoryClient::Impl {
         capability = context->authorization->member_capability;
       }
       if (current || context->authorization) {
+        REXSYS_INFO(
+            "GAMEPLAY_CLAIM_REQUEST action={} user={} xuid={:016X} session={} attempt={} "
+            "admission={} current={} authorized={}",
+            action, context->user_index, context->xuid, context->attempt.session_id,
+            context->attempt.attempt_id, context->generation, current,
+            context->authorization.has_value());
         auto response = Request(REXCVAR_GET(session_directory_url), L"POST",
             "/sessions/" + context->attempt.session_id + "/gameplay/" + action, body.dump(), capability);
+        REXSYS_INFO("GAMEPLAY_CLAIM_RESPONSE action={} session={} transport={} status={}",
+                    action, context->attempt.session_id, response.has_value(),
+                    response ? response->status : 0);
         if (current && response && response->status == 200 && !context->cancelled) {
           auto authorization = ParseGameplayAuthorization(response->body, now);
-          if (authorization && authorization->directory_session == context->attempt.session_id &&
-              authorization->xuid == context->xuid && authorization->admission_attempt == context->attempt.attempt_id &&
-              authorization->admission_generation == context->generation &&
-              InstallGameplayAuthorization(session, *authorization)) {
+          if (!authorization) {
+            current = false;
+            invalid_reason = "claim_authorization_parse_failed";
+          } else if (authorization->directory_session != context->attempt.session_id) {
+            current = false;
+            invalid_reason = "claim_session_mismatch";
+          } else if (authorization->xuid != context->xuid) {
+            current = false;
+            invalid_reason = "claim_xuid_mismatch";
+          } else if (authorization->admission_attempt != context->attempt.attempt_id) {
+            current = false;
+            invalid_reason = "claim_attempt_mismatch";
+          } else if (authorization->admission_generation != context->generation) {
+            current = false;
+            invalid_reason = "claim_generation_mismatch";
+          } else if (!InstallGameplayAuthorization(session, *authorization)) {
+            current = false;
+            invalid_reason = "claim_install_failed";
+          } else {
             context->authorization = std::move(authorization);
-          } else current = false;
+            REXSYS_INFO("GAMEPLAY_CLAIM_INSTALLED session={} xuid={:016X} admission={}",
+                        context->attempt.session_id, context->xuid, context->generation);
+          }
         } else if (current && context->authorization && response &&
-            (response->status == 401 || response->status == 403 || response->status == 404)) current = false;
+            (response->status == 401 || response->status == 403 || response->status == 404)) {
+          current = false;
+          invalid_reason = "authorization_rejected_by_directory";
+        }
       }
       context->next_poll = now + std::chrono::milliseconds(context->authorization ? 1000 : 100);
       if (!current) {
+        REXSYS_WARN(
+            "GAMEPLAY_CLIENT_CONTEXT_REMOVED reason={} user={} xuid={:016X} session={} "
+            "attempt={} admission={}",
+            invalid_reason ? invalid_reason : "request_not_current", context->user_index,
+            context->xuid, context->attempt.session_id, context->attempt.attempt_id,
+            context->generation);
         if (session) RevokeGameplayAuthorization(session, context->xuid);
         std::lock_guard lock(gameplay_clients_mutex);
         std::erase(gameplay_clients, context);

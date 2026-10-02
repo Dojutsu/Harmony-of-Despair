@@ -484,8 +484,15 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
           std::move(*updated));
       session = kernel_state_->session_manager()->registry().Find(session->info.id);
       object->set_record(session);
-      kernel_state_->session_manager()->CompleteAcceptedInviteJoin(
-          user_index, xuid, session);
+      REXKRNL_INFO(
+          "GAMEPLAY_XGI_COMPLETION_CALL user={} local_xuid={:016X} host_xuid={:016X} "
+          "session_present={}",
+          user_index, xuid, session ? session->host_xuid : 0, session != nullptr);
+      const bool gameplay_completion =
+          kernel_state_->session_manager()->CompleteAcceptedInviteJoin(
+              user_index, xuid, session);
+      REXKRNL_INFO("GAMEPLAY_XGI_COMPLETION_RESULT success={} user={} local_xuid={:016X}",
+                   gameplay_completion, user_index, xuid);
       REXKRNL_INFO("XGISessionJoinLocal: joined session with {} members",
                    session ? session->members.size() : 0);
       REXKRNL_INFO("INVITE_DIAG XGI_JOIN_RESULT=SUCCESS private_request={} members={}",

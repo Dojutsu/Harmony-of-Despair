@@ -2349,21 +2349,57 @@ bool SessionManager::CompleteAcceptedInviteJoin(
     const std::shared_ptr<SessionRecord>& session) {
   std::lock_guard lock(configured_invite_mutex_);
   auto operation = configured_invite_operation_;
-  if (!operation || configured_invite_state_ !=
-                        ConfiguredInviteLifecycleState::kPublished ||
-      !ready_configured_invite_ || !session ||
-      local_user_index != operation->identity.local_user_index ||
-      local_xuid != operation->identity.local_xuid ||
-      registry_.Find(session->info.id) != session ||
-      !SessionMatchesReady(*session, *ready_configured_invite_))
+  size_t member_count = 0;
+  uint64_t host_xuid = 0;
+  if (session) {
+    std::lock_guard session_lock(*session->mutex);
+    member_count = session->members.size();
+    host_xuid = session->host_xuid;
+  }
+  REXSYS_INFO(
+      "GAMEPLAY_JOIN_COMPLETE_BEGIN local_user={} local_xuid={:016X} "
+      "host_xuid={:016X} state={} members={} session_present={} invite_present={} "
+      "session={} admission={} attempt={}",
+      local_user_index, local_xuid, host_xuid,
+      static_cast<uint32_t>(configured_invite_state_), member_count,
+      session != nullptr, ready_configured_invite_.has_value(),
+      ready_configured_invite_ ? ready_configured_invite_->directory_session_id : "",
+      ready_configured_invite_ ? ready_configured_invite_->admission_generation : "",
+      ready_configured_invite_ ? ready_configured_invite_->directory_attempt_id : "");
+  auto reject = [&](const char* reason) {
+    REXSYS_WARN(
+        "GAMEPLAY_JOIN_COMPLETE_REJECT reason={} local_user={} local_xuid={:016X} "
+        "host_xuid={:016X} session={} admission={} attempt={}",
+        reason, local_user_index, local_xuid, host_xuid,
+        ready_configured_invite_ ? ready_configured_invite_->directory_session_id : "",
+        ready_configured_invite_ ? ready_configured_invite_->admission_generation : "",
+        ready_configured_invite_ ? ready_configured_invite_->directory_attempt_id : "");
+    REXSYS_INFO("GAMEPLAY_JOIN_COMPLETE_RESULT success=0 reason={} session={} admission={}",
+                reason,
+                ready_configured_invite_ ? ready_configured_invite_->directory_session_id : "",
+                ready_configured_invite_ ? ready_configured_invite_->admission_generation : "");
     return false;
+  };
+  if (!operation) return reject("missing_operation");
+  if (configured_invite_state_ != ConfiguredInviteLifecycleState::kPublished)
+    return reject("state_not_published");
+  if (!ready_configured_invite_) return reject("missing_accepted_invite");
+  if (!session) return reject("missing_session");
+  if (local_user_index != operation->identity.local_user_index)
+    return reject("local_user_index_mismatch");
+  if (local_xuid != operation->identity.local_xuid)
+    return reject("local_xuid_mismatch");
+  if (registry_.Find(session->info.id) != session)
+    return reject("registry_session_mismatch");
+  if (!SessionMatchesReady(*session, *ready_configured_invite_))
+    return reject("session_identifier_or_ready_mismatch");
   {
     std::lock_guard session_lock(*session->mutex);
     if (std::none_of(session->members.begin(), session->members.end(),
                      [local_xuid](const SessionMember& member) {
                        return member.xuid == local_xuid && member.local;
                      }))
-      return false;
+      return reject("missing_local_member");
   }
   if (operation->issued_attempt && !REXCVAR_GET(session_directory_url).empty()) {
     {
@@ -2377,11 +2413,20 @@ bool SessionManager::CompleteAcceptedInviteJoin(
     }
     discovery_.QueueGameplayAdmission(session, local_user_index, local_xuid,
         *operation->issued_attempt, ready_configured_invite_->admission_generation);
+  } else {
+    REXSYS_WARN("GAMEPLAY_JOIN_COMPLETE_NO_QUEUE reason={} session={} admission={}",
+                operation->issued_attempt ? "directory_disabled" : "missing_issued_attempt",
+                ready_configured_invite_->directory_session_id,
+                ready_configured_invite_->admission_generation);
   }
+  const auto completed_session = ready_configured_invite_->directory_session_id;
+  const auto completed_admission = ready_configured_invite_->admission_generation;
   accepted_invites_.Invalidate(AcceptedIdentity(*ready_configured_invite_));
   ready_configured_invite_.reset();
   configured_invite_state_ = ConfiguredInviteLifecycleState::kCompleted;
   operation->RequestStop();
+  REXSYS_INFO("GAMEPLAY_JOIN_COMPLETE_RESULT success=1 session={} admission={}",
+              completed_session, completed_admission);
   return true;
 }
 
