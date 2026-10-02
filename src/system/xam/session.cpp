@@ -763,7 +763,12 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
       CloseSocket(socket);
       return results;
     }
-  } else {
+  }
+  // Automatic public traversal still falls back to LAN broadcast while the
+  // rendezvous peer is pending. Windows rejects that send with WSAEACCES unless
+  // SO_BROADCAST is enabled, even though the socket is intentionally bound to
+  // the selected physical interface for public NAT traffic.
+  if (!direct) {
     int yes = 1;
     setsockopt(socket, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&yes), sizeof(yes));
   }

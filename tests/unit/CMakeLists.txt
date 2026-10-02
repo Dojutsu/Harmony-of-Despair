@@ -42,6 +42,9 @@ target_link_libraries(unit_tests PRIVATE
     xxHash::xxhash
     Catch2::Catch2WithMain
 )
+if(WIN32)
+    target_link_libraries(unit_tests PRIVATE ws2_32)
+endif()
 
 # ReXApp is shipped as source for recomp projects, rather than compiled into
 # rexui. Keep its SDK-consumer compilation path covered by the test build.

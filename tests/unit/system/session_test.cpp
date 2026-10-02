@@ -498,6 +498,31 @@ TEST_CASE("unreachable session directory preserves LAN discovery", "[session][ne
   CHECK(results[0].host_xuid == hosted->host_xuid);
 }
 
+TEST_CASE("pending NAT traversal preserves LAN broadcast discovery", "[session][network][nat]") {
+  constexpr uint32_t title_id = 0x58410A7A;
+  constexpr uint16_t discovery_port = 39045;
+  constexpr std::string_view attempt = "00112233445566778899aabbccddeeff";
+  struct AttemptRestore {
+    std::string_view attempt;
+    ~AttemptRestore() { NatProbeRetireIdentity(attempt); }
+  } restore{attempt};
+
+  SessionRegistry registry;
+  auto hosted = registry.Create(0x1001, "DesktopHost",
+                                {LanDiscoveryService::DetermineLanIpv4(), 30742}, 1, 6, 0);
+  LanDiscoveryService host(title_id, discovery_port);
+  REQUIRE(host.Advertise(hosted));
+  REQUIRE(NatProbeInstallIdentity({std::string(attempt),
+                                   "ffeeddccbbaa99887766554433221100",
+                                   "127.0.0.1", 39046, 1}));
+
+  LanDiscoveryService client(title_id, discovery_port);
+  auto results = client.Search(250, 4);
+  REQUIRE(results.size() == 1);
+  CHECK(results[0].info.id == hosted->info.id);
+  CHECK(results[0].host_xuid == hosted->host_xuid);
+}
+
 TEST_CASE("directory heartbeat failures preserve one logical host registration",
           "[session][network]") {
   using Disposition = DirectoryHeartbeatDisposition;
