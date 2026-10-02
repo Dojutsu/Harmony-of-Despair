@@ -23,6 +23,8 @@
 #include <rex/input/state_merge.h>
 #include <rex/input/xinput/xinput_input_driver.h>
 #include <rex/logging.h>
+#include <rex/platform.h>
+#include <rex/system/flags.h>
 
 REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput")
     .allowed({"sdl", "xinput"});
@@ -324,7 +326,13 @@ X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
 std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode) {
   auto input = std::make_unique<InputSystem>(nullptr);
 
-  if (!tool_mode) {
+#if REX_PLATFORM_GNU_LINUX
+  const bool headless = REXCVAR_GET(headless);
+#else
+  constexpr bool headless = false;
+#endif
+
+  if (!tool_mode && !headless) {
 #if REX_PLATFORM_WIN32
     if (REXCVAR_GET(input_backend) == "xinput") {
       auto xinput_driver = std::make_unique<xinput::XinputInputDriver>(nullptr, 0);
@@ -349,7 +357,10 @@ std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode) {
   }
 
   // NOP driver (primary in tool mode, fallback otherwise)
-  uint8_t nop_index = tool_mode ? 0 : 1;
+  uint8_t nop_index = tool_mode || headless ? 0 : 1;
+  if (headless) {
+    REXLOG_INFO("Headless input: physical devices disabled; using neutral controller state");
+  }
   input->AddDriver(std::make_unique<nop::NopInputDriver>(nullptr, nop_index));
   input->SetDeviceAssignment(std::make_unique<SlotAssignment>());
   return input;

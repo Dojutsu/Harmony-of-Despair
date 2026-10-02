@@ -21,6 +21,7 @@
 #include <rex/kernel/crt/heap.h>
 #include <rex/runtime.h>
 #include <rex/system/export_resolver.h>
+#include <rex/system/flags.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/user_module.h>
@@ -182,6 +183,9 @@ X_STATUS Runtime::Setup(RuntimeConfig config) {
   if (config.graphics) {
     graphics_system_ = std::move(config.graphics);
     bool with_presentation = (app_context_ != nullptr);
+#if REX_PLATFORM_GNU_LINUX
+    with_presentation = with_presentation && !REXCVAR_GET(headless);
+#endif
     X_STATUS gpu_status = graphics_system_->Setup(function_dispatcher_.get(), kernel_state_.get(),
                                                   app_context_, with_presentation);
     if (XFAILED(gpu_status)) {

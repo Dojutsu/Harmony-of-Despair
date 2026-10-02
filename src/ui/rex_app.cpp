@@ -32,9 +32,11 @@
 #include <rex/string/numeric.h>
 #include <rex/system.h>
 #include <rex/system/achievement_manager.h>
+#include <rex/system/flags.h>
 #include <rex/system/gpu_plugin.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xthread.h>
+#include <rex/platform.h>
 #include <rex/ui/graphics_provider.h>
 #include <rex/ui/keybinds.h>
 #include <rex/version.h>
@@ -325,6 +327,21 @@ bool ReXApp::SetupPresentation() {
     }
   }
 
+#if REX_PLATFORM_GNU_LINUX
+  if (REXCVAR_GET(headless)) {
+    if (config_.graphics) {
+      X_STATUS status = config_.graphics->SetupPresentation(nullptr);
+      if (XFAILED(status)) {
+        REXLOG_ERROR("Headless offscreen GPU presenter setup failed: {:08X}", status);
+        return false;
+      }
+    }
+    REXLOG_INFO(
+        "Headless mode: using an offscreen GPU presenter; skipping window and UI overlays");
+    return true;
+  }
+#endif
+
   if (config_.graphics) {
     X_STATUS status = config_.graphics->SetupPresentation(&app_context());
     if (XFAILED(status)) {
@@ -556,6 +573,16 @@ void ReXApp::OnRestored(ui::UIEvent& e) {
 void ReXApp::OnDestroy() {
   // Notify subclass before cleanup
   OnShutdown();
+
+#if REX_PLATFORM_GNU_LINUX
+  // The headless SDL loop can be stopped by SIGINT/SIGTERM without a window
+  // close callback. Ask the guest title to stop before joining its launch
+  // thread, matching the termination request made by the window close path.
+  if (REXCVAR_GET(headless) && runtime_ && runtime_->kernel_state()) {
+    REXLOG_INFO("Headless shutdown: requesting title termination");
+    runtime_->kernel_state()->TerminateTitle();
+  }
+#endif
 
   // Unregister overlay keybinds before destroying dialogs
   rex::ui::UnregisterBind("bind_debug_overlay");

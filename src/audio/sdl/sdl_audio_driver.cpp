@@ -22,6 +22,8 @@
 #include <rex/dbg.h>
 #include <rex/logging.h>
 #include <rex/perf/counter.h>
+#include <rex/platform.h>
+#include <rex/system/flags.h>
 #include <SDL3/SDL.h>
 
 REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
@@ -48,6 +50,13 @@ bool SDLAudioDriver::Initialize() {
     return false;
   }
   sdl_initialized_ = true;
+
+#if REX_PLATFORM_GNU_LINUX
+  if (REXCVAR_GET(headless)) {
+    const char* audio_driver = SDL_GetCurrentAudioDriver();
+    REXAPU_INFO("Headless SDL audio backend: {}", audio_driver ? audio_driver : "unknown");
+  }
+#endif
 
   SDL_AudioSpec desired_spec = {};
   SDL_AudioSpec obtained_spec = {};

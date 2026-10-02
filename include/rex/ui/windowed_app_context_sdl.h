@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cstdint>
+#include <rex/platform.h>
 #include <unordered_map>
 
 #include <SDL3/SDL_events.h>
@@ -59,6 +60,14 @@ class SDLWindowedAppContext final : public WindowedAppContext {
   uint32_t paint_event_type_ = 0;
   uint32_t synchronously_handled_quit_events_ = 0;
   bool event_watch_registered_ = false;
+  uint32_t initialized_subsystems_ = 0;
+  bool headless_ = false;
+#if REX_PLATFORM_GNU_LINUX
+  using SignalHandler = void (*)(int);
+  SignalHandler previous_sigint_handler_ = nullptr;
+  SignalHandler previous_sigterm_handler_ = nullptr;
+  bool signal_handlers_installed_ = false;
+#endif
 };
 
 }  // namespace rex::ui

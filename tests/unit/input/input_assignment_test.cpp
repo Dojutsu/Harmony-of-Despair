@@ -5,8 +5,10 @@
 #include <memory>
 #include <vector>
 
+#include <rex/cvar.h>
 #include <rex/input/device_assignment.h>
 #include <rex/input/input_system.h>
+#include <rex/platform.h>
 
 // The X_STATUS_* / X_ERROR_* macros cast through these unqualified, so
 // FakeDriver cannot match the base class signatures without them.
@@ -236,3 +238,29 @@ TEST_CASE("A synthetic device does not push the first pad off guest user 0", "[i
   REQUIRE(static_cast<uint16_t>(state.gamepad.buttons) == X_INPUT_GAMEPAD_B);
   REQUIRE(system->GetState(1, &state) == X_ERROR_DEVICE_NOT_CONNECTED);
 }
+
+#if REX_PLATFORM_GNU_LINUX
+TEST_CASE("headless input is neutral and does not poll physical controllers", "[input][headless]") {
+  REQUIRE(rex::cvar::SetFlagByName("headless", "true"));
+  struct ResetHeadlessFlag {
+    ~ResetHeadlessFlag() { rex::cvar::SetFlagByName("headless", "false"); }
+  } reset_headless_flag;
+  auto system = rex::input::CreateDefaultInputSystem(false);
+  REQUIRE(system);
+  REQUIRE(system->Setup() == X_STATUS_SUCCESS);
+
+  X_INPUT_STATE state = {};
+  REQUIRE(system->GetState(0, &state) == X_ERROR_SUCCESS);
+  CHECK(state.gamepad.buttons == 0);
+  CHECK(state.gamepad.left_trigger == 0);
+  CHECK(state.gamepad.right_trigger == 0);
+  CHECK(state.gamepad.thumb_lx == 0);
+  CHECK(state.gamepad.thumb_ly == 0);
+  CHECK(state.gamepad.thumb_rx == 0);
+  CHECK(state.gamepad.thumb_ry == 0);
+
+  X_INPUT_KEYSTROKE keystroke = {};
+  CHECK(system->GetKeystroke(0, 0, &keystroke) == X_ERROR_EMPTY);
+  system->Shutdown();
+}
+#endif

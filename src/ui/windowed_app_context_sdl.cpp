@@ -12,6 +12,7 @@
 #include <rex/ui/windowed_app_context_sdl.h>
 
 #include <cstdlib>
+#include <csignal>
 #include <string>
 #include <vector>
 
@@ -20,10 +21,21 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
+#include <rex/system/flags.h>
 #include <rex/ui/flags.h>
 #include <rex/ui/window_sdl.h>
 
 namespace rex::ui {
+
+#if REX_PLATFORM_GNU_LINUX
+namespace {
+volatile std::sig_atomic_t headless_termination_requested = 0;
+
+void HandleHeadlessTerminationSignal(int) {
+  headless_termination_requested = 1;
+}
+}  // namespace
+#endif
 
 SDLWindowedAppContext::~SDLWindowedAppContext() {
   if (event_watch_registered_) {
@@ -32,30 +44,63 @@ SDLWindowedAppContext::~SDLWindowedAppContext() {
   // Execute leftover pending functions before the loop machinery goes away,
   // mirroring the shutdown contract documented in WindowedAppContext.
   ExecutePendingFunctionsFromUIThread();
-  if (SDL_WasInit(SDL_INIT_VIDEO)) {
-    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+  if (initialized_subsystems_) {
+    SDL_QuitSubSystem(initialized_subsystems_);
   }
+#if REX_PLATFORM_GNU_LINUX
+  if (signal_handlers_installed_) {
+    std::signal(SIGINT, previous_sigint_handler_);
+    std::signal(SIGTERM, previous_sigterm_handler_);
+  }
+#endif
 }
 
 bool SDLWindowedAppContext::Initialize() {
-  // Picked before SDL_InitSubSystem, long before a graphics instance can say
-  // which surface extensions it has, so the cvar is the escape hatch.
-  std::string requested_driver = REXCVAR_GET(video_driver);
-#if REX_PLATFORM_MAC
-  // macOS presents via a CAMetalLayer surface obtained from the Cocoa driver.
-  if (requested_driver.empty()) {
-    requested_driver = "cocoa";
+#if REX_PLATFORM_GNU_LINUX
+  headless_ = REXCVAR_GET(headless);
+  if (headless_) {
+    headless_termination_requested = 0;
+    previous_sigint_handler_ = std::signal(SIGINT, HandleHeadlessTerminationSignal);
+    if (previous_sigint_handler_ == SIG_ERR) {
+      REXLOG_ERROR("Failed to install headless SIGINT handler");
+      return false;
+    }
+    previous_sigterm_handler_ = std::signal(SIGTERM, HandleHeadlessTerminationSignal);
+    if (previous_sigterm_handler_ == SIG_ERR) {
+      std::signal(SIGINT, previous_sigint_handler_);
+      REXLOG_ERROR("Failed to install headless SIGTERM handler");
+      return false;
+    }
+    signal_handlers_installed_ = true;
+    SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
+    initialized_subsystems_ = SDL_INIT_EVENTS;
+    REXLOG_INFO("Headless SDL mode: events only; audio output uses SDL dummy driver");
   }
 #endif
-  if (!requested_driver.empty()) {
-    SDL_SetHint(SDL_HINT_VIDEO_DRIVER, requested_driver.c_str());
+
+  if (!headless_) {
+    // Picked before SDL_InitSubSystem, long before a graphics instance can say
+    // which surface extensions it has, so the cvar is the escape hatch.
+    std::string requested_driver = REXCVAR_GET(video_driver);
+#if REX_PLATFORM_MAC
+    // macOS presents via a CAMetalLayer surface obtained from the Cocoa driver.
+    if (requested_driver.empty()) {
+      requested_driver = "cocoa";
+    }
+#endif
+    if (!requested_driver.empty()) {
+      SDL_SetHint(SDL_HINT_VIDEO_DRIVER, requested_driver.c_str());
+    }
+    initialized_subsystems_ = SDL_INIT_VIDEO;
   }
-  if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
-    REXLOG_ERROR("SDL_InitSubSystem(SDL_INIT_VIDEO) failed: {}", SDL_GetError());
+  if (!SDL_InitSubSystem(initialized_subsystems_)) {
+    REXLOG_ERROR("SDL_InitSubSystem({:#x}) failed: {}", initialized_subsystems_, SDL_GetError());
     return false;
   }
-  const char* video_driver_in_use = SDL_GetCurrentVideoDriver();
-  REXLOG_INFO("SDL video driver: {}", video_driver_in_use ? video_driver_in_use : "unknown");
+  if (!headless_) {
+    const char* video_driver_in_use = SDL_GetCurrentVideoDriver();
+    REXLOG_INFO("SDL video driver: {}", video_driver_in_use ? video_driver_in_use : "unknown");
+  }
   uint32_t first = SDL_RegisterEvents(2);
   if (first == 0) {
     REXLOG_ERROR("SDL_RegisterEvents failed: {}", SDL_GetError());
@@ -86,7 +131,22 @@ void SDLWindowedAppContext::PlatformQuitFromUIThread() {
 
 int SDLWindowedAppContext::RunMainMessageLoop() {
   while (!HasQuitFromUIThread()) {
+#if REX_PLATFORM_GNU_LINUX
+    if (headless_ && headless_termination_requested) {
+      REXLOG_INFO("Headless process received a termination signal; shutting down cleanly");
+      QuitFromUIThread();
+      continue;
+    }
+#endif
     SDL_Event event;
+#if REX_PLATFORM_GNU_LINUX
+    if (headless_) {
+      if (SDL_WaitEventTimeout(&event, 250)) {
+        ProcessEvent(event);
+      }
+      continue;
+    }
+#endif
     if (!SDL_WaitEvent(&event)) {
       REXLOG_ERROR("SDL_WaitEvent failed: {}", SDL_GetError());
       return EXIT_FAILURE;
@@ -133,6 +193,8 @@ void SDLWindowedAppContext::ProcessEvent(SDL_Event& event) {
     case SDL_EVENT_QUIT:
       if (synchronously_handled_quit_events_ != 0) {
         --synchronously_handled_quit_events_;
+      } else if (headless_) {
+        QuitFromUIThread();
       } else {
         ProcessQuitRequest();
       }
@@ -187,7 +249,14 @@ bool SDLCALL SDLWindowedAppContext::WatchEvent(void* userdata, SDL_Event* event)
     // request. Handle the request synchronously while SDL is queueing it,
     // before rendering can enter another blocking nextDrawable call.
     ++context->synchronously_handled_quit_events_;
-    context->ProcessQuitRequest();
+#if REX_PLATFORM_GNU_LINUX
+    if (context->headless_) {
+      context->QuitFromUIThread();
+    } else
+#endif
+    {
+      context->ProcessQuitRequest();
+    }
   }
   return true;
 }
