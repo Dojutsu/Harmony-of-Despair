@@ -1457,10 +1457,12 @@ class SessionDirectoryClient::Impl {
         client_admission_transport(std::move(admission_transport)),
         invite_join_attempt_transport(std::move(invite_attempt_transport)),
         join_attempt_completion_transport(std::move(completion_transport)) {
-    if (automatic_client_admission_driver) {
-      client_admission_worker =
-          std::jthread([this](std::stop_token stop) { ClientAdmissionLoop(stop); });
-    }
+    // Gameplay outlives configured-invite completion, even when that invite
+    // owns admission polling. Keep one directory-owned worker for both modes.
+    client_admission_worker = std::jthread(
+        [this, automatic_client_admission_driver](std::stop_token stop) {
+          ClientAdmissionLoop(stop, automatic_client_admission_driver);
+        });
   }
   ~Impl() {
     StopAllClientAdmissions();
@@ -2607,12 +2609,15 @@ class SessionDirectoryClient::Impl {
   }
 
  private:
-  void ClientAdmissionLoop(std::stop_token stop) {
+  void ClientAdmissionLoop(std::stop_token stop, bool automatic_admission) {
     for (;;) {
       PollGameplayClients();
-      PollClientAdmissions(ClientAdmissionLeaseState::Clock::now());
+      if (automatic_admission)
+        PollClientAdmissions(ClientAdmissionLeaseState::Clock::now());
 
       if (stop.stop_requested()) {
+        if (!automatic_admission)
+          break;
         std::lock_guard lock(client_admission_mutex);
         if (client_admissions.empty() && client_admission_cancellations.empty())
           break;

@@ -18,6 +18,8 @@
 #include <filesystem>
 #include <thread>
 #include <cstdlib>
+#include <set>
+#include <rex/system/xam/session_directory.h>
 
 namespace rex::kernel::xam {
 struct XNADDR;
@@ -25,6 +27,63 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32, ppc_ptr_t<XNADDR>, mapped_void, mapped_
 u32 NetDll_XNetInAddrToXnAddr_entry(u32, u32, ppc_ptr_t<XNADDR>, mapped_void);
 }
 namespace rex::system::xam {
+TEST_CASE("gameplay directory worker survives manual admission and joins at shutdown",
+          "[.gameplay-worker]") {
+  const auto* url = std::getenv("HARMONY_GAMEPLAY_WORKER_URL");
+  const auto* marker = std::getenv("HARMONY_GAMEPLAY_WORKER_PENDING");
+  if (!url || !marker) SKIP("Run tools/gameplay_traversal_audit/worker.py");
+  const auto previous_url = REXCVAR_GET(session_directory_url);
+  REXCVAR_SET(session_directory_url, std::string(url));
+  for (bool automatic : {false, true}) {
+    CAPTURE(automatic);
+    std::filesystem::remove(marker);
+    std::mutex observed_mutex;
+    std::set<std::thread::id> workers;
+    std::set<uint32_t> users;
+    auto directory = std::make_unique<SessionDirectoryClient>(
+        [&](uint32_t user) -> std::optional<uint64_t> {
+          std::lock_guard lock(observed_mutex);
+          workers.insert(std::this_thread::get_id());
+          users.insert(user);
+          return 100 + user;
+        }, SessionDirectoryClient::ClientAdmissionTransport{}, automatic);
+    SessionRegistry registry;
+    std::vector<std::shared_ptr<SessionRecord>> sessions;
+    DirectoryTraversalAttempt attempt;
+    attempt.session_id = "worker-test";
+    attempt.attempt_id = std::string(32, 'a');
+    attempt.capability = std::string(32, 'b');
+    const std::string generation(32, 'c');
+    for (uint32_t user = 0; user < 6; ++user) {
+      auto session = registry.Create(100 + user, "Local", {}, 1, 3, 3);
+      session->members.front().gameplay_admission =
+          std::make_shared<const GameplayAdmissionBinding>(GameplayAdmissionBinding{
+              attempt.session_id, attempt.attempt_id, generation});
+      sessions.push_back(session);
+      directory->QueueGameplayAdmission(session, user, 100 + user, attempt, generation);
+    }
+    // No configured-invite worker exists, and no manual poll follows enqueue.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+      bool all;
+      { std::lock_guard lock(observed_mutex); all = users.size() == 6; }
+      if (all && std::filesystem::exists(marker)) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    { std::lock_guard lock(observed_mutex);
+      CHECK(users.size() == 6);
+      CHECK(workers.size() == 1);
+      CHECK_FALSE(workers.contains(std::this_thread::get_id())); }
+    REQUIRE(std::filesystem::exists(marker));
+    // The fixture holds the sixth HTTP response while destruction cancels and
+    // joins. The identity callback's captured state remains alive until joined.
+    const auto shutdown = std::chrono::steady_clock::now();
+    directory.reset();
+    CHECK(std::chrono::steady_clock::now() - shutdown < std::chrono::seconds(3));
+    CHECK_FALSE(std::filesystem::exists(marker));
+  }
+  REXCVAR_SET(session_directory_url, previous_url);
+}
 namespace {
 using Clock = std::chrono::steady_clock;
 #if REX_PLATFORM_WIN32
@@ -185,7 +244,9 @@ TEST_CASE("production admission to independent gameplay sockets fixture", "[.gam
   REXCVAR_SET(lan_bind_address,std::string("127.0.0.1"));
   REXCVAR_SET(lan_gameplay_port,0u);
   SessionRegistry registry;
-  LanDiscoveryService discovery(0x58410A7A,discovery_port,{},[local](uint32_t){return std::optional<uint64_t>(local);});
+  // Match production: configured-invite code owns admission polling. After
+  // readiness below, no caller polls again; gameplay must have its own lifetime.
+  LanDiscoveryService discovery(0x58410A7A,discovery_port,{},[local](uint32_t){return std::optional<uint64_t>(local);},{},false);
   discovery.SetTitleId(0x58410A7A);
   discovery.SetLocalUserIdentity(0,local);
   std::shared_ptr<SessionRecord> session;
@@ -222,6 +283,7 @@ TEST_CASE("production admission to independent gameplay sockets fixture", "[.gam
     std::optional<ReadyAcceptedSessionCandidate> ready;
     const auto deadline=Clock::now()+timeout;
     while(Clock::now()<deadline) {
+      discovery.PollClientAdmissions();
       ready=discovery.ReadyAcceptedSession();if(ready)break;
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
