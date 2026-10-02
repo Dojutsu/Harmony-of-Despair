@@ -120,7 +120,7 @@ function Start-OnlineCompanion([scriptblock]$OnShown) {
     $invite = LabelAt 'Invite Code: -' 16 159 265
     $copy = ButtonAt 'Copy Code' 295 154
     $inviteInput = [Windows.Forms.TextBox]::new()
-    $inviteInput.MaxLength = 6; $inviteInput.CharacterCasing = 'Upper'; $inviteInput.SetBounds(16, 202, 155, 28)
+    $inviteInput.MaxLength = 256; $inviteInput.CharacterCasing = 'Upper'; $inviteInput.SetBounds(16, 202, 155, 28)
     $form.Controls.Add($inviteInput)
     $join = ButtonAt 'Join by Code' 186 199 224
     $party = LabelAt 'PARTY  0 / 0' 16 247

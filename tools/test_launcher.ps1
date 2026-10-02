@@ -57,6 +57,32 @@ function Invoke-Setup(
     return [pscustomobject]@{ ExitCode = $exitCode; Output = $output }
 }
 
+function Invoke-JoinScript(
+    [string]$localAppData,
+    [string[]]$extraArguments = @(),
+    [switch]$ViaCmd
+) {
+    $env:LOCALAPPDATA = $localAppData
+    Push-Location $artifactRoot
+    try {
+        $previousPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            if ($ViaCmd) {
+                $output = @(& cmd.exe /d /c powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File Join-Harmony.ps1 @extraArguments 2>&1)
+            } else {
+                $output = @(& (Join-Path $artifactRoot 'Join-Harmony.ps1') @extraArguments 2>&1)
+            }
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousPreference
+        }
+    } finally {
+        Pop-Location
+    }
+    return [pscustomobject]@{ ExitCode = $exitCode; Output = $output }
+}
+
 function Get-ProfileXuid([string]$localAppData) {
     $profile = Join-Path $localAppData 'HarmonyRecomp\launcher-profile.cfg'
     Assert-True (Test-Path -LiteralPath $profile -PathType Leaf) "profile was not created at $profile"
@@ -94,6 +120,11 @@ function Get-GameArguments([string]$path) {
     return @(Get-Content -LiteralPath $path)
 }
 
+function Assert-InviteArgument([string]$path, [string]$code) {
+    $matches = @(Get-GameArguments $path | Where-Object { $_ -like '--session_directory_invite_code=*' })
+    Assert-True ($matches.Count -eq 1 -and $matches[0] -ceq "--session_directory_invite_code=$code") "wrong invite arguments: $($matches -join ', ')"
+}
+
 try {
     foreach ($name in $recognizedEnvironment) {
         [Environment]::SetEnvironmentVariable($name, $null, 'Process')
@@ -102,6 +133,7 @@ try {
     [void](New-Item -ItemType Directory -Path $artifactRoot -Force)
     [void](New-Item -ItemType Directory -Path $sourceRoot -Force)
     Copy-Item -LiteralPath (Join-Path $repoRoot 'Launch-Harmony.bat') -Destination $artifactRoot
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'Join-Harmony.ps1') -Destination $artifactRoot
     Copy-Item -LiteralPath (Join-Path $repoRoot 'Setup-Harmony.ps1') -Destination $artifactRoot
 
     $fakeSource = @'
@@ -429,6 +461,68 @@ public static class LauncherFixture
     Assert-True ($joinCode.ExitCode -eq 0) "join-code action exited $($joinCode.ExitCode)"
     Assert-True ('--session_directory_invite_code=CD8M3R' -in
         (Get-GameArguments $joinArguments)) 'join-code action did not normalize and forward the code'
+    foreach ($validCode in @('E6CK9X', 'HEKUJC', 'e6ck9x')) {
+        $joinScriptArguments = Join-Path $testRoot "join script $validCode arguments.txt"
+        $env:HARMONY_TEST_ARGUMENTS_PATH = $joinScriptArguments
+        $joinScript = Invoke-JoinScript $firstLocal @($validCode)
+        Assert-True ($joinScript.ExitCode -eq 0) "PowerShell join entry failed for $validCode"
+        Assert-InviteArgument $joinScriptArguments $validCode.ToUpperInvariant()
+    }
+    $cmdJoinArguments = Join-Path $testRoot 'cmd join script arguments.txt'
+    $env:HARMONY_TEST_ARGUMENTS_PATH = $cmdJoinArguments
+    $cmdJoin = Invoke-JoinScript $firstLocal @('HEKUJC') -ViaCmd
+    Assert-True ($cmdJoin.ExitCode -eq 0) 'cmd join entry failed for valid code'
+    Assert-InviteArgument $cmdJoinArguments 'HEKUJC'
+    foreach ($cmdInvalid in @('E6CK9', 'E6CK9XX', 'ABC123')) {
+        $cmdInvalidArguments = Join-Path $testRoot "cmd invalid $cmdInvalid arguments.txt"
+        $env:HARMONY_TEST_ARGUMENTS_PATH = $cmdInvalidArguments
+        $cmdRejected = Invoke-JoinScript $firstLocal @($cmdInvalid) -ViaCmd
+        Assert-True ($cmdRejected.ExitCode -eq 26 -and -not (Test-Path -LiteralPath $cmdInvalidArguments)) "cmd accepted invalid code $cmdInvalid"
+    }
+    $sentinel = Join-Path $artifactRoot 'injected-sentinel.txt'
+    $rejectedCodes = @(
+        '', 'E6CK9', 'E6CK9XX', 'ABC123', 'E6CK0X',
+        'E6CK9X"', 'E6CK9X&', 'E6CK9X&&', 'E6CK9X|', 'E6CK9X||',
+        'E6CK9X>', 'E6CK9X<', 'E6CK9X^', 'E6CK9X%', 'E6CK9X!',
+        'E6CK9X(', 'E6CK9X)', 'E6C K9X', '%CD%', '!CD!',
+        '$(echo INJECTED)',
+        ('E6CK9X" & echo INJECTED > "{0}" & "' -f $sentinel)
+    )
+    for ($i = 0; $i -lt $rejectedCodes.Count; $i++) {
+        $rejectedArguments = Join-Path $testRoot "rejected join $i arguments.txt"
+        $env:HARMONY_TEST_ARGUMENTS_PATH = $rejectedArguments
+        $rejected = Invoke-JoinScript $firstLocal @($rejectedCodes[$i])
+        Assert-True ($rejected.ExitCode -eq 26) "unsafe or invalid code was accepted: case $i"
+        Assert-True (-not (Test-Path -LiteralPath $rejectedArguments)) "invalid code reached the game: case $i"
+        Assert-True (-not (Test-Path -LiteralPath $sentinel)) "invalid code executed a sentinel command: case $i"
+    }
+    $extraJoinArguments = Join-Path $testRoot 'extra join script arguments.txt'
+    $env:HARMONY_TEST_ARGUMENTS_PATH = $extraJoinArguments
+    $extraJoin = Invoke-JoinScript $firstLocal @('E6CK9X', '-NoLaunch')
+    Assert-True ($extraJoin.ExitCode -eq 26 -and -not (Test-Path -LiteralPath $extraJoinArguments)) 'extra join option reached setup or game'
+    $cmdSentinel = Join-Path $artifactRoot 'cmd-injected-sentinel.txt'
+    foreach ($cmdPayload in @('E6CK9X&echo INJECTED>cmd-injected-sentinel.txt',
+            'E6CK9X&&echo INJECTED>cmd-injected-sentinel.txt',
+            'E6CK9X|echo INJECTED>cmd-injected-sentinel.txt',
+            'E6CK9X||echo INJECTED>cmd-injected-sentinel.txt')) {
+        $env:HARMONY_TEST_ARGUMENTS_PATH = Join-Path $testRoot 'cmd rejected arguments.txt'
+        $command = 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File Join-Harmony.ps1 "' + $cmdPayload + '"'
+        Push-Location $artifactRoot
+        try {
+            $previousPreference = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                $cmdOutput = @(& cmd.exe /d /s /c $command 2>&1)
+                $cmdExit = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $previousPreference
+            }
+        } finally {
+            Pop-Location
+        }
+        Assert-True ($cmdExit -eq 26) "quoted hostile cmd argument was accepted: $cmdPayload"
+        Assert-True (-not (Test-Path -LiteralPath $cmdSentinel)) "cmd executed hostile code: $cmdPayload"
+    }
     foreach ($invalidCode in @('BAD', 'ABC10O', 'ABCDEF7')) {
         $invalidJoin = Invoke-Setup $firstLocal @('-JoinByInviteCode', '-InviteCode', $invalidCode)
         Assert-True ($invalidJoin.ExitCode -eq 26) "invalid join code was accepted: $invalidCode"

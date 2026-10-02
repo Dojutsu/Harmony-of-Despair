@@ -86,14 +86,30 @@ ReXGlue keep its current default. A selected language is saved as
 on the next game launch. Existing profiles without this line remain unchanged;
 the launcher passes no language override for them.
 
-To join a friend's hosted session using its six-character invite code, run:
+Advanced launcher actions can also be invoked from a terminal. To open the
+interactive invite prompt directly, run:
 
 ```text
 Launch-Harmony.bat --join-code
 ```
 
-The launcher validates the code and then uses the normal Harmony Search,
-rendezvous, NAT traversal, and join path. A host can display the active code in
+This batch command opens the interactive code prompt. To supply a code without
+the prompt, open PowerShell in the extracted HarmonyRecomp folder and run:
+
+```powershell
+.\Join-Harmony.ps1 E6CK9X
+```
+
+If PowerShell's script policy blocks that command, open a process-scoped shell
+with `powershell.exe -NoProfile -ExecutionPolicy Bypass` and run the same
+`Join-Harmony.ps1` command there. This does not change the machine's policy.
+
+The noninteractive entry point accepts exactly one six-character code from
+`ABCDEFGHJKMNPQRSTUVWXYZ23456789` (lowercase is normalized). Do not append a
+code to `Launch-Harmony.bat --join-code`: batch-file argument expansion cannot
+safely validate arbitrary hostile text before `cmd.exe` interprets it. The
+PowerShell entry point validates the code before forwarding it to the existing
+join-by-code launcher flow. A host can display the active code in
 a separate launcher message with `Launch-Harmony.bat --show-invite`. This
 reports `No active hosted session` until public directory registration has
 completed.

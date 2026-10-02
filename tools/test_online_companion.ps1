@@ -48,6 +48,11 @@ $args = @(Get-OnlineAction 'join' 'ab7k2q' $false)
 Check ('-JoinByInviteCode' -in $args -and '-InviteCode' -in $args -and 'AB7K2Q' -in $args) 'Join path'
 Check (($args -join ' ') -match 'Setup-Harmony.ps1') 'Launcher delegation'
 Check ('-Configure' -in @(Get-OnlineAction 'configure' '' $true)) 'Name action with running game'
+foreach ($bad in @('AB7K2', 'AB7K2QQ', 'ABC123', 'AB7K2Q&', 'AB7K2Q|', 'AB7K2Q"', 'AB7K2Q%CD%', 'AB7K2Q$(echo BAD)')) {
+    $rejected = $false
+    try { Get-OnlineAction 'join' $bad $false | Out-Null } catch { $rejected = $true }
+    Check $rejected "Unsafe invite reached launcher: $bad"
+}
 foreach ($action in @('play', 'join')) {
     $rejected = $false
     try { Get-OnlineAction $action 'AB7K2Q' $true | Out-Null } catch { $rejected = $true }

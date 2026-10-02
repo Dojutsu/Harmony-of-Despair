@@ -249,6 +249,7 @@ jobs:
           $publicFiles = @(
             'README.md',
             'Launch-Harmony.bat',
+            'Join-Harmony.ps1',
             'Setup-Harmony.ps1',
             'Online-Harmony.ps1',
             'harmonyrecomp-user.example.cfg'
