@@ -77,6 +77,13 @@ endif()
 
 # Discover tests
 include(Catch)
+if(WIN32)
+    add_executable(recvfrom_lifetime_test kernel/recvfrom_lifetime_test.cpp)
+    target_include_directories(recvfrom_lifetime_test PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/thirdparty)
+    target_link_libraries(recvfrom_lifetime_test PRIVATE rexruntime ws2_32)
+    set_target_properties(recvfrom_lifetime_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
+    add_test(NAME recvfrom_lifetime COMMAND recvfrom_lifetime_test)
+endif()
 catch_discover_tests(unit_tests
     TEST_PREFIX "unit."
     PROPERTIES

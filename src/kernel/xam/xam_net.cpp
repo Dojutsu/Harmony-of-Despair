@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <mutex>
 #include <thread>
@@ -207,14 +208,15 @@ struct PendingRecvFrom {
   uint32_t socket_handle = 0;
   uint32_t buffer_ptr = 0;
   uint32_t buffer_length = 0;
-  uint32_t bytes_ptr = 0;
-  uint32_t flags_ptr = 0;
+  // Initiation bytes/flags outputs may be automatic storage. Delayed results
+  // belong to this operation and are published by WSAGetOverlappedResult.
   uint32_t flags = 0;
   uint32_t from_ptr = 0;
   uint32_t from_length_ptr = 0;
   uint32_t overlapped_ptr = 0;
   uint32_t completion_routine = 0;
   uint32_t transferred = 0;
+  uint32_t completion_flags = 0;
   uint32_t error = 0;
   bool complete = false;
   bool readiness_logged = false;
@@ -222,6 +224,7 @@ struct PendingRecvFrom {
 };
 
 std::mutex pending_recv_mutex;
+std::condition_variable pending_recv_changed;
 std::unordered_map<uint32_t, PendingRecvFrom> pending_recvs;
 std::atomic<bool> pending_recv_pump_running{false};
 object_ref<XHostThread> pending_recv_pump_thread;
@@ -291,10 +294,7 @@ bool TryCompleteRecvFrom(PendingRecvFrom& pending, bool wait) {
   }
 
   pending.transferred = uint32_t(result);
-  if (pending.bytes_ptr)
-    memory::store_and_swap<uint32_t>(memory->TranslateVirtual(pending.bytes_ptr), pending.transferred);
-  if (pending.flags_ptr)
-    memory::store_and_swap<uint32_t>(memory->TranslateVirtual(pending.flags_ptr), 0);
+  pending.completion_flags = 0;
   if (pending.from_ptr) {
     auto* from = memory->TranslateVirtual<XSOCKADDR_IN*>(pending.from_ptr);
     from->sin_family = native_from.sin_family;
@@ -523,8 +523,6 @@ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_
         socket,
         buffers_ptr[0].buf_ptr,
         buffers_ptr[0].len,
-        num_bytes_recv.guest_address(),
-        flags_ptr.guest_address(),
         flags_ptr ? uint32_t(*flags_ptr) : 0,
         from_addr.guest_address(),
         from_length.guest_address(),
@@ -542,7 +540,7 @@ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_
         "from_length={:08X} "
         "event={:08X} completion={:08X}",
         socket, pending.overlapped_ptr, pending.buffer_ptr, pending.buffer_length,
-        pending.flags_ptr, pending.flags, pending.from_ptr, pending.from_length_ptr,
+        flags_ptr.guest_address(), pending.flags, pending.from_ptr, pending.from_length_ptr,
         uint32_t(overlapped_ptr->event_handle), pending.completion_routine);
     XThread::SetLastError(kWsaIoPending);
     return -1;
@@ -587,14 +585,21 @@ u32 NetDll_WSAGetOverlappedResult_entry(u32 caller, u32 socket_handle,
     return 0;
   }
 
-  std::lock_guard lock(pending_recv_mutex);
+  std::unique_lock lock(pending_recv_mutex);
   auto it = pending_recvs.find(overlapped_ptr.guest_address());
+  // Never wait for network readiness while holding the cancellation lock.
+  // Re-find after every unlock: a competing query may have consumed the record.
+  while (wait && it != pending_recvs.end() && it->second.socket_handle == socket_handle &&
+         !it->second.complete && !TryCompleteRecvFrom(it->second, false)) {
+    pending_recv_changed.wait_for(lock, std::chrono::milliseconds(1));
+    it = pending_recvs.find(overlapped_ptr.guest_address());
+  }
   if (it == pending_recvs.end() || it->second.socket_handle != socket_handle) {
     XThread::SetLastError(kWsaInvalidArgument);
     return 0;
   }
   auto& pending = it->second;
-  if (!pending.complete && !TryCompleteRecvFrom(pending, wait != 0)) {
+  if (!pending.complete && !TryCompleteRecvFrom(pending, false)) {
     REXKRNL_DEBUG(
         "NetDll_WSAGetOverlappedResult: incomplete socket={:08X} overlapped={:08X} wait={}",
         socket_handle, overlapped_ptr.guest_address(), wait != 0);
@@ -608,7 +613,7 @@ u32 NetDll_WSAGetOverlappedResult_entry(u32 caller, u32 socket_handle,
   }
   *bytes_transferred = pending.transferred;
   if (flags_ptr)
-    *flags_ptr = 0;
+    *flags_ptr = pending.completion_flags;
   REXKRNL_INFO(
       "NetDll_WSAGetOverlappedResult: completed socket={:08X} overlapped={:08X} bytes={}",
       socket_handle, overlapped_ptr.guest_address(), pending.transferred);
@@ -1054,6 +1059,9 @@ u32 NetDll_socket_entry(u32 caller, u32 af, u32 type, u32 protocol) {
 }
 
 u32 NetDll_closesocket_entry(u32 caller, u32 socket_handle) {
+  // Serialize close with receive completion so no receive can touch its guest
+  // buffers after cancellation has been published. Keep the result until query.
+  std::lock_guard lock(pending_recv_mutex);
   auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
   if (!socket) {
     // WSAENOTSOCK
@@ -1064,7 +1072,22 @@ u32 NetDll_closesocket_entry(u32 caller, u32 socket_handle) {
   // TODO: Absolutely delete this object. It is no longer valid after calling
   // closesocket.
   socket->Close();
+  for (auto& [_, pending] : pending_recvs) {
+    if (pending.socket_handle != socket_handle || pending.complete)
+      continue;
+    pending.error = 995;  // WSA_OPERATION_ABORTED
+    auto* overlapped = REX_KERNEL_MEMORY()->TranslateVirtual<XWSAOVERLAPPED*>(pending.overlapped_ptr);
+    overlapped->internal = 0xC0000120;  // STATUS_CANCELLED
+    overlapped->internal_high = 0;
+    if (overlapped->event_handle) {
+      auto event = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(overlapped->event_handle);
+      if (event)
+        event->Set(0, false);
+    }
+    pending.complete = true;
+  }
   socket->ReleaseHandle();
+  pending_recv_changed.notify_all();
   return 0;
 }
 
