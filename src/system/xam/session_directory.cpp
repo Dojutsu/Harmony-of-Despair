@@ -753,6 +753,7 @@ DirectoryHostPollTransition ApplyDirectoryHostPollResult(
       state.private_attempts.clear();
       break;
     case DirectoryHostPollDisposition::kRecoverRegistration: {
+      hosted.SetStatusInviteCode({});
       if (auto path = ActiveInviteCodePath())
         RemoveActiveInviteCodeFile(*path);
       const auto invalidated_session = state.directory_session_id;
@@ -859,6 +860,7 @@ class SessionDirectoryClient::Impl {
       wake.notify_all();
       worker.join();
     }
+    if (hosted) hosted->SetStatusInviteCode({});
     if (admission_grants) admission_grants->Clear();
     hosted.reset();
     admission_grants.reset();
@@ -1025,6 +1027,8 @@ class SessionDirectoryClient::Impl {
               else
                 REXSYS_INFO("Session directory: registered '{}' as {}", hosted->host_name,
                             session_id);
+              public_invite_code = *NormalizeInviteCode(candidate_invite_code);
+              hosted->SetStatusInviteCode(public_invite_code);
               REXSYS_INFO("Harmony invite code: {}", candidate_invite_code);
               if (auto path = ActiveInviteCodePath();
                   path && !WriteActiveInviteCodeFile(*path, candidate_invite_code))
@@ -1060,6 +1064,7 @@ class SessionDirectoryClient::Impl {
             response ? std::optional<uint32_t>(response->status) : std::nullopt, valid_session_id);
         switch (disposition) {
           case DirectoryHeartbeatDisposition::kAccepted:
+            hosted->SetStatusInviteCode(public_invite_code);
             schedule_heartbeat();
             break;
           case DirectoryHeartbeatDisposition::kRetrySameRegistration:
@@ -1073,6 +1078,7 @@ class SessionDirectoryClient::Impl {
             retry_delay = std::min(retry_delay * 2, kHeartbeatInterval);
             break;
           case DirectoryHeartbeatDisposition::kRecoverRegistration:
+            hosted->SetStatusInviteCode({});
             REXSYS_WARN("Session directory: heartbeat returned 404; recovering logical lobby");
             if (admission_grants)
               admission_grants->InvalidateSession(session_id);
@@ -1086,6 +1092,7 @@ class SessionDirectoryClient::Impl {
             retry_delay = kHeartbeatRetryInitial;
             break;
           case DirectoryHeartbeatDisposition::kRejected:
+            hosted->SetStatusInviteCode({});
             REXSYS_WARN("Session directory: heartbeat rejected with HTTP {}", response->status);
             next_heartbeat = std::chrono::steady_clock::now() + kHeartbeatInterval;
             break;
@@ -1153,6 +1160,7 @@ class SessionDirectoryClient::Impl {
       admission_grants->InvalidateSession(session_id);
     if (!session_id.empty())
       Request(REXCVAR_GET(session_directory_url), L"DELETE", "/sessions/" + session_id, "", token);
+    hosted->SetStatusInviteCode({});
     if (auto path = ActiveInviteCodePath())
       RemoveActiveInviteCodeFile(*path);
   }

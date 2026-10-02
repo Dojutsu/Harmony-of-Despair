@@ -132,6 +132,10 @@ bool ApplyMemberBatch(SessionRecord& session,
       member.local = false;
       if (source == MemberUpdateSource::kDiscoveryPublic)
         member.private_slot = false;
+    } else if (it != candidate.end() && member.name.empty()) {
+      // Preserve a name learned from the companion status channel when the
+      // title retries membership with no display-name field.
+      member.name = it->name;
     }
     if (it == candidate.end())
       candidate.push_back(std::move(member));
@@ -142,6 +146,7 @@ bool ApplyMemberBatch(SessionRecord& session,
                              session.max_private_slots))
     return false;
   session.members.swap(candidate);
+  session.NotifyStatus();
   return true;
 }
 
@@ -457,6 +462,7 @@ bool SessionRegistry::Delete(const std::array<uint8_t, 8>& id) {
     return false;
   std::lock_guard session_lock(*it->second->mutex);
   it->second->state = SessionState::kDeleted;
+  it->second->NotifyStatus();
   sessions_.erase(it);
   return true;
 }
@@ -467,6 +473,7 @@ size_t SessionRegistry::DeleteHostedBy(uint64_t host_xuid) {
     std::lock_guard session_lock(*it->second->mutex);
     if (it->second->host_xuid == host_xuid) {
       it->second->state = SessionState::kDeleted;
+      it->second->NotifyStatus();
       it = sessions_.erase(it);
       ++removed;
     } else {
@@ -546,6 +553,7 @@ bool SessionRegistry::Leave(const std::array<uint8_t, 8>& id, uint64_t xuid) {
   std::lock_guard lock(*session->mutex);
   size_t before = session->members.size();
   std::erase_if(session->members, [&](const auto& m) { return m.xuid == xuid; });
+  if (before != session->members.size()) session->NotifyStatus();
   return before != session->members.size();
 }
 bool SessionRegistry::Modify(const std::array<uint8_t, 8>& id, uint32_t flags,
@@ -559,6 +567,7 @@ bool SessionRegistry::Modify(const std::array<uint8_t, 8>& id, uint32_t flags,
   session->flags = flags;
   session->max_public_slots = public_slots;
   session->max_private_slots = private_slots;
+  session->NotifyStatus();
   return true;
 }
 bool SessionRegistry::Start(const std::array<uint8_t, 8>& id) {
@@ -567,6 +576,7 @@ bool SessionRegistry::Start(const std::array<uint8_t, 8>& id) {
     return false;
   std::lock_guard lock(*session->mutex);
   session->state = SessionState::kInGame;
+  session->NotifyStatus();
   return true;
 }
 bool SessionRegistry::End(const std::array<uint8_t, 8>& id) {
@@ -575,6 +585,7 @@ bool SessionRegistry::End(const std::array<uint8_t, 8>& id) {
     return false;
   std::lock_guard lock(*session->mutex);
   session->state = SessionState::kReporting;
+  session->NotifyStatus();
   return true;
 }
 void SessionRegistry::UpsertDiscovered(SessionRecord record) {
@@ -758,8 +769,11 @@ class LanDiscoveryService::Impl {
           }
         } else if (valid) {
           std::lock_guard lock(*advertised->mutex);
+          auto before = advertised->members.size();
           std::erase_if(advertised->members,
                         [&](const auto& value) { return value.xuid == xuid; });
+          if (before != advertised->members.size())
+            advertised->NotifyStatus();
         }
       }
       if (valid && (query.type == kQuery || query.type == kJoin || query.type == kLeave)) {
@@ -1264,18 +1278,23 @@ void XSession::set_record(std::shared_ptr<SessionRecord> record) {
   if (record_ && record_ != record)
     kernel_state()->session_manager()->ReleaseRecord(record_);
   record_ = std::move(record);
+  kernel_state()->session_manager()->online_status().Attach(this, record_);
 }
 SessionManager::SessionManager(KernelState* state, uint16_t discovery_port)
     // KernelState constructs the session service before the executable module
     // is loaded, so the title ID is not available yet. XGI binds the actual
     // title ID immediately before advertising or searching.
-    : kernel_state_(state), discovery_(0, discovery_port) {}
+    : kernel_state_(state),
+      online_status_(state->user_profile()->xuid(), state->user_profile()->name(),
+                     REXCVAR_GET(online_status_directory)),
+      discovery_(0, discovery_port) {}
 SessionManager::~SessionManager() = default;
 void SessionManager::RegisterObject(XSession* session) {
   std::lock_guard lock(object_mutex_);
   objects_[session->guest_object()] = session;
 }
 void SessionManager::UnregisterObject(XSession* session) {
+  online_status_.Detach(session);
   std::lock_guard lock(object_mutex_);
   objects_.erase(session->guest_object());
 }

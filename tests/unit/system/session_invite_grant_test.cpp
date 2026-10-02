@@ -8,7 +8,7 @@
 #include <memory>
 #include <thread>
 
-#include <nlohmann/json.hpp>
+#include <inja/third_party/include/nlohmann/json.hpp>
 
 #include <rex/platform.h>
 #if REX_PLATFORM_WIN32
@@ -369,6 +369,7 @@ TEST_CASE("poll authority distinguishes transit failure 404 and request time",
   state.pending_completions.push_back(
       {"session-a", std::string(kAttemptB), std::string(kCapability)});
   SessionRecord hosted;
+  hosted.SetStatusInviteCode("ABCDEF");
 
   std::array acknowledged_b{std::string(kAttemptB)};
   auto completed = grants->Reserve("session-a", 99, 0x01020304, 40000,
@@ -402,6 +403,7 @@ TEST_CASE("poll authority distinguishes transit failure 404 and request time",
   CHECK(state.host_attempts.empty());
   CHECK(state.private_attempts.empty());
   CHECK(state.pending_completions.empty());
+  CHECK(hosted.status_invite_code.empty());
   CHECK(NatProbeMatchAcknowledgedDiscoveryAttempts(socket, peer).empty());
   CHECK(Reserve(*grants, 10, response_received).status ==
         HostAdmissionReservationStatus::kNoMatch);

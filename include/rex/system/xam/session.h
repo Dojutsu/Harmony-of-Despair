@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <rex/cvar.h>
+#include <rex/system/xam/online_status.h>
 #include <rex/system/xam/session_directory.h>
 #include <rex/system/xobject.h>
 
@@ -118,6 +119,18 @@ struct SessionRecord {
   // discovery listener. A recursive mutex keeps compound slot calculations
   // safe without forcing callers to copy mutable records.
   std::shared_ptr<std::recursive_mutex> mutex = std::make_shared<std::recursive_mutex>();
+  // Public display metadata only. Protected by mutex; never sent on the wire.
+  std::weak_ptr<OnlineStatusSignal> status_signal;
+  std::string status_invite_code;
+  void NotifyStatus() const {
+    if (auto signal = status_signal.lock()) signal->Notify();
+  }
+  void SetStatusInviteCode(std::string code) {
+    std::lock_guard lock(*mutex);
+    if (status_invite_code == code) return;
+    status_invite_code = std::move(code);
+    NotifyStatus();
+  }
   SessionInfo info{};
   // Discovery/join control endpoint. SessionInfo::host_address remains the
   // independent gameplay endpoint exposed to XGI/XNet.
@@ -218,6 +231,7 @@ class SessionManager {
  public:
   SessionManager(KernelState* kernel_state, uint16_t discovery_port);
   ~SessionManager();
+  OnlineStatus& online_status() { return online_status_; }
   SessionRegistry& registry() { return registry_; }
   LanDiscoveryService& discovery() { return discovery_; }
   void RegisterObject(XSession* session);
@@ -227,6 +241,7 @@ class SessionManager {
 
  private:
   KernelState* kernel_state_;
+  OnlineStatus online_status_;
   SessionRegistry registry_;
   LanDiscoveryService discovery_;
   mutable std::mutex object_mutex_;

@@ -19,6 +19,7 @@ add_executable(unit_tests
     system/session_test.cpp
     system/session_admission_test.cpp
     system/session_invite_grant_test.cpp
+    system/online_status_test.cpp
     system/socket_test.cpp
     input/input_assignment_test.cpp
     codegen/codegen_writer_test.cpp
@@ -33,6 +34,7 @@ target_sources(unit_tests PRIVATE
 )
 
 target_include_directories(unit_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/thirdparty
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -78,6 +80,12 @@ if(UNIX AND NOT APPLE)
 endif()
 
 # Discover tests
+add_executable(online_status_lifecycle system/online_status_lifecycle.cpp)
+target_link_libraries(online_status_lifecycle PRIVATE rexruntime)
+target_include_directories(online_status_lifecycle PRIVATE ${PROJECT_SOURCE_DIR}/thirdparty)
+set_target_properties(online_status_lifecycle PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
+
 include(Catch)
 if(WIN32)
     add_executable(recvfrom_lifetime_test kernel/recvfrom_lifetime_test.cpp)
