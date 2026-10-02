@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -140,6 +141,10 @@ class SessionRegistry {
   std::vector<std::shared_ptr<SessionRecord>> List() const;
   std::vector<std::shared_ptr<SessionRecord>> ListRemote(uint64_t local_xuid) const;
   bool Join(const std::array<uint8_t, 8>& id, SessionMember member);
+  // Guest-title updates target the exact attached record. On clients these
+  // update observations only; local joining still requires a host response.
+  bool JoinBatch(const std::shared_ptr<SessionRecord>& expected,
+                 std::span<const SessionMember> members);
   bool Leave(const std::array<uint8_t, 8>& id, uint64_t xuid);
   bool Modify(const std::array<uint8_t, 8>& id, uint32_t flags, uint32_t public_slots,
               uint32_t private_slots);

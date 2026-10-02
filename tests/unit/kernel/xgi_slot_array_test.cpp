@@ -61,13 +61,26 @@ static void Run(KernelState* kernel) {
   reset();
   put(112, 0x01020304); put(116, 0x10203040);
   put(96, 0); put(100, 1);
-  Check(join(2, 0, guest+112, guest+96) == X_E_SUCCESS, "local join");
-  // Existing local-profile identity behavior is deliberately unchanged: both
-  // updates target the same local XUID, with the second index/flag winning.
-  Check(object->record()->members.size() == 1, "local identity unchanged");
-  const auto& local = object->record()->members[0];
-  Check(local.xuid == host && local.local && local.user_index == 0x10203040 &&
-        local.private_slot, "BE32 local index stride four");
+  Check(join(2, 0, guest+112, guest+96) == X_E_INVALIDARG, "duplicate local XUID batch rejected");
+  Check(object->record()->members.size() == 1 && !object->record()->members[0].private_slot,
+        "duplicate local batch has no partial mutation");
+  for (uint32_t i = 0; i < 2; ++i) {
+    Check(join(1, 0, guest+112+4*i, guest+96+4*i) == X_E_SUCCESS, "local single join");
+    const auto& local = object->record()->members[0];
+    Check(local.xuid == host && local.local &&
+          local.user_index == (i ? 0x10203040u : 0x01020304u) && local.private_slot == (i != 0),
+          "BE32 local index and private flag");
+  }
+  reset();
+  Check(kernel->session_manager()->registry().Modify(object->record()->info.id, 1, 2, 2),
+        "one available public slot");
+  put(96, 0); put(100, 0);
+  Check(join(2, guest+64, 0, guest+96) == X_E_FAIL, "whole remote batch exceeds capacity");
+  Check(object->record()->members.size() == 1, "XGI batch rolls back first member");
+  memory::store_and_swap<uint64_t>(mem->TranslateVirtual(guest + 72), ids[0]);
+  Check(join(2, guest+64, 0, guest+96) == X_E_INVALIDARG, "duplicate remote batch");
+  Check(object->record()->members.size() == 1, "duplicate remote has no partial mutation");
+  memory::store_and_swap<uint64_t>(mem->TranslateVirtual(guest + 72), ids[1]);
 
   reset();
   auto reject = [&](uint32_t count, uint32_t xuids, uint32_t users, uint32_t flags) {

@@ -413,6 +413,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
            !ReadableJoinArray(memory_, user_index_array, user_count, 4)))
         return X_E_INVALIDARG;
       auto session = object->record();
+      std::vector<SessionMember> members;
+      std::unordered_set<uint64_t> identities;
       for (uint32_t i = 0; i < user_count; ++i) {
         uint64_t xuid = is_local ? kernel_state_->user_profile()->xuid()
                                  : memory::load_and_swap<uint64_t>(
@@ -428,29 +430,38 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
             xuid,         is_local ? kernel_state_->user_profile()->name() : std::string{},
             user_index,   is_local,
             private_slot, false};
-        if (is_local && session->host_xuid != xuid) {
-          REXKRNL_INFO("XGISessionJoinLocal: requesting LAN join xuid={:016X} host={:016X}", xuid,
-                       session->host_xuid);
-          auto updated = kernel_state_->session_manager()->discovery().Join(*session, member, 500);
-          if (!updated)
-            return X_E_FAIL;
-          for (auto& updated_member : updated->members) {
-            if (updated_member.xuid == xuid) {
-              updated_member.local = true;
-              updated_member.user_index = user_index;
-              updated_member.name = kernel_state_->user_profile()->name();
-            }
-          }
-          kernel_state_->session_manager()->registry().UpsertDiscovered(std::move(*updated));
-          session = kernel_state_->session_manager()->registry().Find(session->info.id);
-          object->set_record(session);
-          REXKRNL_INFO("XGISessionJoinLocal: joined session with {} members",
-                       session ? session->members.size() : 0);
-        } else if (!kernel_state_->session_manager()->registry().Join(session->info.id,
-                                                                      std::move(member))) {
-          return X_E_FAIL;
+        if (!xuid || !identities.insert(xuid).second)
+          return X_E_INVALIDARG;
+        members.push_back(std::move(member));
+      }
+      if (!is_local || session->host_xuid == kernel_state_->user_profile()->xuid())
+        return kernel_state_->session_manager()->registry().JoinBatch(session, members)
+                   ? X_E_SUCCESS : X_E_FAIL;
+      // Current local-profile mapping produces one unique local XUID. A
+      // multi-user network transaction requires a protocol extension; never
+      // send a partial sequence of host admissions.
+      if (members.size() != 1)
+        return X_E_INVALIDARG;
+      const auto& member = members.front();
+      const auto xuid = member.xuid;
+      const auto user_index = member.user_index;
+      REXKRNL_INFO("XGISessionJoinLocal: requesting LAN join xuid={:016X} host={:016X}", xuid,
+                   session->host_xuid);
+      auto updated = kernel_state_->session_manager()->discovery().Join(*session, member, 500);
+      if (!updated)
+        return X_E_FAIL;
+      for (auto& updated_member : updated->members) {
+        if (updated_member.xuid == xuid) {
+          updated_member.local = true;
+          updated_member.user_index = user_index;
+          updated_member.name = kernel_state_->user_profile()->name();
         }
       }
+      kernel_state_->session_manager()->registry().UpsertDiscovered(std::move(*updated));
+      session = kernel_state_->session_manager()->registry().Find(session->info.id);
+      object->set_record(session);
+      REXKRNL_INFO("XGISessionJoinLocal: joined session with {} members",
+                   session ? session->members.size() : 0);
       return X_E_SUCCESS;
     }
     case 0x000B0013: {

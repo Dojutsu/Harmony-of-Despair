@@ -17,6 +17,7 @@ add_executable(unit_tests
     system/achievement_manager_test.cpp
     system/function_dispatcher_test.cpp
     system/session_test.cpp
+    system/session_admission_test.cpp
     system/socket_test.cpp
     input/input_assignment_test.cpp
     codegen/codegen_writer_test.cpp
