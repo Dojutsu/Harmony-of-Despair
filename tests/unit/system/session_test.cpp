@@ -15,8 +15,7 @@
 
 namespace rex::system::xam {
 
-TEST_CASE("NAT registration polls quickly only while awaiting a peer",
-          "[session][network][nat]") {
+TEST_CASE("NAT registration polls quickly only while awaiting a peer", "[session][network][nat]") {
   CHECK(NatProbeRegistrationIntervalMs(false) == 100);
   CHECK(NatProbeRegistrationIntervalMs(true) == 1000);
   CHECK(NatProbeAutomaticAttemptActive(0, false));
@@ -193,8 +192,7 @@ TEST_CASE("NAT search timing adds a bounded traversal-only grace window",
   CHECK_FALSE(nat.InNatExtension(nat.total_window_ms()));
 }
 
-TEST_CASE("late acknowledgement query obeys the NAT extended deadline",
-          "[session][network][nat]") {
+TEST_CASE("late acknowledgement query obeys the NAT extended deadline", "[session][network][nat]") {
   constexpr uint32_t original_window_ms = 250;
   const LanAddress peer{htonl(0xCB007171u), 49152};
   SearchTimingBudget nat(original_window_ms, true);
@@ -220,7 +218,8 @@ TEST_CASE("late acknowledgement query obeys the NAT extended deadline",
   }
 }
 
-TEST_CASE("explicit LAN bind address is the network identity source of truth", "[session][network]") {
+TEST_CASE("explicit LAN bind address is the network identity source of truth",
+          "[session][network]") {
   auto previous = REXCVAR_GET(lan_bind_address);
   REXCVAR_SET(lan_bind_address, "192.168.50.213");
   CHECK(ntohl(LanDiscoveryService::DetermineLanIpv4()) == 0x0A0000D5u);
@@ -319,7 +318,8 @@ TEST_CASE("session search excludes only the configured local host identity", "[s
   CHECK(visible[0]->info.id != local->info.id);
 }
 
-TEST_CASE("abandoned local host records are deleted without touching remote sessions", "[session]") {
+TEST_CASE("abandoned local host records are deleted without touching remote sessions",
+          "[session]") {
   SessionRegistry registry;
   registry.Create(0x1001, "DesktopHost", {0xD500000A, 3074}, 1, 6, 0);
   auto remote = registry.Create(0x1002, "ROGAlly", {0x1301000A, 3074}, 1, 6, 0);
@@ -410,8 +410,7 @@ TEST_CASE("LAN discovery advertises and returns a created session", "[session][n
   CHECK(results[0].info.host_address.port == 3074);
 }
 
-TEST_CASE("direct connect discovers and joins a host without LAN broadcast",
-          "[session][network]") {
+TEST_CASE("direct connect discovers and joins a host without LAN broadcast", "[session][network]") {
   constexpr uint32_t title_id = 0x58410A7A;
   constexpr uint16_t discovery_port = 39043;
   auto previous_bind = REXCVAR_GET(lan_bind_address);
@@ -438,8 +437,7 @@ TEST_CASE("direct connect discovers and joins a host without LAN broadcast",
   REXCVAR_SET(session_directory_build_id, "test-build");
 
   SessionRegistry host_registry;
-  auto hosted = host_registry.Create(0x1001, "DesktopHost",
-                                     {htonl(0xC0A8320Au), 30742}, 1, 6, 0);
+  auto hosted = host_registry.Create(0x1001, "DesktopHost", {htonl(0xC0A8320Au), 30742}, 1, 6, 0);
   LanDiscoveryService host(title_id, discovery_port);
   REQUIRE(host.Advertise(hosted));
 
@@ -498,6 +496,19 @@ TEST_CASE("unreachable session directory preserves LAN discovery", "[session][ne
   REQUIRE(results.size() == 1);
   CHECK(results[0].info.id == hosted->info.id);
   CHECK(results[0].host_xuid == hosted->host_xuid);
+}
+
+TEST_CASE("directory heartbeat failures preserve one logical host registration",
+          "[session][network]") {
+  using Disposition = DirectoryHeartbeatDisposition;
+  CHECK(ClassifyDirectoryHeartbeatResponse(std::nullopt, false) ==
+        Disposition::kRetrySameRegistration);
+  CHECK(ClassifyDirectoryHeartbeatResponse(500, false) == Disposition::kRetrySameRegistration);
+  CHECK(ClassifyDirectoryHeartbeatResponse(503, false) == Disposition::kRetrySameRegistration);
+  CHECK(ClassifyDirectoryHeartbeatResponse(200, false) == Disposition::kRetrySameRegistration);
+  CHECK(ClassifyDirectoryHeartbeatResponse(404, false) == Disposition::kRecoverRegistration);
+  CHECK(ClassifyDirectoryHeartbeatResponse(403, false) == Disposition::kRejected);
+  CHECK(ClassifyDirectoryHeartbeatResponse(200, true) == Disposition::kAccepted);
 }
 
 TEST_CASE("stopping a LAN advertisement removes the hosted session", "[session][network]") {

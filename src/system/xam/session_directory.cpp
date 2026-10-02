@@ -20,6 +20,8 @@
 
 #if REX_PLATFORM_WIN32
 #include <windows.h>
+
+#include <bcrypt.h>
 #include <winhttp.h>
 #include <ws2tcpip.h>
 #endif
@@ -31,6 +33,7 @@ constexpr uint32_t kDirectoryProtocolVersion = 1;
 constexpr uint32_t kNoSessionIndex = 0xFFFFFFFFu;
 constexpr size_t kMaxResponseBytes = 64 * 1024;
 constexpr auto kHeartbeatInterval = std::chrono::seconds(15);
+constexpr auto kHeartbeatRetryInitial = std::chrono::seconds(1);
 constexpr auto kTraversalPollInterval = std::chrono::milliseconds(250);
 constexpr auto kListCacheLifetime = std::chrono::seconds(5);
 
@@ -81,9 +84,11 @@ bool IsPrintableName(std::string_view value) {
                      [](unsigned char ch) { return ch >= 0x20 && ch != 0x7F; });
 }
 
-std::optional<DirectoryTraversalAttempt> ParseTraversalAttempt(
-    const nlohmann::json& document, std::string session_id, uint8_t participant) {
-  if (!document.is_object()) return std::nullopt;
+std::optional<DirectoryTraversalAttempt> ParseTraversalAttempt(const nlohmann::json& document,
+                                                               std::string session_id,
+                                                               uint8_t participant) {
+  if (!document.is_object())
+    return std::nullopt;
   auto attempt = document.value("attempt_id", "");
   auto capability = document.value("capability", "");
   auto host = document.value("rendezvous_host", "");
@@ -91,15 +96,32 @@ std::optional<DirectoryTraversalAttempt> ParseTraversalAttempt(
   auto role = document.value("participant", "");
   auto hex = [](std::string_view text) {
     return text.size() == 32 && std::all_of(text.begin(), text.end(), [](unsigned char ch) {
-      return std::isxdigit(ch) != 0;
-    });
+             return std::isxdigit(ch) != 0;
+           });
   };
   if (!hex(attempt) || !hex(capability) || host.empty() || host.size() > 255 || !port ||
       port > 65535 || role != (participant ? "client" : "host"))
     return std::nullopt;
-  return DirectoryTraversalAttempt{std::move(session_id), std::move(attempt),
-                                   std::move(capability), std::move(host), uint16_t(port),
-                                   participant};
+  return DirectoryTraversalAttempt{std::move(session_id), std::move(attempt), std::move(capability),
+                                   std::move(host),       uint16_t(port),     participant};
+}
+
+std::optional<std::string> RandomUrlToken(size_t byte_count) {
+#if REX_PLATFORM_WIN32
+  std::vector<uint8_t> bytes(byte_count);
+  if (BCryptGenRandom(nullptr, bytes.data(), ULONG(bytes.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG) <
+      0)
+    return std::nullopt;
+  constexpr char kHex[] = "0123456789abcdef";
+  std::string result(bytes.size() * 2, '0');
+  for (size_t index = 0; index < bytes.size(); ++index) {
+    result[index * 2] = kHex[bytes[index] >> 4];
+    result[index * 2 + 1] = kHex[bytes[index] & 0x0F];
+  }
+  return result;
+#else
+  return std::nullopt;
+#endif
 }
 
 struct HttpResult {
@@ -248,6 +270,19 @@ REXCVAR_DEFINE_STRING(session_directory_candidate_type, "tailscale", "Network",
 REXCVAR_DEFINE_UINT32(session_directory_session_index, kNoSessionIndex, "Network",
                       "Directory result index to resolve through Direct Connect")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+DirectoryHeartbeatDisposition ClassifyDirectoryHeartbeatResponse(std::optional<uint32_t> status,
+                                                                 bool valid_session_id) {
+  if (!status)
+    return DirectoryHeartbeatDisposition::kRetrySameRegistration;
+  if (*status == 404)
+    return DirectoryHeartbeatDisposition::kRecoverRegistration;
+  if (*status == 400 || *status == 401 || *status == 403)
+    return DirectoryHeartbeatDisposition::kRejected;
+  if (*status == 200 && valid_session_id)
+    return DirectoryHeartbeatDisposition::kAccepted;
+  return DirectoryHeartbeatDisposition::kRetrySameRegistration;
+}
 
 class SessionDirectoryClient::Impl {
  public:
@@ -412,24 +447,25 @@ class SessionDirectoryClient::Impl {
     return list_cache;
   }
 
-  std::optional<DirectoryTraversalAttempt> CreateJoinAttempt(
-      const std::string& session_id) const {
+  std::optional<DirectoryTraversalAttempt> CreateJoinAttempt(const std::string& session_id) const {
     const auto& url = REXCVAR_GET(session_directory_url);
-    if (url.empty() || !IsUrlToken(session_id, 64)) return std::nullopt;
+    if (url.empty() || !IsUrlToken(session_id, 64))
+      return std::nullopt;
     auto response = Request(url, L"POST", "/sessions/" + session_id + "/join-attempts", "{}");
-    if (!response || response->status != 201) return std::nullopt;
+    if (!response || response->status != 201)
+      return std::nullopt;
     auto document = nlohmann::json::parse(response->body, nullptr, false);
     return ParseTraversalAttempt(document, session_id, 1);
   }
 
   void CompleteJoinAttempt(const DirectoryTraversalAttempt& attempt) const {
     const auto& url = REXCVAR_GET(session_directory_url);
-    if (url.empty() || !IsUrlToken(attempt.session_id, 64) ||
-        !IsUrlToken(attempt.attempt_id, 64) || attempt.capability.empty())
+    if (url.empty() || !IsUrlToken(attempt.session_id, 64) || !IsUrlToken(attempt.attempt_id, 64) ||
+        attempt.capability.empty())
       return;
-    Request(url, L"DELETE", "/sessions/" + attempt.session_id + "/join-attempts/" +
-                                  attempt.attempt_id,
-            "", attempt.capability);
+    Request(url, L"DELETE",
+            "/sessions/" + attempt.session_id + "/join-attempts/" + attempt.attempt_id, "",
+            attempt.capability);
     NatProbeRetireIdentity(attempt.attempt_id);
   }
 
@@ -449,42 +485,117 @@ class SessionDirectoryClient::Impl {
   }
 
   void HostLoop(std::stop_token stop) {
+    auto host_instance_id = RandomUrlToken(16);
+    auto host_instance_token = RandomUrlToken(32);
+    if (!host_instance_id || !host_instance_token) {
+      REXSYS_WARN("Session directory: secure host registration identity unavailable");
+      return;
+    }
     std::string session_id;
     std::string token;
     std::unordered_set<std::string> host_attempts;
+    bool recovering = false;
     auto next_heartbeat = std::chrono::steady_clock::time_point{};
+    auto next_registration = std::chrono::steady_clock::time_point{};
+    auto retry_delay = kHeartbeatRetryInitial;
+    auto schedule_retry = [&] {
+      next_registration = std::chrono::steady_clock::now() + retry_delay;
+      retry_delay = std::min(retry_delay * 2, kHeartbeatInterval);
+    };
+    auto schedule_heartbeat = [&] {
+      retry_delay = kHeartbeatRetryInitial;
+      next_heartbeat = std::chrono::steady_clock::now() + kHeartbeatInterval;
+    };
     while (!stop.stop_requested()) {
-      auto body = RegistrationPayload(*hosted, title_id, discovery_port).dump();
+      auto registration = RegistrationPayload(*hosted, title_id, discovery_port);
+      auto heartbeat_body = registration.dump();
+      registration["host_instance_id"] = *host_instance_id;
+      registration["host_instance_token"] = *host_instance_token;
+      auto registration_body = registration.dump();
       std::optional<HttpResult> response;
-      if (session_id.empty()) {
-        response = Request(REXCVAR_GET(session_directory_url), L"POST", "/sessions", body);
-        if (response && response->status == 201) {
+      auto now = std::chrono::steady_clock::now();
+      if ((session_id.empty() || recovering) && now >= next_registration) {
+        response =
+            Request(REXCVAR_GET(session_directory_url), L"POST", "/sessions", registration_body);
+        bool accepted = false;
+        if (response && (response->status == 200 || response->status == 201)) {
           auto document = nlohmann::json::parse(response->body, nullptr, false);
           if (document.is_object()) {
             auto candidate_session_id = document.value("session_id", "");
             auto candidate_token = document.value("registration_token", "");
             if (IsUrlToken(candidate_session_id, 64) && IsUrlToken(candidate_token, 128)) {
+              bool changed = !session_id.empty() && candidate_session_id != session_id;
               session_id = std::move(candidate_session_id);
               token = std::move(candidate_token);
+              accepted = true;
+              if (recovering && changed)
+                REXSYS_INFO("Session directory: recovered '{}' with replacement {}",
+                            hosted->host_name, session_id);
+              else if (recovering)
+                REXSYS_INFO("Session directory: recovered '{}' as {}", hosted->host_name,
+                            session_id);
+              else
+                REXSYS_INFO("Session directory: registered '{}' as {}", hosted->host_name,
+                            session_id);
             }
           }
-          if (!session_id.empty() && !token.empty())
-            REXSYS_INFO("Session directory: registered '{}' as {}", hosted->host_name, session_id);
-          next_heartbeat = std::chrono::steady_clock::now() + kHeartbeatInterval;
         }
-      } else if (std::chrono::steady_clock::now() >= next_heartbeat) {
-        response = Request(REXCVAR_GET(session_directory_url), L"POST",
-                           "/sessions/" + session_id + "/heartbeat", body, token);
-        if (!response || response->status == 404) {
-          for (const auto& attempt : host_attempts) NatProbeRetireIdentity(attempt);
-          host_attempts.clear();
-          session_id.clear();
-          token.clear();
+        if (accepted) {
+          recovering = false;
+          schedule_heartbeat();
         } else {
-          next_heartbeat = std::chrono::steady_clock::now() + kHeartbeatInterval;
+          if (response &&
+              (response->status == 400 || response->status == 401 || response->status == 403))
+            REXSYS_WARN("Session directory: host registration rejected with HTTP {}",
+                        response->status);
+          else if (response)
+            REXSYS_WARN("Session directory: host registration HTTP {}; retrying same identity",
+                        response->status);
+          else
+            REXSYS_WARN(
+                "Session directory: host registration transport failure; retrying same identity");
+          schedule_retry();
+        }
+      } else if (!recovering && !session_id.empty() && now >= next_heartbeat) {
+        response = Request(REXCVAR_GET(session_directory_url), L"POST",
+                           "/sessions/" + session_id + "/heartbeat", heartbeat_body, token);
+        bool valid_session_id = false;
+        if (response && response->status == 200) {
+          auto document = nlohmann::json::parse(response->body, nullptr, false);
+          valid_session_id = document.is_object() && document.value("session_id", "") == session_id;
+        }
+        auto disposition = ClassifyDirectoryHeartbeatResponse(
+            response ? std::optional<uint32_t>(response->status) : std::nullopt, valid_session_id);
+        switch (disposition) {
+          case DirectoryHeartbeatDisposition::kAccepted:
+            schedule_heartbeat();
+            break;
+          case DirectoryHeartbeatDisposition::kRetrySameRegistration:
+            if (response)
+              REXSYS_WARN("Session directory: heartbeat HTTP {}; retrying same registration",
+                          response->status);
+            else
+              REXSYS_WARN(
+                  "Session directory: heartbeat transport failure; retrying same registration");
+            next_heartbeat = std::chrono::steady_clock::now() + retry_delay;
+            retry_delay = std::min(retry_delay * 2, kHeartbeatInterval);
+            break;
+          case DirectoryHeartbeatDisposition::kRecoverRegistration:
+            REXSYS_WARN("Session directory: heartbeat returned 404; recovering logical lobby");
+            for (const auto& attempt : host_attempts)
+              NatProbeRetireIdentity(attempt);
+            host_attempts.clear();
+            recovering = true;
+            next_registration = std::chrono::steady_clock::now();
+            retry_delay = kHeartbeatRetryInitial;
+            break;
+          case DirectoryHeartbeatDisposition::kRejected:
+            REXSYS_WARN("Session directory: heartbeat rejected with HTTP {}", response->status);
+            next_heartbeat = std::chrono::steady_clock::now() + kHeartbeatInterval;
+            break;
         }
       }
-      if (!session_id.empty()) {
+      if (!session_id.empty() && !recovering) {
         auto pending = Request(REXCVAR_GET(session_directory_url), L"GET",
                                "/sessions/" + session_id + "/join-attempts", "", token);
         if (pending && pending->status == 200) {
@@ -501,7 +612,8 @@ class SessionDirectoryClient::Impl {
               }
             }
             for (const auto& attempt : host_attempts)
-              if (!pending_attempts.contains(attempt)) NatProbeRetireIdentity(attempt);
+              if (!pending_attempts.contains(attempt))
+                NatProbeRetireIdentity(attempt);
             host_attempts = std::move(pending_attempts);
           }
         }
@@ -509,7 +621,8 @@ class SessionDirectoryClient::Impl {
       std::unique_lock lock(wait_mutex);
       wake.wait_for(lock, kTraversalPollInterval, [&] { return stop.stop_requested(); });
     }
-    for (const auto& attempt : host_attempts) NatProbeRetireIdentity(attempt);
+    for (const auto& attempt : host_attempts)
+      NatProbeRetireIdentity(attempt);
     if (!session_id.empty())
       Request(REXCVAR_GET(session_directory_url), L"DELETE", "/sessions/" + session_id, "", token);
   }
@@ -551,8 +664,7 @@ std::optional<DirectoryTraversalAttempt> SessionDirectoryClient::CreateJoinAttem
     const std::string& session_id) const {
   return impl_->CreateJoinAttempt(session_id);
 }
-void SessionDirectoryClient::CompleteJoinAttempt(
-    const DirectoryTraversalAttempt& attempt) const {
+void SessionDirectoryClient::CompleteJoinAttempt(const DirectoryTraversalAttempt& attempt) const {
   impl_->CompleteJoinAttempt(attempt);
 }
 

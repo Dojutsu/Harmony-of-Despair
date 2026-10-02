@@ -45,6 +45,19 @@ struct DirectoryTraversalAttempt {
   uint8_t participant = 0;
 };
 
+enum class DirectoryHeartbeatDisposition {
+  kAccepted,
+  kRetrySameRegistration,
+  kRecoverRegistration,
+  kRejected,
+};
+
+// Keep transport and server failures distinct from an authoritative 404. This
+// policy is public only so the host lifecycle can be covered without real HTTP
+// timing in unit tests.
+DirectoryHeartbeatDisposition ClassifyDirectoryHeartbeatResponse(std::optional<uint32_t> status,
+                                                                 bool valid_session_id);
+
 class SessionDirectoryClient {
  public:
   SessionDirectoryClient();
@@ -58,8 +71,7 @@ class SessionDirectoryClient {
   std::vector<DirectorySession> List(uint32_t title_id) const;
   void RequestList(uint32_t title_id) const;
   std::optional<std::vector<DirectorySession>> CachedList(uint32_t title_id) const;
-  std::optional<DirectoryTraversalAttempt> CreateJoinAttempt(
-      const std::string& session_id) const;
+  std::optional<DirectoryTraversalAttempt> CreateJoinAttempt(const std::string& session_id) const;
   void CompleteJoinAttempt(const DirectoryTraversalAttempt& attempt) const;
 
  private:
