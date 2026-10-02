@@ -135,6 +135,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $repoRoot 'Launch-Harmony.bat') -Destination $artifactRoot
     Copy-Item -LiteralPath (Join-Path $repoRoot 'Join-Harmony.ps1') -Destination $artifactRoot
     Copy-Item -LiteralPath (Join-Path $repoRoot 'Setup-Harmony.ps1') -Destination $artifactRoot
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'Online-Harmony.ps1') -Destination $artifactRoot
 
     $fakeSource = @'
 using System;
@@ -188,6 +189,13 @@ public static class LauncherFixture
     Assert-True ((Get-ProfileLanguage $firstLocal) -eq '') 'first launch selected a language without user choice'
     Assert-LanguageArgument $firstArguments ''
 
+    $preflightArguments = Join-Path $testRoot 'preflight must not launch.txt'
+    $env:HARMONY_TEST_ARGUMENTS_PATH = $preflightArguments
+    $preflight = Invoke-Setup $firstLocal @('-NoLaunch')
+    Assert-True ($preflight.ExitCode -eq 0 -and -not (Test-Path -LiteralPath $preflightArguments)) 'existing-profile preflight launched the game'
+    Assert-True ((Get-ProfileXuid $firstLocal) -eq $firstXuid -and (Get-ProfileName $firstLocal) -eq 'Alice') 'preflight changed the saved profile'
+    $env:HARMONY_TEST_ARGUMENTS_PATH = $firstArguments
+
     $arguments = Get-GameArguments $firstArguments
     foreach ($required in @(
         '--lan_online=true',
@@ -238,6 +246,13 @@ public static class LauncherFixture
     Assert-True ($independent.ExitCode -eq 0) "independent launch exited $($independent.ExitCode)"
     Assert-True ((Get-ProfileXuid $secondLocal) -ne $firstXuid) 'independent profile generated the same XUID'
     Assert-True ((Get-ProfileName $secondLocal) -eq 'Alice') 'duplicate display name was not preserved'
+
+    $freshPreflightLocal = Join-Path $testRoot 'Fresh Preflight Local AppData'
+    $freshPreflightArguments = Join-Path $testRoot 'fresh preflight must not launch.txt'
+    $env:HARMONY_TEST_ARGUMENTS_PATH = $freshPreflightArguments
+    $freshPreflight = Invoke-Setup $freshPreflightLocal @('-PlayerName', 'Fresh', '-NoLaunch')
+    Assert-True ($freshPreflight.ExitCode -eq 0 -and -not (Test-Path -LiteralPath $freshPreflightArguments)) 'first-run preflight launched the game'
+    Assert-True ((Get-ProfileName $freshPreflightLocal) -eq 'Fresh') 'first-run preflight did not save name'
 
     $xuidOnlyLocal = Join-Path $testRoot 'XUID Only Local AppData'
     $xuidOnlyProfileRoot = Join-Path $xuidOnlyLocal 'HarmonyRecomp'
@@ -549,10 +564,11 @@ public static class LauncherFixture
     Copy-Item -LiteralPath (Join-Path $repoRoot 'Launch-Harmony.bat') -Destination $missingRoot
     [IO.File]::WriteAllText(
         (Join-Path $missingRoot 'Setup-Harmony.ps1'),
-        "[Console]::Error.WriteLine('synthetic setup boundary')`r`nexit 21`r`n",
+        "[IO.File]::WriteAllLines(`$env:HARMONY_TEST_ARGUMENTS_PATH, [string[]]`$args)`r`n[Console]::Error.WriteLine('synthetic setup boundary')`r`nexit 21`r`n",
         [Text.UTF8Encoding]::new($false))
     $env:LOCALAPPDATA = Join-Path $testRoot 'Missing Importer Local AppData'
     $env:HARMONY_NO_PAUSE = '1'
+    $env:HARMONY_TEST_ARGUMENTS_PATH = Join-Path $testRoot 'ordinary batch dispatch.txt'
     Push-Location $missingRoot
     try {
         $previousPreference = $ErrorActionPreference
@@ -569,7 +585,58 @@ public static class LauncherFixture
     Assert-True ($batchExit -eq 21) "batch launcher returned $batchExit instead of setup exit 21"
     $batchText = $batchOutput | Out-String
     Assert-True ($batchText -match 'synthetic setup boundary') 'batch launcher hid the setup error'
-    Assert-True ($batchText -match 'failed with exit code 21') 'batch launcher omitted the preserved exit code'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $missingRoot 'Online-Harmony.ps1'))) 'missing-importer test unexpectedly contains menu'
+    $defaultDispatch = @(Get-GameArguments $env:HARMONY_TEST_ARGUMENTS_PATH)
+    Assert-True ($defaultDispatch.Count -eq 1 -and $defaultDispatch[0] -ceq '-NoLaunch') 'double-click path did not perform setup before opening menu'
+    [IO.File]::WriteAllText((Join-Path $missingRoot 'Setup-Harmony.ps1'),
+        "[IO.File]::WriteAllLines(`$env:HARMONY_TEST_ARGUMENTS_PATH, [string[]]`$args)`r`nexit 0`r`n",
+        [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $missingRoot 'Online-Harmony.ps1'),
+        "[IO.File]::WriteAllText((Join-Path `$PSScriptRoot 'menu-opened.txt'), 'opened')`r`nexit 0`r`n",
+        [Text.UTF8Encoding]::new($false))
+    $env:HARMONY_TEST_ARGUMENTS_PATH = Join-Path $testRoot 'successful default dispatch.txt'
+    Push-Location $missingRoot
+    try { & cmd.exe /d /c Launch-Harmony.bat | Out-Null; $menuExit = $LASTEXITCODE }
+    finally { Pop-Location }
+    Assert-True ($menuExit -eq 0 -and (Test-Path -LiteralPath (Join-Path $missingRoot 'menu-opened.txt'))) 'double-click path did not open menu after setup'
+    Assert-True ((Get-GameArguments $env:HARMONY_TEST_ARGUMENTS_PATH) -ceq '-NoLaunch') 'menu opened without preflight setup'
+    [IO.File]::WriteAllText((Join-Path $missingRoot 'Setup-Harmony.ps1'),
+        "[IO.File]::WriteAllLines(`$env:HARMONY_TEST_ARGUMENTS_PATH, [string[]]`$args)`r`nexit 21`r`n",
+        [Text.UTF8Encoding]::new($false))
+    $env:HARMONY_TEST_ARGUMENTS_PATH = Join-Path $testRoot 'missing invite batch dispatch.txt'
+    Push-Location $missingRoot
+    try {
+        $previousPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $missingOutput = @(& cmd.exe /d /c Launch-Harmony.bat --join-code 2>&1)
+            $missingExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousPreference
+        }
+    } finally {
+        Pop-Location
+    }
+    Assert-True ($missingExit -eq 21) 'missing-code batch dispatch changed'
+    $missingDispatch = @(Get-GameArguments $env:HARMONY_TEST_ARGUMENTS_PATH)
+    Assert-True ($missingDispatch.Count -eq 1 -and $missingDispatch[0] -ceq '-JoinByInviteCode') 'missing-code batch path no longer invokes the interactive join flow'
+    $env:HARMONY_TEST_ARGUMENTS_PATH = Join-Path $testRoot 'configure batch dispatch.txt'
+    Push-Location $missingRoot
+    try {
+        $previousPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $configureOutput = @(& cmd.exe /d /c Launch-Harmony.bat --configure 2>&1)
+            $configureExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousPreference
+        }
+    } finally {
+        Pop-Location
+    }
+    Assert-True ($configureExit -eq 21) 'configure batch dispatch changed'
+    $configureDispatch = @(Get-GameArguments $env:HARMONY_TEST_ARGUMENTS_PATH)
+    Assert-True ($configureDispatch.Count -eq 1 -and $configureDispatch[0] -ceq '-Configure') 'configure batch path changed'
 
     Write-Host 'Launcher tests passed: base flows plus language IDs 1-6, invalid values, and legacy profiles.'
 } finally {

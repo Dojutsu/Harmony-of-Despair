@@ -18,8 +18,9 @@ function Get-OnlineSnapshots {
 }
 $result = @{ Error = $null; Passed = $false }
 $realOnlineAction = ${function:Get-OnlineAction}
-$joinCapture = @{ Code = $null; Arguments = $null }
+$joinCapture = @{ Action = $null; Code = $null; Arguments = $null }
 function Get-OnlineAction([string]$Action, [string]$Code, [bool]$GameRunning) {
+    $joinCapture.Action = $Action
     $joinCapture.Code = $Code
     $joinCapture.Arguments = & $realOnlineAction $Action $Code $false
     # Exercise the button without launching a game or changing membership.
@@ -67,4 +68,20 @@ Start-OnlineCompanion {
 }
 if ($result.Error) { throw $result.Error }
 if (-not $result.Passed) { throw 'WinForms test did not execute.' }
-Write-Output 'WinForms rendering, host badge, fallback, clipboard, and independent close passed.'
+foreach ($action in @('play', 'configure')) {
+    $joinCapture.Action = $null
+    $buttonText = if ($action -eq 'play') { 'Play' } else { 'Settings' }
+    Start-OnlineCompanion {
+        param($form)
+        try {
+            $button = @($form.Controls | Where-Object Text -eq $buttonText)[0]
+            if (-not $button) { throw "Missing $buttonText button." }
+            $button.PerformClick()
+        } finally { $form.Close() }
+    }
+    if ($joinCapture.Action -cne $action) { throw "$buttonText button selected the wrong action." }
+}
+$joinCapture.Action = $null
+Start-OnlineCompanion { param($form) $form.Close() }
+if ($joinCapture.Action) { throw 'Closing the invite window launched an action.' }
+Write-Output 'WinForms rendering, Join, Play, Settings, cancel, clipboard, and independent close passed.'

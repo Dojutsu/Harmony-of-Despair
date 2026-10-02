@@ -93,7 +93,7 @@ function Start-OnlineCompanion([scriptblock]$OnShown) {
     Add-Type -AssemblyName System.Drawing
     [Windows.Forms.Application]::EnableVisualStyles()
     $form = [Windows.Forms.Form]::new()
-    $form.Text = 'Harmony Online'
+    $form.Text = 'HarmonyRecomp Launcher'
     $form.ClientSize = [Drawing.Size]::new(430, 510)
     $form.FormBorderStyle = 'FixedDialog'
     $form.MaximizeBox = $false
@@ -110,7 +110,7 @@ function Start-OnlineCompanion([scriptblock]$OnShown) {
         $form.Controls.Add($control); return $control
     }
     $player = LabelAt '' 16 16 265
-    $change = ButtonAt 'Change Name' 295 12
+    $change = ButtonAt 'Settings' 295 12
     $hint = LabelAt 'Name changes apply on the next launch.' 16 46
     $status = LabelAt 'Offline' 16 80 175
     $play = ButtonAt 'Play' 295 76

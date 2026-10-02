@@ -4,6 +4,13 @@ setlocal
 set "HARMONY_ROOT=%~dp0"
 set "HARMONY_SETUP_ARG="
 
+if "%~1"=="" (
+  powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File "%HARMONY_ROOT%Setup-Harmony.ps1" -NoLaunch
+  if errorlevel 1 goto :launcher_exit
+  powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File "%HARMONY_ROOT%Online-Harmony.ps1"
+  goto :launcher_exit
+)
+
 if /i "%~1"=="--online" (
   powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File "%HARMONY_ROOT%Online-Harmony.ps1"
   exit /b
@@ -35,3 +42,6 @@ if not "%HARMONY_EXIT_CODE%"=="0" (
 )
 
 exit /b %HARMONY_EXIT_CODE%
+
+:launcher_exit
+exit /b %ERRORLEVEL%

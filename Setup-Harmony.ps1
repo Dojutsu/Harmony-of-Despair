@@ -252,6 +252,7 @@ if ($needsSetup) {
         $picker.ShowNewFolderButton = $false
         if ($picker.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) {
             Write-Host 'HarmonyRecomp setup was canceled. No game data was imported.'
+            if ($NoLaunch) { exit 28 }
             exit 0
         }
         $Source = $picker.SelectedPath

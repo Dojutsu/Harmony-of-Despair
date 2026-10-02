@@ -30,11 +30,11 @@ currently implemented.
 
 ## Optional Windows online companion
 
-Run `Launch-Harmony.bat --online` to open the separate Harmony Online window.
+Double-click `Launch-Harmony.bat` to open the HarmonyRecomp Launcher after setup.
 It shows the current player name, Hosting/Joined/Offline status, public host
 invite code with Copy Code, and the current party roster. Play and Join by Code
 use the existing launcher; close a running game before using either action.
-Change Name opens the existing launcher settings for player name and game
+Settings opens the existing launcher settings for player name and game
 language. Changes apply on the next launch and preserve the player XUID.
 
 Closing this window does not close the game or change a session. Harmony works
@@ -66,9 +66,12 @@ already-extracted TU2 directory as an advanced fallback.
 4. HarmonyRecomp identifies the compatible base game and TU2 update by package
    metadata, extracts them transactionally into
    `%LOCALAPPDATA%\HarmonyRecomp\game-data`, and installs detected DLC.
-5. The game starts. Future launches reuse that managed local installation and
-   require no folder selection or command line. The same launcher supports
-   single-player, LAN multiplayer, and automatic public multiplayer.
+5. Enter a player name when prompted. Choose **Play**, **Join by Code**, or
+   **Settings** in the launcher window. To join a friend's lobby, type their
+   six-character invite code into the window and click **Join by Code**. Let
+   Harmony reach the main menu; the existing invite flow then attempts to join.
+   Future double-click launches reuse the managed game data, player name, and
+   identity, and open the same launcher window without a folder selection.
 
 First launch also asks for a player name. Harmony stores the 1-15 character
 name beside the persistent player XUID in

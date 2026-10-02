@@ -47,6 +47,7 @@ foreach ($bad in @('', 'ABC', 'ABC123', 'AB7K2Q secret', 'ab7k2q')) {
 $args = @(Get-OnlineAction 'join' 'ab7k2q' $false)
 Check ('-JoinByInviteCode' -in $args -and '-InviteCode' -in $args -and 'AB7K2Q' -in $args) 'Join path'
 Check (($args -join ' ') -match 'Setup-Harmony.ps1') 'Launcher delegation'
+Check ('-JoinByInviteCode' -notin @(Get-OnlineAction 'play' '' $false)) 'Play unexpectedly selected invite flow'
 Check ('-Configure' -in @(Get-OnlineAction 'configure' '' $true)) 'Name action with running game'
 foreach ($bad in @('AB7K2', 'AB7K2QQ', 'ABC123', 'AB7K2Q&', 'AB7K2Q|', 'AB7K2Q"', 'AB7K2Q%CD%', 'AB7K2Q$(echo BAD)')) {
     $rejected = $false
