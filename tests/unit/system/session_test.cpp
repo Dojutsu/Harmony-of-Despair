@@ -1,5 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+
 #include <rex/platform.h>
 
 #if REX_PLATFORM_WIN32
@@ -563,6 +567,38 @@ TEST_CASE("invite-code directory responses use normal compatibility validation",
   CHECK_FALSE(ParseInviteCodeSessionResponse(unsafe_candidate, title_id, build_id));
   CHECK_FALSE(ParseInviteCodeSessionResponse("{}", title_id, build_id));
   CHECK_FALSE(ParseInviteCodeSessionResponse("not-json", title_id, build_id));
+}
+
+TEST_CASE("active invite code launcher state is bounded and follows hosting lifecycle",
+          "[session][directory]") {
+  auto root = std::filesystem::temp_directory_path() /
+              ("harmony-invite-state-" +
+               std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  auto path = root / "active-invite-code.txt";
+  struct Cleanup {
+    std::filesystem::path root;
+    ~Cleanup() {
+      std::error_code error;
+      std::filesystem::remove_all(root, error);
+    }
+  } cleanup{root};
+
+  REQUIRE(WriteActiveInviteCodeFile(path, "ab7k2q"));
+  {
+    std::ifstream input(path, std::ios::binary);
+    std::string value((std::istreambuf_iterator<char>(input)), {});
+    CHECK(value == "AB7K2Q");
+  }
+  REQUIRE(WriteActiveInviteCodeFile(path, "CD8M3R"));
+  {
+    std::ifstream input(path, std::ios::binary);
+    std::string value((std::istreambuf_iterator<char>(input)), {});
+    CHECK(value == "CD8M3R");
+  }
+  CHECK_FALSE(WriteActiveInviteCodeFile(path, "BAD"));
+  CHECK_FALSE(std::filesystem::exists(path.string() + ".tmp"));
+  RemoveActiveInviteCodeFile(path);
+  CHECK_FALSE(std::filesystem::exists(path));
 }
 
 TEST_CASE("stopping a LAN advertisement removes the hosted session", "[session][network]") {

@@ -4,6 +4,9 @@
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <future>
 #include <iomanip>
 #include <mutex>
@@ -100,6 +103,15 @@ std::optional<std::string> NormalizeInviteCode(std::string_view value) {
 
 bool IsInviteCodeSetting(std::string_view value) {
   return value.empty() || NormalizeInviteCode(value).has_value();
+}
+
+std::optional<std::filesystem::path> ActiveInviteCodePath() {
+#if REX_PLATFORM_WIN32
+  const char* local_app_data = std::getenv("LOCALAPPDATA");
+  if (local_app_data && *local_app_data)
+    return std::filesystem::path(local_app_data) / "HarmonyRecomp" / "active-invite-code.txt";
+#endif
+  return std::nullopt;
 }
 
 std::optional<DirectorySession> ParseDirectorySession(const nlohmann::json& item,
@@ -394,6 +406,45 @@ DirectoryHeartbeatDisposition ClassifyDirectoryHeartbeatResponse(std::optional<u
   return DirectoryHeartbeatDisposition::kRetrySameRegistration;
 }
 
+bool WriteActiveInviteCodeFile(const std::filesystem::path& path, std::string_view code) {
+  auto normalized = NormalizeInviteCode(code);
+  if (!normalized)
+    return false;
+  std::error_code error;
+  std::filesystem::create_directories(path.parent_path(), error);
+  if (error)
+    return false;
+  auto temporary = path;
+  temporary += ".tmp";
+  {
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    if (!output || !output.write(normalized->data(), normalized->size()))
+      return false;
+  }
+#if REX_PLATFORM_WIN32
+  if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    std::filesystem::remove(temporary, error);
+    return false;
+  }
+#else
+  std::filesystem::rename(temporary, path, error);
+  if (error) {
+    std::filesystem::remove(temporary, error);
+    return false;
+  }
+#endif
+  return true;
+}
+
+void RemoveActiveInviteCodeFile(const std::filesystem::path& path) {
+  std::error_code error;
+  std::filesystem::remove(path, error);
+  auto temporary = path;
+  temporary += ".tmp";
+  std::filesystem::remove(temporary, error);
+}
+
 class SessionDirectoryClient::Impl {
  public:
   ~Impl() {
@@ -437,6 +488,8 @@ class SessionDirectoryClient::Impl {
       worker.join();
     }
     hosted.reset();
+    if (auto path = ActiveInviteCodePath())
+      RemoveActiveInviteCodeFile(*path);
   }
 
   std::vector<DirectorySession> List(uint32_t value_title_id) const {
@@ -595,6 +648,9 @@ class SessionDirectoryClient::Impl {
                 REXSYS_INFO("Session directory: registered '{}' as {}", hosted->host_name,
                             session_id);
               REXSYS_INFO("Harmony invite code: {}", candidate_invite_code);
+              if (auto path = ActiveInviteCodePath();
+                  path && !WriteActiveInviteCodeFile(*path, candidate_invite_code))
+                REXSYS_WARN("Harmony invite code: could not publish launcher state");
             }
           }
         }
@@ -683,6 +739,8 @@ class SessionDirectoryClient::Impl {
       NatProbeRetireIdentity(attempt);
     if (!session_id.empty())
       Request(REXCVAR_GET(session_directory_url), L"DELETE", "/sessions/" + session_id, "", token);
+    if (auto path = ActiveInviteCodePath())
+      RemoveActiveInviteCodeFile(*path);
   }
 
   std::shared_ptr<SessionRecord> hosted;

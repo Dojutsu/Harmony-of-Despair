@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -59,6 +60,8 @@ enum class DirectoryHeartbeatDisposition {
 DirectoryHeartbeatDisposition ClassifyDirectoryHeartbeatResponse(std::optional<uint32_t> status,
                                                                  bool valid_session_id);
 std::optional<std::string> NormalizeDirectoryInviteCode(std::string_view value);
+bool WriteActiveInviteCodeFile(const std::filesystem::path& path, std::string_view code);
+void RemoveActiveInviteCodeFile(const std::filesystem::path& path);
 std::optional<DirectorySession> ParseInviteCodeSessionResponse(std::string_view body,
                                                                uint32_t title_id,
                                                                std::string_view build_id);
