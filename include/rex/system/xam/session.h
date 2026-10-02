@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -37,8 +38,8 @@ class LateTraversalQueryState {
                           std::optional<LanAddress> initially_queried_peer = std::nullopt)
       : traversal_enabled_(traversal_enabled), queried_peer_(initially_queried_peer) {}
 
-  std::optional<LanAddress> TakeAcknowledgedPeer(
-      bool search_active, std::optional<LanAddress> acknowledged_peer);
+  std::optional<LanAddress> TakeAcknowledgedPeer(bool search_active,
+                                                 std::optional<LanAddress> acknowledged_peer);
 
  private:
   bool traversal_enabled_ = false;
@@ -108,8 +109,7 @@ struct DiscoveryAdmissionContext {
 
 // Authoritative hosted-session mutation seam. Public discovery ignores a peer
 // private-bit claim; an invite context may honor the title-selected slot pool.
-bool ApplyDiscoveryMemberBatch(SessionRecord& session,
-                               std::span<const SessionMember> members,
+bool ApplyDiscoveryMemberBatch(SessionRecord& session, std::span<const SessionMember> members,
                                DiscoveryAdmissionContext context);
 
 enum class SessionState : uint32_t { kLobby, kRegistration, kInGame, kReporting, kDeleted };
@@ -175,7 +175,7 @@ class SessionRegistry {
               uint32_t private_slots);
   bool Start(const std::array<uint8_t, 8>& id);
   bool End(const std::array<uint8_t, 8>& id);
-  void UpsertDiscovered(SessionRecord record);
+  std::shared_ptr<SessionRecord> UpsertDiscovered(SessionRecord record);
 
  private:
   static uint64_t IdKey(const std::array<uint8_t, 8>& id);
@@ -189,22 +189,36 @@ class SessionRegistry {
 
 class LanDiscoveryService {
  public:
-  LanDiscoveryService(
-      uint32_t title_id, uint16_t port,
-      std::shared_ptr<HostAdmissionGrantStore> admission_grants = {});
+  LanDiscoveryService(uint32_t title_id, uint16_t port,
+                      std::shared_ptr<HostAdmissionGrantStore> admission_grants = {},
+                      SessionDirectoryClient::LocalUserIdentityProvider user_identity = {},
+                      SessionDirectoryClient::ClientAdmissionTransport client_admission_transport = {},
+                      bool automatic_client_admission_driver = true);
   ~LanDiscoveryService();
   LanDiscoveryService(const LanDiscoveryService&) = delete;
   LanDiscoveryService& operator=(const LanDiscoveryService&) = delete;
 
   bool Advertise(const std::shared_ptr<SessionRecord>& session);
   void SetTitleId(uint32_t title_id);
+  void SetLocalUserIdentity(uint32_t local_user_index, std::optional<uint64_t> xuid);
+  ClientAdmissionPrepareResult PrepareClientAdmission(
+      uint32_t local_user_index, const DirectoryTraversalAttempt& attempt,
+      const SessionRecord& discovered, uint64_t discovery_socket);
+  bool ConfirmClientAdmissionSession(uint32_t local_user_index,
+                                     const std::shared_ptr<const SessionRecord>& session);
+  bool HasClientAdmission(uint32_t local_user_index) const;
+  void PollClientAdmissions(
+      std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
   void StopAdvertising();
   bool IsAdvertising() const;
-  std::vector<SessionRecord> Search(uint32_t timeout_ms, uint32_t max_results);
+  std::vector<SessionRecord> Search(uint32_t timeout_ms, uint32_t max_results,
+                                    uint32_t local_user_index = 0);
   std::optional<SessionRecord> Join(const SessionRecord& session, const SessionMember& member,
                                     uint32_t timeout_ms);
   std::optional<SessionRecord> Leave(const SessionRecord& session, uint64_t xuid,
                                      uint32_t timeout_ms);
+  std::optional<ReadyAcceptedSessionCandidate> ReadyAcceptedSession(
+      uint32_t local_user_index = 0);
   static uint32_t DetermineLanIpv4();
 
  private:
@@ -213,6 +227,12 @@ class LanDiscoveryService {
   std::unique_ptr<Impl> impl_;
   SessionDirectoryClient directory_;
 };
+
+// CURRENT REXGLUE PLATFORM LIMITATION: production local identity currently
+// exposes local user 0 only. This is neither an Xbox/XAM limitation nor a
+// Harmony protocol requirement.
+std::optional<uint64_t> ResolveRexGlueLocalUserXuid(
+    uint32_t local_user_index, std::optional<uint64_t> current_profile_xuid);
 
 class XSession final : public XObject {
  public:

@@ -1,7 +1,10 @@
 #pragma once
 
+#include <array>
 #include <chrono>
+#include <deque>
 #include <filesystem>
+#include <functional>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -57,6 +60,179 @@ struct DirectoryTraversalAttempt {
   bool host_ready = false;
 };
 
+struct DirectoryInviteJoinAttempt {
+  DirectorySession session;
+  DirectoryTraversalAttempt attempt;
+};
+
+struct DirectoryAdmissionState {
+  std::string attempt_id;
+  std::string purpose;
+  std::string phase;
+  std::string admission_generation;
+  uint64_t lease_revision = 0;
+  uint32_t admission_lease_duration_ms = 0;
+  uint32_t admission_expires_in_ms = 0;
+  bool host_ready = false;
+};
+
+struct ReadyAcceptedSessionCandidate {
+  uint32_t local_user_index = 0;
+  std::string directory_session_id;
+  std::string attempt_id;
+  std::string admission_generation;
+  uint64_t lease_revision = 0;
+  bool private_allocation_eligible = false;
+  std::shared_ptr<const SessionRecord> session;
+};
+
+enum class ClientAdmissionAction { kNone, kArm, kStatus, kRenew };
+enum class ClientAdmissionApplyResult { kApplied, kIgnoredStale, kInvalidated };
+enum class ClientAdmissionPrepareResult { kPrepared, kBusy, kInvalid };
+enum class ClientAdmissionResponseDisposition {
+  kApply,
+  kRetainUntilExpiry,
+  kReconcileStatus,
+  kInvalidate,
+};
+
+struct ClientAdmissionOperation {
+  ClientAdmissionAction action = ClientAdmissionAction::kNone;
+  uint32_t local_user_index = 0;
+  uint64_t lifecycle_token = 0;
+  uint32_t title_id = 0;
+  uint64_t local_user_xuid = 0;
+  std::string directory_session_id;
+  std::string attempt_id;
+  std::string capability;
+  std::string admission_generation;
+  uint64_t expected_revision = 0;
+  uint64_t discovery_socket = 0;
+  uint32_t peer_ipv4 = 0;
+  uint16_t peer_port = 0;
+  std::chrono::steady_clock::time_point request_started_at{};
+};
+
+struct ClientAdmissionCancellation {
+  uint32_t local_user_index = 0;
+  uint64_t lifecycle_token = 0;
+  std::string directory_session_id;
+  std::string attempt_id;
+  std::string capability;
+  std::string admission_generation;
+  uint64_t lease_revision = 0;
+  bool admission_armed = false;
+  uint64_t discovery_socket = 0;
+};
+
+enum class ClientAdmissionTransportAction { kArm, kStatus, kRenew, kRevoke, kDelete };
+
+struct ClientAdmissionTransportRequest {
+  ClientAdmissionTransportAction action = ClientAdmissionTransportAction::kStatus;
+  uint32_t local_user_index = 0;
+  uint64_t lifecycle_token = 0;
+  std::string directory_session_id;
+  std::string attempt_id;
+  std::string capability;
+  std::string admission_generation;
+  uint64_t expected_revision = 0;
+  std::chrono::steady_clock::time_point request_started_at{};
+};
+
+struct ClientAdmissionTransportResponse {
+  std::optional<uint32_t> status;
+  std::string body;
+  std::optional<std::chrono::steady_clock::time_point> completed_at;
+};
+
+// Generic, process-local client authority. HTTP and NAT ownership stay outside
+// this reducer so its lease timing and stale-response behavior are deterministic
+// under a fake monotonic clock.
+class ClientAdmissionLeaseState {
+ public:
+  using Clock = std::chrono::steady_clock;
+
+  bool BindExactDiscovery(uint32_t local_user_index, uint64_t lifecycle_token, uint32_t title_id,
+                          uint64_t local_user_xuid, const DirectoryTraversalAttempt& attempt,
+                          std::shared_ptr<const SessionRecord> session,
+                          bool session_confirmed = true);
+  bool ConfirmExactSession(std::shared_ptr<const SessionRecord> session);
+  std::optional<ClientAdmissionOperation> BeginOperation(
+      uint64_t discovery_socket, uint32_t peer_ipv4, uint16_t peer_port,
+      Clock::time_point request_started_at = Clock::now());
+  ClientAdmissionApplyResult ApplyResponse(const ClientAdmissionOperation& operation,
+                                           const DirectoryAdmissionState& admission,
+                                           Clock::time_point response_received_at = Clock::now());
+  ClientAdmissionApplyResult ApplyTransportFailure(
+      const ClientAdmissionOperation& operation,
+      Clock::time_point response_received_at = Clock::now());
+  ClientAdmissionApplyResult EndAttemptAuthority(const ClientAdmissionOperation& operation);
+  bool ExpireIfNeeded(Clock::time_point now = Clock::now());
+  void Invalidate();
+  ClientAdmissionAction NextAction(Clock::time_point now = Clock::now()) const;
+  bool ValidateLiveness(uint32_t current_title_id, std::optional<uint64_t> current_user_xuid) const;
+  std::optional<ReadyAcceptedSessionCandidate> ReadyCandidate(
+      uint32_t current_title_id, std::optional<uint64_t> current_user_xuid,
+      Clock::time_point now = Clock::now()) const;
+
+  bool bound() const { return !attempt_id_.empty(); }
+  bool leased() const { return !admission_generation_.empty(); }
+  bool host_ready() const { return host_ready_; }
+  bool has_ever_been_ready() const { return has_ever_been_ready_; }
+  uint32_t local_user_index() const { return local_user_index_; }
+  uint64_t lifecycle_token() const { return lifecycle_token_; }
+  uint32_t title_id() const { return title_id_; }
+  uint64_t local_user_xuid() const { return local_user_xuid_; }
+  const std::string& directory_session_id() const { return directory_session_id_; }
+  const std::string& attempt_id() const { return attempt_id_; }
+  const std::string& capability() const { return capability_; }
+  const std::string& purpose() const { return purpose_; }
+  const std::string& admission_generation() const { return admission_generation_; }
+  uint64_t lease_revision() const { return lease_revision_; }
+  Clock::time_point lease_deadline() const { return lease_deadline_; }
+  Clock::time_point renewal_deadline() const { return renewal_deadline_; }
+
+ private:
+  bool Matches(const ClientAdmissionOperation& operation) const;
+  bool ExactSessionMatches(const SessionRecord& session) const;
+  ClientAdmissionApplyResult InstallLease(const DirectoryAdmissionState& admission,
+                                          Clock::time_point request_started_at, bool may_extend);
+  void Terminalize();
+
+  uint32_t local_user_index_ = 0;
+  uint64_t lifecycle_token_ = 0;
+  uint32_t title_id_ = 0;
+  uint64_t local_user_xuid_ = 0;
+  std::string directory_session_id_;
+  std::string attempt_id_;
+  std::string capability_;
+  std::string purpose_;
+  std::string admission_generation_;
+  uint64_t lease_revision_ = 0;
+  Clock::time_point lease_deadline_{};
+  Clock::time_point renewal_deadline_{};
+  bool host_ready_ = false;
+  bool has_ever_been_ready_ = false;
+  struct RenewalUncertainty {
+    std::string admission_generation;
+    uint64_t previous_revision = 0;
+    Clock::time_point request_started_at{};
+  };
+  std::optional<RenewalUncertainty> renewal_uncertainty_;
+  bool session_confirmed_ = false;
+  std::shared_ptr<const SessionRecord> pending_session_;
+  std::weak_ptr<const SessionRecord> live_session_;
+  std::array<uint8_t, 8> xbox_session_id_{};
+  std::array<uint8_t, 16> xbox_session_key_{};
+  uint32_t xbox_host_ipv4_ = 0;
+  uint16_t xbox_host_port_ = 0;
+  uint64_t xbox_nonce_ = 0;
+  uint64_t xbox_host_xuid_ = 0;
+};
+
+bool ClientAdmissionMayReplaceLifecycle(bool join_by_code_action,
+                                        const ClientAdmissionLeaseState* existing);
+
 struct HostAdmissionPollAttempt {
   std::string attempt_id;
   std::string capability;
@@ -108,11 +284,11 @@ class HostAdmissionGrantStore {
   void ApplyAuthenticatedPoll(std::string_view directory_session_id,
                               std::span<const HostAdmissionPollAttempt> attempts,
                               Clock::time_point poll_started_at = Clock::now());
-  HostAdmissionReservationResult Reserve(
-      std::string_view directory_session_id, uint64_t discovery_socket,
-      uint32_t peer_ipv4, uint16_t peer_port,
-      std::span<const std::string> acknowledged_attempt_ids, uint64_t xuid,
-      Clock::time_point now = Clock::now());
+  HostAdmissionReservationResult Reserve(std::string_view directory_session_id,
+                                         uint64_t discovery_socket, uint32_t peer_ipv4,
+                                         uint16_t peer_port,
+                                         std::span<const std::string> acknowledged_attempt_ids,
+                                         uint64_t xuid, Clock::time_point now = Clock::now());
   void Finish(const HostAdmissionReservation& reservation, bool committed,
               Clock::time_point now = Clock::now());
   void InvalidateSession(std::string_view directory_session_id);
@@ -179,15 +355,14 @@ struct DirectoryHostPollTransition {
 // timing in unit tests.
 DirectoryHeartbeatDisposition ClassifyDirectoryHeartbeatResponse(std::optional<uint32_t> status,
                                                                  bool valid_session_id);
-DirectoryHostPollDisposition ClassifyDirectoryHostPollResponse(
-    std::optional<uint32_t> status, bool valid_snapshot);
+DirectoryHostPollDisposition ClassifyDirectoryHostPollResponse(std::optional<uint32_t> status,
+                                                               bool valid_snapshot);
 std::optional<std::vector<DirectoryTraversalAttempt>> ParseDirectoryHostPollSnapshot(
     std::string_view body, std::string_view directory_session_id);
 DirectoryHostPollTransition ApplyDirectoryHostPollResult(
-    DirectoryHostPollDisposition disposition,
-    std::span<const DirectoryTraversalAttempt> attempts,
-    DirectoryHostPollRuntimeState& state,
-    HostAdmissionGrantStore* admission_grants, SessionRecord& hosted,
+    DirectoryHostPollDisposition disposition, std::span<const DirectoryTraversalAttempt> attempts,
+    DirectoryHostPollRuntimeState& state, HostAdmissionGrantStore* admission_grants,
+    SessionRecord& hosted,
     HostAdmissionGrantStore::Clock::time_point poll_started_at =
         HostAdmissionGrantStore::Clock::now());
 std::optional<std::string> NormalizeDirectoryInviteCode(std::string_view value);
@@ -196,10 +371,21 @@ void RemoveActiveInviteCodeFile(const std::filesystem::path& path);
 std::optional<DirectorySession> ParseInviteCodeSessionResponse(std::string_view body,
                                                                uint32_t title_id,
                                                                std::string_view build_id);
+std::optional<DirectoryInviteJoinAttempt> ParseInviteCodeJoinAttemptResponse(
+    std::string_view body, uint32_t title_id, std::string_view build_id);
+std::optional<DirectoryAdmissionState> ParseDirectoryAdmissionResponse(std::string_view body);
+ClientAdmissionResponseDisposition ClassifyClientAdmissionResponse(ClientAdmissionAction action,
+                                                                   std::optional<uint32_t> status,
+                                                                   bool valid_body);
 
 class SessionDirectoryClient {
  public:
-  SessionDirectoryClient();
+  using LocalUserIdentityProvider = std::function<std::optional<uint64_t>(uint32_t)>;
+  using ClientAdmissionTransport =
+      std::function<ClientAdmissionTransportResponse(const ClientAdmissionTransportRequest&)>;
+  explicit SessionDirectoryClient(LocalUserIdentityProvider user_identity = {},
+                                  ClientAdmissionTransport client_admission_transport = {},
+                                  bool automatic_client_admission_driver = true);
   ~SessionDirectoryClient();
   SessionDirectoryClient(const SessionDirectoryClient&) = delete;
   SessionDirectoryClient& operator=(const SessionDirectoryClient&) = delete;
@@ -211,10 +397,32 @@ class SessionDirectoryClient {
   std::vector<DirectorySession> List(uint32_t title_id) const;
   void RequestList(uint32_t title_id) const;
   std::optional<std::vector<DirectorySession>> CachedList(uint32_t title_id) const;
-  std::optional<DirectorySession> ResolveInviteCode(std::string_view code,
-                                                    uint32_t title_id) const;
+  std::optional<DirectorySession> ResolveInviteCode(std::string_view code, uint32_t title_id) const;
+  std::optional<DirectoryInviteJoinAttempt> CreateInviteCodeJoinAttempt(std::string_view code,
+                                                                        uint32_t title_id) const;
   std::optional<DirectoryTraversalAttempt> CreateJoinAttempt(const std::string& session_id) const;
   void CompleteJoinAttempt(const DirectoryTraversalAttempt& attempt) const;
+  ClientAdmissionPrepareResult PrepareClientAdmission(uint32_t local_user_index, uint32_t title_id,
+                                                      const DirectoryTraversalAttempt& attempt,
+                                                      const SessionRecord& discovered,
+                                                      uint64_t discovery_socket);
+  bool ConfirmClientAdmissionSession(uint32_t local_user_index,
+                                     const std::shared_ptr<const SessionRecord>& session);
+  void SetClientAdmissionTitle(uint32_t title_id);
+  void SetClientAdmissionUserIdentity(uint32_t local_user_index, std::optional<uint64_t> xuid);
+  void StopClientAdmission(uint32_t local_user_index);
+  void StopAllClientAdmissions();
+  bool HasClientAdmission(uint32_t local_user_index) const;
+  bool HasProtectedClientAdmission(uint32_t local_user_index) const;
+  std::optional<uint64_t> ClientAdmissionSocketForSession(uint32_t local_user_index,
+                                                          const SessionRecord& session) const;
+  void SetClientAdmissionExchange(uint32_t local_user_index, bool active);
+  std::optional<ReadyAcceptedSessionCandidate> ReadyClientAdmission(
+      uint32_t local_user_index);
+  // Production normally drives this lifecycle from its worker. Embedders and
+  // deterministic tests may instead disable that worker and poll explicitly.
+  void PollClientAdmissions(
+      std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
 
  private:
   class Impl;

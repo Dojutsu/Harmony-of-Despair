@@ -18,6 +18,7 @@ add_executable(unit_tests
     system/function_dispatcher_test.cpp
     system/session_test.cpp
     system/session_admission_test.cpp
+    system/session_client_admission_test.cpp
     system/session_invite_grant_test.cpp
     system/online_status_test.cpp
     system/socket_test.cpp

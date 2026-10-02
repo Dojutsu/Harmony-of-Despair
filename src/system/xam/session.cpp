@@ -90,8 +90,8 @@ enum class MemberUpdateSource {
   kInviteGrant,
 };
 
-bool ValidMemberAccounting(std::span<const SessionMember> members,
-                           uint32_t public_slots, uint32_t private_slots) {
+bool ValidMemberAccounting(std::span<const SessionMember> members, uint32_t public_slots,
+                           uint32_t private_slots) {
   uint64_t public_count = 0;
   uint64_t private_count = 0;
   std::unordered_set<uint64_t> identities;
@@ -105,13 +105,11 @@ bool ValidMemberAccounting(std::span<const SessionMember> members,
 
 // Complete candidate planning and commit use one record lock. NAT and grant
 // locks are never held here.
-bool ApplyMemberBatch(SessionRecord& session,
-                      std::span<const SessionMember> members,
+bool ApplyMemberBatch(SessionRecord& session, std::span<const SessionMember> members,
                       MemberUpdateSource source) {
   std::lock_guard lock(*session.mutex);
   if (session.state == SessionState::kDeleted || members.empty() ||
-      !ValidMemberAccounting(session.members, session.max_public_slots,
-                             session.max_private_slots))
+      !ValidMemberAccounting(session.members, session.max_public_slots, session.max_private_slots))
     return false;
   if (source == MemberUpdateSource::kInviteGrant && members.size() != 1)
     return false;
@@ -121,9 +119,7 @@ bool ApplyMemberBatch(SessionRecord& session,
     if (!member.xuid || !batch_ids.insert(member.xuid).second)
       return false;
     auto it = std::find_if(candidate.begin(), candidate.end(),
-                           [&](const auto& current) {
-                             return current.xuid == member.xuid;
-                           });
+                           [&](const auto& current) { return current.xuid == member.xuid; });
     if (source != MemberUpdateSource::kTitleAllocatedPool) {
       if (member.xuid == session.host_xuid)
         return false;
@@ -142,8 +138,7 @@ bool ApplyMemberBatch(SessionRecord& session,
     else
       *it = std::move(member);
   }
-  if (!ValidMemberAccounting(candidate, session.max_public_slots,
-                             session.max_private_slots))
+  if (!ValidMemberAccounting(candidate, session.max_public_slots, session.max_private_slots))
     return false;
   session.members.swap(candidate);
   session.NotifyStatus();
@@ -294,15 +289,15 @@ std::optional<SessionRecord> Decode(const DiscoveryPacket& packet, uint32_t titl
   }
   if (session.members.empty())
     session.members.push_back({session.host_xuid, session.host_name, 0, false, false, false});
-  if (!ValidMemberAccounting(session.members, session.max_public_slots,
-                             session.max_private_slots))
+  if (!ValidMemberAccounting(session.members, session.max_public_slots, session.max_private_slots))
     return std::nullopt;
   return session;
 }
 
 std::optional<SessionRecord> Exchange(const SessionRecord& session, const SessionMember* member,
                                       uint8_t type, uint32_t title_id, uint16_t discovery_port,
-                                      uint32_t timeout_ms, SOCKET retained_socket = kInvalidSocket) {
+                                      uint32_t timeout_ms,
+                                      SOCKET retained_socket = kInvalidSocket) {
   if (!EnsureSocketRuntime())
     return std::nullopt;
   const bool owns_socket = retained_socket == kInvalidSocket;
@@ -326,12 +321,10 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
   }
   sockaddr_in target{};
   target.sin_family = AF_INET;
-  uint32_t target_ipv4 = session.discovery_address.ipv4
-                                   ? session.discovery_address.ipv4
-                                   : session.info.host_address.ipv4;
-  uint16_t target_port = session.discovery_address.port
-                                   ? session.discovery_address.port
-                                   : discovery_port;
+  uint32_t target_ipv4 = session.discovery_address.ipv4 ? session.discovery_address.ipv4
+                                                        : session.info.host_address.ipv4;
+  uint16_t target_port =
+      session.discovery_address.port ? session.discovery_address.port : discovery_port;
   if (auto peer = NatProbePeer(socket)) {
     target_ipv4 = peer->ipv4;
     target_port = peer->port;
@@ -367,8 +360,7 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
         result->info.host_address.ipv4 = session.info.host_address.ipv4;
         result->discovery_address = session.discovery_address;
       }
-      if (result && (result->info.id != session.info.id ||
-                     result->info.key != session.info.key ||
+      if (result && (result->info.id != session.info.id || result->info.key != session.info.key ||
                      result->host_xuid != session.host_xuid))
         result.reset();
       if (result && member && type == kJoin &&
@@ -393,14 +385,12 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
 }
 }  // namespace
 
-bool ApplyDiscoveryMemberBatch(SessionRecord& session,
-                               std::span<const SessionMember> members,
+bool ApplyDiscoveryMemberBatch(SessionRecord& session, std::span<const SessionMember> members,
                                DiscoveryAdmissionContext context) {
-  return ApplyMemberBatch(
-      session, members,
-      context.source == DiscoveryAdmissionSource::kInviteGrant
-          ? MemberUpdateSource::kInviteGrant
-          : MemberUpdateSource::kDiscoveryPublic);
+  return ApplyMemberBatch(session, members,
+                          context.source == DiscoveryAdmissionSource::kInviteGrant
+                              ? MemberUpdateSource::kInviteGrant
+                              : MemberUpdateSource::kDiscoveryPublic);
 }
 
 uint32_t SessionRecord::FilledPublicSlots() const {
@@ -543,8 +533,7 @@ bool SessionRegistry::JoinBatch(const std::shared_ptr<SessionRecord>& expected,
   auto it = sessions_.find(IdKey(expected->info.id));
   if (it == sessions_.end() || it->second != expected)
     return false;
-  return ApplyMemberBatch(*expected, members,
-                          MemberUpdateSource::kTitleAllocatedPool);
+  return ApplyMemberBatch(*expected, members, MemberUpdateSource::kTitleAllocatedPool);
 }
 bool SessionRegistry::Leave(const std::array<uint8_t, 8>& id, uint64_t xuid) {
   auto session = Find(id);
@@ -588,19 +577,19 @@ bool SessionRegistry::End(const std::array<uint8_t, 8>& id) {
   session->NotifyStatus();
   return true;
 }
-void SessionRegistry::UpsertDiscovered(SessionRecord record) {
+std::shared_ptr<SessionRecord> SessionRegistry::UpsertDiscovered(SessionRecord record) {
   auto session = std::make_shared<SessionRecord>(std::move(record));
   std::lock_guard lock(mutex_);
   auto id_key = IdKey(session->info.id);
   if (local_session_ids_.contains(id_key))
-    return;
+    return nullptr;
   sessions_[id_key] = std::move(session);
+  return sessions_[id_key];
 }
 
 class LanDiscoveryService::Impl {
  public:
-  Impl(uint32_t title_id, uint16_t port,
-       std::shared_ptr<HostAdmissionGrantStore> admission_grants)
+  Impl(uint32_t title_id, uint16_t port, std::shared_ptr<HostAdmissionGrantStore> admission_grants)
       : title_id(title_id), port(port), admission_grants(std::move(admission_grants)) {}
   ~Impl() { Stop(); }
   bool Start(std::shared_ptr<SessionRecord> value) {
@@ -668,6 +657,9 @@ class LanDiscoveryService::Impl {
       CloseSocket(client_socket);
       client_socket = kInvalidSocket;
     }
+    for (const auto& attempt_id : client_attempt_ids)
+      NatProbeRetireIdentity(attempt_id);
+    client_attempt_ids.clear();
   }
   void RunClient() {
     while (client_running) {
@@ -713,22 +705,22 @@ class LanDiscoveryService::Impl {
           std::lock_guard lock(*advertised->mutex);
           // Routing validation is not an admission credential. The only
           // private authority is a separately reserved host grant below.
-          valid = advertised->state != SessionState::kDeleted &&
-                  ntohl(query.member_count) == 1 && !query.reserved &&
-                  !query.reserved2 && !(flags & ~6u) && xuid &&
+          valid = advertised->state != SessionState::kDeleted && ntohl(query.member_count) == 1 &&
+                  !query.reserved && !query.reserved2 && !(flags & ~6u) && xuid &&
                   xuid != advertised->host_xuid &&
                   Swap64(query.host_xuid) == advertised->host_xuid &&
                   std::memcmp(query.session_id, advertised->info.id.data(), 8) == 0 &&
                   std::memcmp(query.session_key, advertised->info.key.data(), 16) == 0;
-          existing = valid && std::any_of(
-                                  advertised->members.begin(), advertised->members.end(),
-                                  [&](const auto& member) { return member.xuid == xuid; });
+          existing = valid && std::any_of(advertised->members.begin(), advertised->members.end(),
+                                          [&](const auto& member) { return member.xuid == xuid; });
         }
         if (valid && query.type == kJoin) {
           SessionMember member{xuid,
-                               std::string(wire.name,
-                                           strnlen(wire.name, sizeof(wire.name))),
-                               0, false, (flags & 2) != 0, (flags & 4) != 0};
+                               std::string(wire.name, strnlen(wire.name, sizeof(wire.name))),
+                               0,
+                               false,
+                               (flags & 2) != 0,
+                               (flags & 4) != 0};
           HostAdmissionReservation reservation;
           DiscoveryAdmissionContext context;
           if (!existing) {
@@ -738,9 +730,9 @@ class LanDiscoveryService::Impl {
                 socket, {source.sin_addr.s_addr, ntohs(source.sin_port)});
             auto directory_session = admission_grants->hosted_directory_session();
             if (directory_session) {
-              auto authority = admission_grants->Reserve(
-                  *directory_session, uint64_t(socket), source.sin_addr.s_addr,
-                  ntohs(source.sin_port), matches, xuid);
+              auto authority = admission_grants->Reserve(*directory_session, uint64_t(socket),
+                                                         source.sin_addr.s_addr,
+                                                         ntohs(source.sin_port), matches, xuid);
               if (authority.status == HostAdmissionReservationStatus::kReserved) {
                 reservation = std::move(authority.reservation);
                 context.source = DiscoveryAdmissionSource::kInviteGrant;
@@ -754,18 +746,16 @@ class LanDiscoveryService::Impl {
             }
           }
           if (valid)
-            valid = ApplyDiscoveryMemberBatch(
-                *advertised, std::span<const SessionMember>(&member, 1), context);
+            valid = ApplyDiscoveryMemberBatch(*advertised,
+                                              std::span<const SessionMember>(&member, 1), context);
           if (reservation)
             admission_grants->Finish(reservation, valid);
           if (valid) {
-            REXSYS_INFO(
-                "LAN discovery: host accepted join xuid={:016X} source={} from {:08X}:{}",
-                xuid,
-                context.source == DiscoveryAdmissionSource::kInviteGrant
-                    ? "invite-grant"
-                    : "public",
-                source.sin_addr.s_addr, ntohs(source.sin_port));
+            REXSYS_INFO("LAN discovery: host accepted join xuid={:016X} source={} from {:08X}:{}",
+                        xuid,
+                        context.source == DiscoveryAdmissionSource::kInviteGrant ? "invite-grant"
+                                                                                 : "public",
+                        source.sin_addr.s_addr, ntohs(source.sin_port));
           }
         } else if (valid) {
           std::lock_guard lock(*advertised->mutex);
@@ -802,24 +792,49 @@ class LanDiscoveryService::Impl {
   std::atomic<bool> client_exchange = false;
   std::thread client_thread;
   RetainedDiscoverySearchState retained_search;
+  std::vector<std::string> client_attempt_ids;
   std::shared_ptr<HostAdmissionGrantStore> admission_grants;
 };
 
 LanDiscoveryService::LanDiscoveryService(
-    uint32_t title_id, uint16_t port,
-    std::shared_ptr<HostAdmissionGrantStore> admission_grants)
+    uint32_t title_id, uint16_t port, std::shared_ptr<HostAdmissionGrantStore> admission_grants,
+    SessionDirectoryClient::LocalUserIdentityProvider user_identity,
+    SessionDirectoryClient::ClientAdmissionTransport client_admission_transport,
+    bool automatic_client_admission_driver)
     : admission_grants_(admission_grants ? std::move(admission_grants)
-                                        : std::make_shared<HostAdmissionGrantStore>()),
-      impl_(std::make_unique<Impl>(title_id, port, admission_grants_)) {}
+                                         : std::make_shared<HostAdmissionGrantStore>()),
+      impl_(std::make_unique<Impl>(title_id, port, admission_grants_)),
+      directory_(std::move(user_identity), std::move(client_admission_transport),
+                 automatic_client_admission_driver) {}
 LanDiscoveryService::~LanDiscoveryService() = default;
 void LanDiscoveryService::SetTitleId(uint32_t title_id) {
+  directory_.SetClientAdmissionTitle(title_id);
   impl_->title_id = title_id;
+}
+void LanDiscoveryService::SetLocalUserIdentity(uint32_t local_user_index,
+                                               std::optional<uint64_t> xuid) {
+  directory_.SetClientAdmissionUserIdentity(local_user_index, xuid);
+}
+ClientAdmissionPrepareResult LanDiscoveryService::PrepareClientAdmission(
+    uint32_t local_user_index, const DirectoryTraversalAttempt& attempt,
+    const SessionRecord& discovered, uint64_t discovery_socket) {
+  return directory_.PrepareClientAdmission(local_user_index, impl_->title_id, attempt, discovered,
+                                           discovery_socket);
+}
+bool LanDiscoveryService::ConfirmClientAdmissionSession(
+    uint32_t local_user_index, const std::shared_ptr<const SessionRecord>& session) {
+  return directory_.ConfirmClientAdmissionSession(local_user_index, session);
+}
+bool LanDiscoveryService::HasClientAdmission(uint32_t local_user_index) const {
+  return directory_.HasClientAdmission(local_user_index);
+}
+void LanDiscoveryService::PollClientAdmissions(std::chrono::steady_clock::time_point now) {
+  directory_.PollClientAdmissions(now);
 }
 bool LanDiscoveryService::Advertise(const std::shared_ptr<SessionRecord>& session) {
   if (!impl_->Start(session))
     return false;
-  directory_.StartHosting(session, impl_->title_id, impl_->port,
-                          admission_grants_);
+  directory_.StartHosting(session, impl_->title_id, impl_->port, admission_grants_);
   return true;
 }
 void LanDiscoveryService::StopAdvertising() {
@@ -829,7 +844,8 @@ void LanDiscoveryService::StopAdvertising() {
 bool LanDiscoveryService::IsAdvertising() const {
   return impl_->running;
 }
-std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint32_t max_results) {
+std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint32_t max_results,
+                                                       uint32_t local_user_index) {
   static std::atomic<uint64_t> next_search_attempt{0};
   const uint64_t search_attempt = ++next_search_attempt;
   const auto search_started = std::chrono::steady_clock::now();
@@ -841,7 +857,6 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
   // replacement Search supersedes that attempt before creating a new socket;
   // otherwise both probes keep registering under the same participant/role.
   impl_->StopClient();
-  NatProbeRetireParticipant(1);
   SOCKET socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (socket == kInvalidSocket)
     return results;
@@ -886,30 +901,37 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
     }
   }
   if (automatic_public_traversal) {
-    std::vector<DirectorySession> sessions;
+    size_t issued = 0;
     if (invite_code.empty()) {
-      sessions = directory_.List(impl_->title_id);
-    } else if (auto invited = directory_.ResolveInviteCode(invite_code, impl_->title_id)) {
-      REXSYS_INFO("Session directory: invite code resolved '{}'", invited->server_name);
-      sessions.push_back(std::move(*invited));
+      auto sessions = directory_.List(impl_->title_id);
+      for (const auto& session : sessions) {
+        if (issued >= max_results || session.connectivity_candidates.empty() ||
+            session.connectivity_candidates.front().type != "public")
+          continue;
+        auto attempt = directory_.CreateJoinAttempt(session.session_id);
+        if (!attempt)
+          continue;
+        if (NatProbeInstallIdentity({attempt->attempt_id, attempt->capability,
+                                     attempt->rendezvous_host, attempt->rendezvous_port, 1}))
+          directory_attempts.push_back(*attempt), ++issued;
+      }
+    } else if (auto invited =
+                   directory_.CreateInviteCodeJoinAttempt(invite_code, impl_->title_id)) {
+      REXSYS_INFO("Session directory: invite code resolved '{}'", invited->session.server_name);
+      if (!invited->session.connectivity_candidates.empty() &&
+          invited->session.connectivity_candidates.front().type == "public" &&
+          NatProbeInstallIdentity({invited->attempt.attempt_id, invited->attempt.capability,
+                                   invited->attempt.rendezvous_host,
+                                   invited->attempt.rendezvous_port, 1})) {
+        directory_attempts.push_back(std::move(invited->attempt));
+        ++issued;
+      }
     } else {
       REXSYS_WARN("Session directory: invite code did not resolve to a compatible lobby");
     }
-    size_t issued = 0;
-    for (const auto& session : sessions) {
-      if (issued >= max_results || session.connectivity_candidates.empty() ||
-          session.connectivity_candidates.front().type != "public")
-        continue;
-      auto attempt = directory_.CreateJoinAttempt(session.session_id);
-      if (!attempt) continue;
-      if (NatProbeInstallIdentity({attempt->attempt_id, attempt->capability,
-                                   attempt->rendezvous_host, attempt->rendezvous_port, 1}))
-        directory_attempts.push_back(*attempt), ++issued;
-    }
     directory_browse = false;
-    REXSYS_INFO(
-        "Session directory: Search generation={} obtained {} traversal attempt(s) mode={}",
-        search_attempt, issued, invite_code.empty() ? "public-list" : "invite-code");
+    REXSYS_INFO("Session directory: Search generation={} obtained {} traversal attempt(s) mode={}",
+                search_attempt, issued, invite_code.empty() ? "public-list" : "invite-code");
   }
   const bool direct = !selected_address.empty();
   const bool traversal = NatProbeEnabled();
@@ -919,7 +941,7 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
       "nat_enabled={}",
       search_attempt, timing.original_window_ms(),
       timing.total_window_ms() - timing.original_window_ms(), traversal);
-  if (direct || traversal) {
+  if (direct) {
     if (!BindLanSocket(socket, 0)) {
       REXSYS_ERROR("Discovery: failed to bind search socket to configured interface");
       CloseSocket(socket);
@@ -938,7 +960,7 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
   // 255.255.255.255 datagram from a socket bound to a unicast address, and the
   // listener has the same requirement. Advertisements, XNADDR, join exchange,
   // and gameplay transport still use the explicit selected address.
-    SetNonBlocking(socket);
+  SetNonBlocking(socket);
   sockaddr_in local_address{};
   socket_len_t local_length = sizeof(local_address);
   if (getsockname(socket, reinterpret_cast<sockaddr*>(&local_address), &local_length) == 0) {
@@ -984,8 +1006,9 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     if (!traversal_target) {
-      REXSYS_INFO("NAT traversal: search attempt={} initial rendezvous wait expired without readiness",
-                  search_attempt);
+      REXSYS_INFO(
+          "NAT traversal: search attempt={} initial rendezvous wait expired without readiness",
+          search_attempt);
     }
   }
   LateTraversalQueryState late_traversal_query(traversal, initially_queried_traversal_peer);
@@ -1003,8 +1026,8 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
     REXSYS_INFO(
         "Direct connect: search attempt={} initial query bytes={} to {:08X}:{} title={:08X} "
         "traversal_ready={}",
-        search_attempt, query_sent, target.sin_addr.s_addr, ntohs(target.sin_port),
-        impl_->title_id, traversal_target);
+        search_attempt, query_sent, target.sin_addr.s_addr, ntohs(target.sin_port), impl_->title_id,
+        traversal_target);
   } else {
     REXSYS_INFO(
         "LAN discovery: search attempt={} initial broadcast bytes={} UDP {} title={:08X} "
@@ -1088,8 +1111,8 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
     bool consumed_probe =
         count > 0 && NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&response), count,
                                      source.sin_addr.s_addr, ntohs(source.sin_port));
-    if (auto peer = late_traversal_query.TakeAcknowledgedPeer(now < deadline,
-                                                              NatProbePeer(socket))) {
+    if (auto peer =
+            late_traversal_query.TakeAcknowledgedPeer(now < deadline, NatProbePeer(socket))) {
       target.sin_addr.s_addr = peer->ipv4;
       target.sin_port = htons(peer->port);
       traversal_target = true;
@@ -1115,7 +1138,8 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
         traversal_target = true;
         REXSYS_INFO(
             "NAT traversal: search attempt={} server-issued peer={:08X}:{}; one-time discovery "
-            "query bytes={}", search_attempt, peer.ipv4, peer.port, sent);
+            "query bytes={}",
+            search_attempt, peer.ipv4, peer.port, sent);
       }
     }
     if (consumed_probe) {
@@ -1155,10 +1179,9 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
         auto peer = std::find_if(peer_attempts.begin(), peer_attempts.end(),
                                  [&](const auto& value) { return value.peer == responding; });
         if (peer != peer_attempts.end()) {
-          auto issued = std::find_if(directory_attempts.begin(), directory_attempts.end(),
-                                     [&](const auto& value) {
-                                       return value.attempt_id == peer->attempt_id;
-                                     });
+          auto issued =
+              std::find_if(directory_attempts.begin(), directory_attempts.end(),
+                           [&](const auto& value) { return value.attempt_id == peer->attempt_id; });
           if (issued != directory_attempts.end()) {
             decoded->traversal_session_id = issued->session_id;
             decoded->traversal_attempt_id = issued->attempt_id;
@@ -1189,16 +1212,58 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
                               .count();
   REXSYS_INFO("Discovery: search attempt={} completed results={} elapsed_ms={} reason={}",
               search_attempt, results.size(), elapsed_ms,
-              results.size() >= max_results
-                  ? "max_results"
-                  : (traversal ? "nat_deadline" : "original_deadline"));
+              results.size() >= max_results ? "max_results"
+                                            : (traversal ? "nat_deadline" : "original_deadline"));
   if (NatProbeEnabled()) {
-    impl_->client_socket = socket;
-    impl_->retained_search.Retain(search_attempt);
-    impl_->client_running = true;
-    REXSYS_INFO("NAT traversal: retained discovery search generation={} socket={} for Join/Leave",
-                search_attempt, socket);
-    impl_->client_thread = std::thread([impl = impl_.get()] { impl->RunClient(); });
+    bool admission_owns_socket = false;
+    bool discard_invite_socket = false;
+    if (!invite_code.empty()) {
+      for (const auto& result : results) {
+        auto attempt = std::find_if(directory_attempts.begin(), directory_attempts.end(),
+                                    [&](const auto& value) {
+                                      return value.purpose == "invite_code_private_eligible" &&
+                                             result.traversal_session_id == value.session_id &&
+                                             result.traversal_attempt_id == value.attempt_id &&
+                                             result.traversal_capability == value.capability;
+                                    });
+        if (attempt != directory_attempts.end()) {
+          auto prepared = directory_.PrepareClientAdmission(local_user_index, impl_->title_id,
+                                                            *attempt, result, uint64_t(socket));
+          if (prepared == ClientAdmissionPrepareResult::kPrepared) {
+            admission_owns_socket = true;
+          } else if (prepared == ClientAdmissionPrepareResult::kBusy) {
+            REXSYS_WARN("Session directory: ready invite lifecycle is busy for user={}",
+                        local_user_index);
+            discard_invite_socket = true;
+          } else {
+            REXSYS_WARN("Session directory: exact invite discovery could not arm client admission");
+            discard_invite_socket = true;
+          }
+          break;
+        }
+      }
+    }
+    if (discard_invite_socket) {
+      for (const auto& attempt : directory_attempts)
+        directory_.CompleteJoinAttempt(attempt);
+      NatProbeDetach(socket);
+      CloseSocket(socket);
+      results.clear();
+    } else if (!admission_owns_socket) {
+      impl_->client_socket = socket;
+      impl_->client_attempt_ids.reserve(directory_attempts.size());
+      for (const auto& attempt : directory_attempts)
+        impl_->client_attempt_ids.push_back(attempt.attempt_id);
+      impl_->retained_search.Retain(search_attempt);
+      impl_->client_running = true;
+      REXSYS_INFO("NAT traversal: retained discovery search generation={} socket={} for Join/Leave",
+                  search_attempt, socket);
+      impl_->client_thread = std::thread([impl = impl_.get()] { impl->RunClient(); });
+    } else {
+      REXSYS_INFO(
+          "Session directory: transferred exact invite socket={} to admission lifecycle user={}",
+          socket, local_user_index);
+    }
   } else {
     CloseSocket(socket);
   }
@@ -1207,10 +1272,18 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
 std::optional<SessionRecord> LanDiscoveryService::Join(const SessionRecord& session,
                                                        const SessionMember& member,
                                                        uint32_t timeout_ms) {
-  impl_->client_exchange = true;
+  const auto admission_socket =
+      directory_.ClientAdmissionSocketForSession(member.user_index, session);
+  if (admission_socket)
+    directory_.SetClientAdmissionExchange(member.user_index, true);
+  else
+    impl_->client_exchange = true;
   auto result = Exchange(session, &member, kJoin, impl_->title_id, impl_->port, timeout_ms,
-                         impl_->client_socket);
-  impl_->client_exchange = false;
+                         admission_socket ? SOCKET(*admission_socket) : impl_->client_socket);
+  if (admission_socket)
+    directory_.SetClientAdmissionExchange(member.user_index, false);
+  else
+    impl_->client_exchange = false;
   return result;
 }
 std::optional<SessionRecord> LanDiscoveryService::Leave(const SessionRecord& session, uint64_t xuid,
@@ -1222,6 +1295,10 @@ std::optional<SessionRecord> LanDiscoveryService::Leave(const SessionRecord& ses
                          impl_->client_socket);
   impl_->client_exchange = false;
   return result;
+}
+std::optional<ReadyAcceptedSessionCandidate> LanDiscoveryService::ReadyAcceptedSession(
+    uint32_t local_user_index) {
+  return directory_.ReadyClientAdmission(local_user_index);
 }
 uint32_t LanDiscoveryService::DetermineLanIpv4() {
   const auto& configured = REXCVAR_GET(lan_bind_address);
@@ -1261,6 +1338,13 @@ uint32_t LanDiscoveryService::DetermineLanIpv4() {
   return result;
 }
 
+std::optional<uint64_t> ResolveRexGlueLocalUserXuid(
+    uint32_t local_user_index, std::optional<uint64_t> current_profile_xuid) {
+  if (local_user_index != 0 || !current_profile_xuid || !*current_profile_xuid)
+    return std::nullopt;
+  return current_profile_xuid;
+}
+
 XSession::XSession(KernelState* state) : XObject(state, kObjectType) {}
 XSession::~XSession() {
   if (kernel_state()) {
@@ -1287,7 +1371,13 @@ SessionManager::SessionManager(KernelState* state, uint16_t discovery_port)
     : kernel_state_(state),
       online_status_(state->user_profile()->xuid(), state->user_profile()->name(),
                      REXCVAR_GET(online_status_directory)),
-      discovery_(0, discovery_port) {}
+      discovery_(0, discovery_port, {},
+                 [state](uint32_t local_user_index) -> std::optional<uint64_t> {
+                   auto* profile = state->user_profile();
+                   return ResolveRexGlueLocalUserXuid(
+                       local_user_index,
+                       profile ? std::optional<uint64_t>(profile->xuid()) : std::nullopt);
+                 }) {}
 SessionManager::~SessionManager() = default;
 void SessionManager::RegisterObject(XSession* session) {
   std::lock_guard lock(object_mutex_);
