@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <array>
 #include <cstring>
 
 #include <rex/kernel/xam/module.h>
@@ -156,7 +157,7 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
     if (type_ == Type::X_SOCK_DGRAM &&
         xam::NatProbeIsGameplayPort(ntohs(actual_address.sin_port))) {
       xam::NatProbeAttach(native_handle_, xam::NatProbeRole::kGameplay,
-                          {actual_address.sin_addr.s_addr, ntohs(actual_address.sin_port)});
+                          {actual_address.sin_addr.s_addr, ntohs(actual_address.sin_port)}, this);
     }
   } else {
     bound_port_ = name->sin_port;
@@ -214,6 +215,7 @@ int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
 
 int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* from,
                       uint32_t* from_len) {
+  std::lock_guard receive_lock(native_receive_mutex_);
   // Pop from secure packets first
   // TODO(DrChat): Enable when I commit XNet
   /*
@@ -249,9 +251,23 @@ retry_native_receive:
   }
   if (ret >= 0 && from) {
     from->sin_family = nfrom.sin_family;
-    from->sin_addr = ntohl(nfrom.sin_addr.s_addr);  // BE <- BE
     const uint16_t source_port = ntohs(nfrom.sin_port);
-    from->sin_port = native_port_ != 0 && source_port == native_port_ ? guest_port_ : source_port;
+    const xam::LanAddress native_source{nfrom.sin_addr.s_addr, source_port};
+    if (auto logical = xam::NatProbeNormalizeGameplaySource(native_handle_, native_source)) {
+      from->sin_addr = ntohl(logical->ipv4);
+      from->sin_port = logical->port;
+      if (last_normalized_source_ipv4_ != native_source.ipv4 ||
+          last_normalized_source_port_ != native_source.port) {
+        REXSYS_INFO(
+            "NAT traversal: inbound gameplay source normalized native={:08X}:{} guest={:08X}:{}",
+            native_source.ipv4, native_source.port, logical->ipv4, logical->port);
+        last_normalized_source_ipv4_ = native_source.ipv4;
+        last_normalized_source_port_ = native_source.port;
+      }
+    } else {
+      from->sin_addr = ntohl(nfrom.sin_addr.s_addr);  // BE <- BE
+      from->sin_port = native_port_ != 0 && source_port == native_port_ ? guest_port_ : source_port;
+    }
     std::memset(from->x_sin_zero, 0, sizeof(from->x_sin_zero));
   }
 
@@ -260,6 +276,35 @@ retry_native_receive:
   }
 
   return ret;
+}
+
+bool XSocket::PumpNatControl() {
+  std::lock_guard receive_lock(native_receive_mutex_);
+  if (!WaitReadable(0)) return false;
+
+  std::array<uint8_t, 56> packet{};
+  sockaddr_in source{};
+  socklen_t source_length = sizeof(source);
+  const int peeked = recvfrom(native_handle_, reinterpret_cast<char*>(packet.data()),
+                              int(packet.size()), MSG_PEEK,
+                              reinterpret_cast<sockaddr*>(&source), &source_length);
+  if (peeked <= 0 ||
+      !xam::NatProbeIsControlPacket(native_handle_, packet.data(), size_t(peeked),
+                                    source.sin_addr.s_addr, ntohs(source.sin_port)))
+    return false;
+
+  source_length = sizeof(source);
+  const int received = recvfrom(native_handle_, reinterpret_cast<char*>(packet.data()),
+                                int(packet.size()), 0,
+                                reinterpret_cast<sockaddr*>(&source), &source_length);
+  const bool consumed =
+      received > 0 && xam::NatProbeConsume(native_handle_, packet.data(), size_t(received),
+                                           source.sin_addr.s_addr, ntohs(source.sin_port));
+  if (consumed)
+    REXSYS_INFO("NAT traversal: independent gameplay control receive socket={} type={} "
+                "source={:08X}:{}",
+                native_handle_, packet[5], source.sin_addr.s_addr, ntohs(source.sin_port));
+  return consumed;
 }
 
 bool XSocket::WaitReadable(uint32_t timeout_ms, bool infinite) const {

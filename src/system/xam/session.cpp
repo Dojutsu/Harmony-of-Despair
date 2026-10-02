@@ -689,6 +689,7 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
   // replacement Search supersedes that attempt before creating a new socket;
   // otherwise both probes keep registering under the same participant/role.
   impl_->StopClient();
+  NatProbeRetireParticipant(1);
   SOCKET socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (socket == kInvalidSocket)
     return results;
@@ -697,6 +698,11 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
   uint16_t selected_gameplay_port = 0;
   bool directory_selected = false;
   bool directory_browse = false;
+  std::vector<DirectoryTraversalAttempt> directory_attempts;
+  const bool automatic_public_traversal =
+      selected_address.empty() && !REXCVAR_GET(session_directory_url).empty() &&
+      REXCVAR_GET(session_directory_candidate_type) == "public" &&
+      REXCVAR_GET(session_directory_session_index) == 0xFFFFFFFFu;
   if (selected_address.empty() && !REXCVAR_GET(session_directory_url).empty()) {
     uint32_t index = REXCVAR_GET(session_directory_session_index);
     if (index != 0xFFFFFFFFu) {
@@ -725,6 +731,23 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
       directory_.RequestList(impl_->title_id);
       directory_browse = true;
     }
+  }
+  if (automatic_public_traversal) {
+    auto sessions = directory_.List(impl_->title_id);
+    size_t issued = 0;
+    for (const auto& session : sessions) {
+      if (issued >= max_results || session.connectivity_candidates.empty() ||
+          session.connectivity_candidates.front().type != "public")
+        continue;
+      auto attempt = directory_.CreateJoinAttempt(session.session_id);
+      if (!attempt) continue;
+      if (NatProbeInstallIdentity({attempt->attempt_id, attempt->capability,
+                                   attempt->rendezvous_host, attempt->rendezvous_port, 1}))
+        directory_attempts.push_back(*attempt), ++issued;
+    }
+    directory_browse = false;
+    REXSYS_INFO("Session directory: Search generation={} obtained {} traversal attempt(s)",
+                search_attempt, issued);
   }
   const bool direct = !selected_address.empty();
   const bool traversal = NatProbeEnabled();
@@ -799,6 +822,9 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
     }
   }
   LateTraversalQueryState late_traversal_query(traversal, initially_queried_traversal_peer);
+  std::vector<LanAddress> queried_automatic_peers;
+  if (automatic_public_traversal && initially_queried_traversal_peer)
+    queried_automatic_peers.push_back(*initially_queried_traversal_peer);
   DiscoveryPacket query{};
   query.magic = htonl(kDiscoveryMagic);
   query.version = htons(kDiscoveryVersion);
@@ -907,6 +933,24 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
           "query bytes={}",
           search_attempt, peer->ipv4, peer->port, sent);
     }
+    if (automatic_public_traversal && now < deadline) {
+      for (const auto& peer : NatProbePeers(socket)) {
+        if (std::find(queried_automatic_peers.begin(), queried_automatic_peers.end(), peer) !=
+            queried_automatic_peers.end())
+          continue;
+        sockaddr_in peer_target{};
+        peer_target.sin_family = AF_INET;
+        peer_target.sin_addr.s_addr = peer.ipv4;
+        peer_target.sin_port = htons(peer.port);
+        int sent = sendto(socket, reinterpret_cast<const char*>(&query), sizeof(query), 0,
+                          reinterpret_cast<sockaddr*>(&peer_target), sizeof(peer_target));
+        queried_automatic_peers.push_back(peer);
+        traversal_target = true;
+        REXSYS_INFO(
+            "NAT traversal: search attempt={} server-issued peer={:08X}:{}; one-time discovery "
+            "query bytes={}", search_attempt, peer.ipv4, peer.port, sent);
+      }
+    }
     if (consumed_probe) {
       continue;
     }
@@ -915,7 +959,7 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
       if (decoded) {
         decoded->discovery_address = {source.sin_addr.s_addr, ntohs(source.sin_port)};
       }
-      if (decoded && (direct || traversal_target)) {
+      if (decoded && (direct || (traversal_target && !automatic_public_traversal))) {
         // The manually supplied endpoint is authoritative. This preserves the
         // complete host-provided session identity while avoiding a private or
         // otherwise unreachable address embedded by a multi-homed host.
@@ -936,6 +980,24 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
               "{:08X}:{}",
               probe->server_name, probe->candidate_type, decoded->info.id[0], decoded->info.id[1],
               decoded->info.host_address.ipv4, decoded->info.host_address.port);
+        }
+      }
+      if (decoded && automatic_public_traversal) {
+        const LanAddress responding{source.sin_addr.s_addr, ntohs(source.sin_port)};
+        auto peer_attempts = NatProbePeerAttempts(socket);
+        auto peer = std::find_if(peer_attempts.begin(), peer_attempts.end(),
+                                 [&](const auto& value) { return value.peer == responding; });
+        if (peer != peer_attempts.end()) {
+          auto issued = std::find_if(directory_attempts.begin(), directory_attempts.end(),
+                                     [&](const auto& value) {
+                                       return value.attempt_id == peer->attempt_id;
+                                     });
+          if (issued != directory_attempts.end()) {
+            decoded->traversal_session_id = issued->session_id;
+            decoded->traversal_attempt_id = issued->attempt_id;
+            decoded->traversal_capability = issued->capability;
+            NatProbeSetLogicalGameplayPeer(issued->attempt_id, decoded->info.host_address);
+          }
         }
       }
       if (decoded && std::none_of(results.begin(), results.end(), [&](const auto& existing) {

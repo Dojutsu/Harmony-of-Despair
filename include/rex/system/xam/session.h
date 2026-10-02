@@ -107,6 +107,11 @@ struct SessionRecord {
   // Discovery/join control endpoint. SessionInfo::host_address remains the
   // independent gameplay endpoint exposed to XGI/XNet.
   LanAddress discovery_address{};
+  // Process-local directory capability state; never serialized into guest or
+  // discovery packets.
+  std::string traversal_session_id;
+  std::string traversal_attempt_id;
+  std::string traversal_capability;
   uint64_t nonce = 0;
   uint64_t host_xuid = 0;
   std::string host_name;

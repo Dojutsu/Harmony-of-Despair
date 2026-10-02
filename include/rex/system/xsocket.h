@@ -118,6 +118,7 @@ class XSocket : public XObject {
 
   int RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* from,
                uint32_t* from_len);
+  bool PumpNatControl();
   bool WaitReadable(uint32_t timeout_ms, bool infinite = false) const;
   int SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* to, uint32_t to_len);
 
@@ -146,11 +147,14 @@ class XSocket : public XObject {
   uint16_t bound_port_ = 0;
   uint16_t guest_port_ = 0;
   uint16_t native_port_ = 0;
+  uint32_t last_normalized_source_ipv4_ = 0;
+  uint16_t last_normalized_source_port_ = 0;
 
   bool broadcast_socket_ = false;
 
   std::unique_ptr<rex::thread::Event> event_;
   std::mutex incoming_packet_mutex_;
+  std::mutex native_receive_mutex_;
   std::queue<uint8_t*> incoming_packets_;
 };
 

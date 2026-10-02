@@ -15,6 +15,16 @@
 
 namespace rex::system::xam {
 
+TEST_CASE("NAT registration polls quickly only while awaiting a peer",
+          "[session][network][nat]") {
+  CHECK(NatProbeRegistrationIntervalMs(false) == 100);
+  CHECK(NatProbeRegistrationIntervalMs(true) == 1000);
+  CHECK(NatProbeAutomaticAttemptActive(0, false));
+  CHECK(NatProbeAutomaticAttemptActive(19999, false));
+  CHECK_FALSE(NatProbeAutomaticAttemptActive(20000, false));
+  CHECK_FALSE(NatProbeAutomaticAttemptActive(100, true));
+}
+
 TEST_CASE("NAT acknowledgement follows the peer endpoint", "[session][network][nat]") {
   const LanAddress discovery_a{htonl(0xCB007101u), 8006};
   const LanAddress discovery_b{htonl(0xCB007101u), 8019};
@@ -50,6 +60,48 @@ TEST_CASE("NAT acknowledgement follows the peer endpoint", "[session][network][n
   CHECK(gameplay_state.UpdatePeer(gameplay_new));
   CHECK_FALSE(gameplay_state.acknowledged());
   CHECK(discovery.peer() == discovery_c);
+}
+
+TEST_CASE("NAT gameplay inverse translation requires the exact acknowledged endpoint",
+          "[session][network][nat]") {
+  NatProbeEndpointState endpoint;
+  const LanAddress logical{htonl(0xAC140A04u), 30742};
+  const LanAddress public_peer{htonl(0x46F34B41u), 7535};
+  const LanAddress replacement{htonl(0x46F34B41u), 7536};
+
+  CHECK_FALSE(endpoint.NormalizeAcknowledgedPeer(public_peer, logical));
+  REQUIRE(endpoint.UpdatePeer(public_peer));
+  CHECK_FALSE(endpoint.NormalizeAcknowledgedPeer(public_peer, logical));
+  REQUIRE(endpoint.Acknowledge(public_peer));
+  CHECK(endpoint.NormalizeAcknowledgedPeer(public_peer, logical) == logical);
+  CHECK_FALSE(endpoint.NormalizeAcknowledgedPeer({public_peer.ipv4, 9999}, logical));
+  CHECK_FALSE(endpoint.NormalizeAcknowledgedPeer({htonl(0x46F34B42u), public_peer.port}, logical));
+
+  REQUIRE(endpoint.UpdatePeer(replacement));
+  CHECK_FALSE(endpoint.NormalizeAcknowledgedPeer(public_peer, logical));
+  CHECK_FALSE(endpoint.NormalizeAcknowledgedPeer(replacement, logical));
+  REQUIRE(endpoint.Acknowledge(replacement));
+  CHECK(endpoint.NormalizeAcknowledgedPeer(replacement, logical) == logical);
+  CHECK_FALSE(endpoint.NormalizeAcknowledgedPeer(public_peer, logical));
+}
+
+TEST_CASE("independent NAT gameplay peers normalize only their own acknowledged endpoint",
+          "[session][network][nat]") {
+  NatProbeEndpointState first;
+  NatProbeEndpointState second;
+  const LanAddress first_public{htonl(0xCB007101u), 40001};
+  const LanAddress second_public{htonl(0xCB007102u), 40002};
+  const LanAddress first_logical{htonl(0x0A000002u), 30742};
+  const LanAddress second_logical{htonl(0x0A000003u), 30742};
+  REQUIRE(first.UpdatePeer(first_public));
+  REQUIRE(second.UpdatePeer(second_public));
+  REQUIRE(first.Acknowledge(first_public));
+  REQUIRE(second.Acknowledge(second_public));
+
+  CHECK(first.NormalizeAcknowledgedPeer(first_public, first_logical) == first_logical);
+  CHECK(second.NormalizeAcknowledgedPeer(second_public, second_logical) == second_logical);
+  CHECK_FALSE(first.NormalizeAcknowledgedPeer(second_public, first_logical));
+  CHECK_FALSE(second.NormalizeAcknowledgedPeer(first_public, second_logical));
 }
 
 TEST_CASE("repeated NAT search uses acknowledgement for the newest mapping",

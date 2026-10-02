@@ -10,11 +10,13 @@
 #include <optional>
 #include <sstream>
 #include <thread>
+#include <unordered_set>
 
 #include <inja/third_party/include/nlohmann/json.hpp>
 
 #include <rex/logging.h>
 #include <rex/system/xam/session.h>
+#include <rex/system/xam/nat_probe.h>
 
 #if REX_PLATFORM_WIN32
 #include <windows.h>
@@ -29,6 +31,7 @@ constexpr uint32_t kDirectoryProtocolVersion = 1;
 constexpr uint32_t kNoSessionIndex = 0xFFFFFFFFu;
 constexpr size_t kMaxResponseBytes = 64 * 1024;
 constexpr auto kHeartbeatInterval = std::chrono::seconds(15);
+constexpr auto kTraversalPollInterval = std::chrono::milliseconds(250);
 constexpr auto kListCacheLifetime = std::chrono::seconds(5);
 
 bool IsSafeDirectoryUrl(std::string_view value) {
@@ -76,6 +79,27 @@ bool IsPrintableName(std::string_view value) {
   return !value.empty() && value.size() <= 48 &&
          std::all_of(value.begin(), value.end(),
                      [](unsigned char ch) { return ch >= 0x20 && ch != 0x7F; });
+}
+
+std::optional<DirectoryTraversalAttempt> ParseTraversalAttempt(
+    const nlohmann::json& document, std::string session_id, uint8_t participant) {
+  if (!document.is_object()) return std::nullopt;
+  auto attempt = document.value("attempt_id", "");
+  auto capability = document.value("capability", "");
+  auto host = document.value("rendezvous_host", "");
+  auto port = document.value("rendezvous_port", 0u);
+  auto role = document.value("participant", "");
+  auto hex = [](std::string_view text) {
+    return text.size() == 32 && std::all_of(text.begin(), text.end(), [](unsigned char ch) {
+      return std::isxdigit(ch) != 0;
+    });
+  };
+  if (!hex(attempt) || !hex(capability) || host.empty() || host.size() > 255 || !port ||
+      port > 65535 || role != (participant ? "client" : "host"))
+    return std::nullopt;
+  return DirectoryTraversalAttempt{std::move(session_id), std::move(attempt),
+                                   std::move(capability), std::move(host), uint16_t(port),
+                                   participant};
 }
 
 struct HttpResult {
@@ -216,8 +240,10 @@ REXCVAR_DEFINE_STRING(session_directory_publish_address, "", "Network",
     .validator(IsIpv4)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_STRING(session_directory_candidate_type, "tailscale", "Network",
-                      "Published directory candidate type: direct or tailscale")
-    .validator([](std::string_view value) { return value == "direct" || value == "tailscale"; })
+                      "Published directory candidate type: direct, tailscale, or public")
+    .validator([](std::string_view value) {
+      return value == "direct" || value == "tailscale" || value == "public";
+    })
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_UINT32(session_directory_session_index, kNoSessionIndex, "Network",
                       "Directory result index to resolve through Direct Connect")
@@ -242,10 +268,11 @@ class SessionDirectoryClient::Impl {
     if (REXCVAR_GET(session_directory_url).empty())
       return;
     if (REXCVAR_GET(session_directory_build_id).empty() ||
-        REXCVAR_GET(session_directory_publish_address).empty()) {
+        (REXCVAR_GET(session_directory_candidate_type) != "public" &&
+         REXCVAR_GET(session_directory_publish_address).empty())) {
       REXSYS_WARN(
-          "Session directory: hosting disabled; build ID and explicit publish address are "
-          "required");
+          "Session directory: hosting disabled; build ID and a publish address for non-public "
+          "candidates are required");
       return;
     }
 #if !REX_PLATFORM_WIN32
@@ -345,7 +372,8 @@ class SessionDirectoryClient::Impl {
             parsed.address = address->get<std::string>();
             parsed.discovery_port = uint16_t(discovery_value);
             parsed.gameplay_port = uint16_t(gameplay_value);
-            if ((parsed.type == "direct" || parsed.type == "tailscale") &&
+            if ((parsed.type == "direct" || parsed.type == "tailscale" ||
+                 parsed.type == "public") &&
                 !parsed.address.empty() && IsIpv4(parsed.address) && parsed.discovery_port &&
                 parsed.gameplay_port)
               session.connectivity_candidates.push_back(std::move(parsed));
@@ -384,6 +412,27 @@ class SessionDirectoryClient::Impl {
     return list_cache;
   }
 
+  std::optional<DirectoryTraversalAttempt> CreateJoinAttempt(
+      const std::string& session_id) const {
+    const auto& url = REXCVAR_GET(session_directory_url);
+    if (url.empty() || !IsUrlToken(session_id, 64)) return std::nullopt;
+    auto response = Request(url, L"POST", "/sessions/" + session_id + "/join-attempts", "{}");
+    if (!response || response->status != 201) return std::nullopt;
+    auto document = nlohmann::json::parse(response->body, nullptr, false);
+    return ParseTraversalAttempt(document, session_id, 1);
+  }
+
+  void CompleteJoinAttempt(const DirectoryTraversalAttempt& attempt) const {
+    const auto& url = REXCVAR_GET(session_directory_url);
+    if (url.empty() || !IsUrlToken(attempt.session_id, 64) ||
+        !IsUrlToken(attempt.attempt_id, 64) || attempt.capability.empty())
+      return;
+    Request(url, L"DELETE", "/sessions/" + attempt.session_id + "/join-attempts/" +
+                                  attempt.attempt_id,
+            "", attempt.capability);
+    NatProbeRetireIdentity(attempt.attempt_id);
+  }
+
  private:
   void HarvestListLocked() const {
     if (!list_future.valid() ||
@@ -402,6 +451,8 @@ class SessionDirectoryClient::Impl {
   void HostLoop(std::stop_token stop) {
     std::string session_id;
     std::string token;
+    std::unordered_set<std::string> host_attempts;
+    auto next_heartbeat = std::chrono::steady_clock::time_point{};
     while (!stop.stop_requested()) {
       auto body = RegistrationPayload(*hosted, title_id, discovery_port).dump();
       std::optional<HttpResult> response;
@@ -419,18 +470,46 @@ class SessionDirectoryClient::Impl {
           }
           if (!session_id.empty() && !token.empty())
             REXSYS_INFO("Session directory: registered '{}' as {}", hosted->host_name, session_id);
+          next_heartbeat = std::chrono::steady_clock::now() + kHeartbeatInterval;
         }
-      } else {
+      } else if (std::chrono::steady_clock::now() >= next_heartbeat) {
         response = Request(REXCVAR_GET(session_directory_url), L"POST",
                            "/sessions/" + session_id + "/heartbeat", body, token);
         if (!response || response->status == 404) {
+          for (const auto& attempt : host_attempts) NatProbeRetireIdentity(attempt);
+          host_attempts.clear();
           session_id.clear();
           token.clear();
+        } else {
+          next_heartbeat = std::chrono::steady_clock::now() + kHeartbeatInterval;
+        }
+      }
+      if (!session_id.empty()) {
+        auto pending = Request(REXCVAR_GET(session_directory_url), L"GET",
+                               "/sessions/" + session_id + "/join-attempts", "", token);
+        if (pending && pending->status == 200) {
+          auto document = nlohmann::json::parse(pending->body, nullptr, false);
+          if (document.is_object() && document.contains("attempts") &&
+              document["attempts"].is_array()) {
+            std::unordered_set<std::string> pending_attempts;
+            for (const auto& item : document["attempts"]) {
+              auto attempt = ParseTraversalAttempt(item, session_id, 0);
+              if (attempt) {
+                pending_attempts.insert(attempt->attempt_id);
+                NatProbeInstallIdentity({attempt->attempt_id, attempt->capability,
+                                         attempt->rendezvous_host, attempt->rendezvous_port, 0});
+              }
+            }
+            for (const auto& attempt : host_attempts)
+              if (!pending_attempts.contains(attempt)) NatProbeRetireIdentity(attempt);
+            host_attempts = std::move(pending_attempts);
+          }
         }
       }
       std::unique_lock lock(wait_mutex);
-      wake.wait_for(lock, kHeartbeatInterval, [&] { return stop.stop_requested(); });
+      wake.wait_for(lock, kTraversalPollInterval, [&] { return stop.stop_requested(); });
     }
+    for (const auto& attempt : host_attempts) NatProbeRetireIdentity(attempt);
     if (!session_id.empty())
       Request(REXCVAR_GET(session_directory_url), L"DELETE", "/sessions/" + session_id, "", token);
   }
@@ -467,6 +546,14 @@ void SessionDirectoryClient::RequestList(uint32_t title_id) const {
 std::optional<std::vector<DirectorySession>> SessionDirectoryClient::CachedList(
     uint32_t title_id) const {
   return impl_->CachedList(title_id);
+}
+std::optional<DirectoryTraversalAttempt> SessionDirectoryClient::CreateJoinAttempt(
+    const std::string& session_id) const {
+  return impl_->CreateJoinAttempt(session_id);
+}
+void SessionDirectoryClient::CompleteJoinAttempt(
+    const DirectoryTraversalAttempt& attempt) const {
+  impl_->CompleteJoinAttempt(attempt);
 }
 
 }  // namespace rex::system::xam

@@ -36,6 +36,15 @@ struct DirectorySession {
   std::vector<DirectoryCandidate> connectivity_candidates;
 };
 
+struct DirectoryTraversalAttempt {
+  std::string session_id;
+  std::string attempt_id;
+  std::string capability;
+  std::string rendezvous_host;
+  uint16_t rendezvous_port = 0;
+  uint8_t participant = 0;
+};
+
 class SessionDirectoryClient {
  public:
   SessionDirectoryClient();
@@ -49,6 +58,9 @@ class SessionDirectoryClient {
   std::vector<DirectorySession> List(uint32_t title_id) const;
   void RequestList(uint32_t title_id) const;
   std::optional<std::vector<DirectorySession>> CachedList(uint32_t title_id) const;
+  std::optional<DirectoryTraversalAttempt> CreateJoinAttempt(
+      const std::string& session_id) const;
+  void CompleteJoinAttempt(const DirectoryTraversalAttempt& attempt) const;
 
  private:
   class Impl;
