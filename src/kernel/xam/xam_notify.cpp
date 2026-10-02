@@ -89,6 +89,9 @@ u32 XNotifyGetNext_entry(u32 handle, u32 match_id, mapped_u32 id_ptr, mapped_u32
   }
 
   if (dequeued) {
+    if (id == 0x02000002)
+      REXKRNL_INFO("INVITE_DIAG XNOTIFY_02000002_CONSUMED listener={:08X} match={:08X} user={}",
+                    uint32_t(handle), uint32_t(match_id), param);
     REXKRNL_NOISY_DEBUG("XNotifyGetNext({:08X}, {:08X}) -> id={:#x}, param={}", uint32_t(handle),
                         uint32_t(match_id), id, param);
   }

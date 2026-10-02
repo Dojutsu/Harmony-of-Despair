@@ -16,7 +16,9 @@ add_executable(unit_tests
     system/guest_path_test.cpp
     system/achievement_manager_test.cpp
     system/function_dispatcher_test.cpp
+    system/gameplay_traversal_test.cpp
     system/session_test.cpp
+    system/accepted_invite_test.cpp
     system/session_admission_test.cpp
     system/session_client_admission_test.cpp
     system/session_invite_grant_test.cpp
@@ -106,3 +108,9 @@ add_executable(xgi_slot_array_test kernel/xgi_slot_array_test.cpp)
 target_link_libraries(xgi_slot_array_test PRIVATE rexruntime)
 set_target_properties(xgi_slot_array_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
 add_test(NAME xgi_slot_array COMMAND xgi_slot_array_test)
+
+add_executable(accepted_invite_kernel_test kernel/accepted_invite_kernel_test.cpp)
+target_link_libraries(accepted_invite_kernel_test PRIVATE rexruntime)
+set_target_properties(accepted_invite_kernel_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
+add_test(NAME accepted_invite_kernel COMMAND accepted_invite_kernel_test)

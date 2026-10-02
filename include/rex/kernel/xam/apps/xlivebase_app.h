@@ -12,11 +12,23 @@
 
 #include <rex/system/kernel_state.h>
 #include <rex/system/xam/app_manager.h>
+#include <rex/system/xam/session.h>
+
+#include <functional>
+#include <optional>
+
+namespace rex::memory { class Memory; }
 
 namespace rex {
 namespace kernel {
 namespace xam {
 namespace apps {
+
+using AcceptedInviteRecordProvider = std::function<
+    std::optional<system::xam::AcceptedInviteStore::ReadLease>(uint32_t, uint32_t)>;
+X_HRESULT DispatchAcceptedInviteGetInfo(
+    memory::Memory* memory, uint32_t argument_list_ptr, uint32_t current_title_id,
+    const AcceptedInviteRecordProvider& provider);
 
 class XLiveBaseApp : public system::xam::App {
  public:

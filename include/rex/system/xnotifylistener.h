@@ -48,6 +48,8 @@ class XNotifyListener : public XObject {
 
   uint64_t mask() const { return mask_; }
   uint32_t max_version() const { return max_version_; }
+  bool HasLiveGuestHandle() const { return !handles().empty(); }
+  bool AcceptsNotification(XNotificationID id) const;
 
   void Initialize(uint64_t mask, uint32_t max_version);
 

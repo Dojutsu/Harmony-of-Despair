@@ -1,6 +1,8 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -8,11 +10,14 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include <rex/cvar.h>
+#include <rex/system/xam/accepted_invite.h>
 #include <rex/system/xam/online_status.h>
 #include <rex/system/xam/session_directory.h>
 #include <rex/system/xobject.h>
@@ -21,6 +26,12 @@ namespace rex::system {
 class KernelState;
 
 namespace xam {
+
+// Attempt-keyed proof used by configured-invite LAN discovery. The attempt
+// identifier is never put on the LAN probe wire in cleartext.
+std::optional<std::array<uint8_t, 16>> InviteLanAuthenticationTag(
+    std::string_view attempt_id, std::string_view domain,
+    std::span<const uint8_t> payload = {});
 
 REXCVAR_DECLARE(std::string, lan_bind_address);
 REXCVAR_DECLARE(uint32_t, lan_gameplay_port);
@@ -90,6 +101,29 @@ struct SessionInfo {
   std::array<uint8_t, 16> key{};
 };
 
+struct ReadyConfiguredInvite;
+std::array<uint8_t, 60> SerializeGuestSessionInfo(const SessionInfo& info);
+std::optional<AcceptedInviteRecord> SerializeAcceptedInviteRecord(
+    const ReadyConfiguredInvite& ready);
+
+struct XnAddrIdentity {
+  std::array<uint8_t, 6> ethernet_address{};
+  std::array<uint8_t, 20> online_address{};
+  bool operator==(const XnAddrIdentity&) const = default;
+};
+
+// SessionRegistry::Create, discovery reconstruction, and XNetGetTitleXnAddr
+// all use this exact title-visible identity rule.
+XnAddrIdentity ReconstructXnAddrIdentity(uint64_t xuid);
+
+// Local immutable proof of the winning admission transaction. Never serialized
+// into title/discovery packets and never inferred from XUID or IPv4 alone.
+struct GameplayAdmissionBinding {
+  std::string directory_session_id;
+  std::string attempt_id;
+  std::string admission_generation;
+};
+
 struct SessionMember {
   uint64_t xuid = 0;
   std::string name;
@@ -97,6 +131,7 @@ struct SessionMember {
   bool local = false;
   bool private_slot = false;
   bool ready = false;
+  std::shared_ptr<const GameplayAdmissionBinding> gameplay_admission;
 };
 
 struct SessionRecord;
@@ -155,8 +190,80 @@ struct SessionRecord {
   uint32_t OpenPrivateSlots() const;
 };
 
+enum class ConfiguredInviteLifecycleState {
+  kUnclaimed,
+  kClaimed,
+  kAttemptIssued,
+  kTraversalReady,
+  kHostCorrelated,
+  kReadyForAcceptedInvite,
+  kPublished,
+  kCompleted,
+  kCancelled,
+  kExpired,
+  kFailed,
+};
+
+enum class ConfiguredInviteStage {
+  kWorkerStarted,
+  kBeforeAttemptIssue,
+  kAttemptIssued,
+  kBeforeSocketSetup,
+  kTraversalReady,
+  kBeforeFirstDiscoverySend,
+  kDiscoveryWaiting,
+  kBeforeDiscoveryRetry,
+  kHostCorrelated,
+  kReadyForAcceptedInvite,
+  kCancellationVisible,
+  kCleanup,
+  kCleanupComplete,
+};
+
+struct ConfiguredInviteOperationIdentity {
+  uint64_t operation_token = 0;
+  uint64_t title_generation = 0;
+  uint32_t title_id = 0;
+  uint32_t local_user_index = 0;
+  uint64_t local_xuid = 0;
+  std::string invite_code;
+};
+
+struct ReadyConfiguredInvite {
+  ConfiguredInviteOperationIdentity operation;
+  std::string directory_session_id;
+  std::string directory_attempt_id;
+  std::string admission_generation;
+  uint64_t lease_revision = 0;
+  uint64_t client_admission_lifecycle_token = 0;
+  bool host_ready = false;
+  bool private_allocation_eligible = false;
+  std::array<uint8_t, 8> xbox_session_id{};
+  uint64_t host_xuid = 0;
+  std::array<uint8_t, 16> exchange_key{};
+  LanAddress host_endpoint{};
+  LanAddress discovery_endpoint{};
+  XnAddrIdentity xnaddr;
+  uint64_t nonce = 0;
+};
+
+struct ConfiguredInviteDiscoveryResult {
+  SessionRecord session;
+  uint64_t socket = 0;
+};
+
+class LanDiscoveryService;
+using ConfiguredInviteDiscoveryOperation =
+    std::function<std::optional<ConfiguredInviteDiscoveryResult>(
+        LanDiscoveryService&, const DirectoryInviteJoinAttempt&, uint32_t,
+        const std::function<bool()>&,
+        const std::function<void(ConfiguredInviteStage)>&)>;
+
 class SessionRegistry {
  public:
+  using ChangeObserver = std::function<void(const std::array<uint8_t, 8>&)>;
+  explicit SessionRegistry(ChangeObserver observer = {})
+      : change_observer_(std::move(observer)) {}
   std::shared_ptr<SessionRecord> Create(uint64_t host_xuid, std::string host_name,
                                         LanAddress host_address, uint32_t flags,
                                         uint32_t public_slots, uint32_t private_slots);
@@ -185,6 +292,7 @@ class SessionRegistry {
   // delayed/cached advertisement for an abandoned local lobby from being
   // reintroduced under a different address or malformed host identity.
   std::unordered_set<uint64_t> local_session_ids_;
+  ChangeObserver change_observer_;
 };
 
 class LanDiscoveryService {
@@ -193,7 +301,11 @@ class LanDiscoveryService {
                       std::shared_ptr<HostAdmissionGrantStore> admission_grants = {},
                       SessionDirectoryClient::LocalUserIdentityProvider user_identity = {},
                       SessionDirectoryClient::ClientAdmissionTransport client_admission_transport = {},
-                      bool automatic_client_admission_driver = true);
+                      bool automatic_client_admission_driver = true,
+                      SessionDirectoryClient::InviteJoinAttemptTransport
+                          invite_join_attempt_transport = {},
+                      SessionDirectoryClient::JoinAttemptCompletionTransport
+                          join_attempt_completion_transport = {});
   ~LanDiscoveryService();
   LanDiscoveryService(const LanDiscoveryService&) = delete;
   LanDiscoveryService& operator=(const LanDiscoveryService&) = delete;
@@ -207,17 +319,38 @@ class LanDiscoveryService {
   bool ConfirmClientAdmissionSession(uint32_t local_user_index,
                                      const std::shared_ptr<const SessionRecord>& session);
   bool HasClientAdmission(uint32_t local_user_index) const;
+  std::optional<uint64_t> ClientAdmissionLifecycleToken(
+      uint32_t local_user_index) const;
+  std::optional<ReadyAcceptedSessionCandidate> ReadyAcceptedSession(
+      uint32_t local_user_index = 0);
   void PollClientAdmissions(
       std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+  void StopClientAdmission(uint32_t local_user_index);
+  void QueueGameplayAdmission(const std::shared_ptr<SessionRecord>& session,
+                              uint32_t user_index, uint64_t xuid,
+                              const DirectoryTraversalAttempt& attempt,
+                              const std::string& generation);
+  void StopAllClientAdmissions();
   void StopAdvertising();
   bool IsAdvertising() const;
   std::vector<SessionRecord> Search(uint32_t timeout_ms, uint32_t max_results,
                                     uint32_t local_user_index = 0);
+  std::optional<DirectoryInviteJoinAttempt> IssueConfiguredInviteAttempt(
+      std::string_view code, uint32_t title_id);
+  void ReleaseConfiguredInviteAttempt(const DirectoryTraversalAttempt& attempt);
+  std::optional<ConfiguredInviteDiscoveryResult> DiscoverConfiguredInvite(
+      const DirectoryInviteJoinAttempt& issued, uint32_t timeout_ms,
+      const std::function<bool()>& operation_is_current,
+      const std::function<void(ConfiguredInviteStage)>& stage_observer = {},
+      LanAddress lan_probe_target = {});
   std::optional<SessionRecord> Join(const SessionRecord& session, const SessionMember& member,
                                     uint32_t timeout_ms);
   std::optional<SessionRecord> Leave(const SessionRecord& session, uint64_t xuid,
                                      uint32_t timeout_ms);
-  std::optional<ReadyAcceptedSessionCandidate> ReadyAcceptedSession(
+  std::optional<ReadyConfiguredInvite> ReadyConfiguredInviteResult(
+      const ConfiguredInviteOperationIdentity& operation,
+      const DirectoryTraversalAttempt& attempt,
+      uint64_t client_admission_lifecycle_token,
       uint32_t local_user_index = 0);
   static uint32_t DetermineLanIpv4();
 
@@ -226,6 +359,20 @@ class LanDiscoveryService {
   std::shared_ptr<HostAdmissionGrantStore> admission_grants_;
   std::unique_ptr<Impl> impl_;
   SessionDirectoryClient directory_;
+};
+
+struct SessionManagerDependencies {
+  SessionDirectoryClient::LocalUserIdentityProvider user_identity;
+  SessionDirectoryClient::ClientAdmissionTransport client_admission_transport;
+  SessionDirectoryClient::InviteJoinAttemptTransport invite_join_attempt_transport;
+  SessionDirectoryClient::JoinAttemptCompletionTransport join_attempt_completion_transport;
+  ConfiguredInviteDiscoveryOperation configured_invite_discovery;
+  std::function<void(ConfiguredInviteStage,
+                     const ConfiguredInviteOperationIdentity&)>
+      configured_invite_stage_observer;
+  std::function<size_t(uint32_t)> accepting_listener_count;
+  std::function<size_t(uint32_t, uint32_t)> broadcast_notification;
+  std::function<uint32_t()> current_title_id;
 };
 
 // CURRENT REXGLUE PLATFORM LIMITATION: production local identity currently
@@ -249,7 +396,8 @@ class XSession final : public XObject {
 
 class SessionManager {
  public:
-  SessionManager(KernelState* kernel_state, uint16_t discovery_port);
+  SessionManager(KernelState* kernel_state, uint16_t discovery_port,
+                 SessionManagerDependencies dependencies = {});
   ~SessionManager();
   OnlineStatus& online_status() { return online_status_; }
   SessionRegistry& registry() { return registry_; }
@@ -258,12 +406,60 @@ class SessionManager {
   void UnregisterObject(XSession* session);
   void ReleaseRecord(const std::shared_ptr<SessionRecord>& record);
   XSession* LookupObject(uint32_t guest_object) const;
+  void OnTitleTransition(uint32_t title_id);
+  void OnTitleTermination();
+  void ShutdownAsyncActivity();
+  ConfiguredInviteLifecycleState configured_invite_state() const;
+  std::optional<ReadyConfiguredInvite> ready_configured_invite() const;
+  AcceptedInviteStore& accepted_invites() { return accepted_invites_; }
+  std::optional<AcceptedInviteStore::ReadLease> GetAcceptedInviteRecord(
+      uint32_t local_user_index, uint32_t title_id);
+  bool CompleteAcceptedInviteJoin(uint32_t local_user_index, uint64_t local_xuid,
+                                  const std::shared_ptr<SessionRecord>& session);
 
  private:
+  struct ConfiguredInviteOperation;
+  bool StartConfiguredInviteOperation(uint32_t title_id);
+  void CancelConfiguredInviteOperation();
+  void RunConfiguredInviteOperation(
+      const std::shared_ptr<ConfiguredInviteOperation>& operation);
+  bool IsConfiguredInviteOperationCurrent(
+      const ConfiguredInviteOperationIdentity& identity) const;
+  void SetConfiguredInviteState(
+      const std::shared_ptr<ConfiguredInviteOperation>& operation,
+      ConfiguredInviteLifecycleState state);
+  void ObserveConfiguredInviteStage(
+      const std::shared_ptr<ConfiguredInviteOperation>& operation,
+      ConfiguredInviteStage stage) const;
+  void TryPublishAcceptedInvite(
+      const std::shared_ptr<ConfiguredInviteOperation>& operation);
+  void OnRegistryChanged(const std::array<uint8_t, 8>& session_id);
+  bool RuntimeIdentityMatches(const ConfiguredInviteOperationIdentity& identity) const;
   KernelState* kernel_state_;
   OnlineStatus online_status_;
   SessionRegistry registry_;
+  SessionDirectoryClient::LocalUserIdentityProvider user_identity_;
+  ConfiguredInviteDiscoveryOperation configured_invite_discovery_;
+  std::function<void(ConfiguredInviteStage,
+                     const ConfiguredInviteOperationIdentity&)>
+      configured_invite_stage_observer_;
+  std::function<size_t(uint32_t)> accepting_listener_count_;
+  std::function<size_t(uint32_t, uint32_t)> broadcast_notification_;
+  std::function<uint32_t()> current_title_id_;
   LanDiscoveryService discovery_;
+  AcceptedInviteStore accepted_invites_;
+  mutable std::mutex configured_invite_mutex_;
+  mutable std::mutex configured_invite_control_mutex_;
+  std::shared_ptr<ConfiguredInviteOperation> configured_invite_operation_;
+  ConfiguredInviteLifecycleState configured_invite_state_ =
+      ConfiguredInviteLifecycleState::kUnclaimed;
+  std::optional<ReadyConfiguredInvite> ready_configured_invite_;
+  uint64_t configured_invite_title_generation_ = 0;
+  uint64_t next_configured_invite_operation_token_ = 0;
+  uint64_t configured_invite_claim_token_ = 0;
+  std::atomic<bool> async_shutdown_{false};
+  mutable std::mutex async_shutdown_mutex_;
+  bool async_shutdown_complete_ = false;
   mutable std::mutex object_mutex_;
   std::unordered_map<uint32_t, XSession*> objects_;
 };

@@ -358,13 +358,18 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
         }
       } else {
         auto info = LoadSessionInfo(guest_info);
+        REXKRNL_INFO("INVITE_DIAG JOIN_BY_INFO_CALLED JOIN_BY_INFO_SESSION_ID={:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+                     info.id[0], info.id[1], info.id[2], info.id[3],
+                     info.id[4], info.id[5], info.id[6], info.id[7]);
         REXKRNL_INFO("XGISessionCreateImpl: client session id={:02X}{:02X} host={:08X}:{}",
                      info.id[0], info.id[1], info.host_address.ipv4, info.host_address.port);
         session = manager.registry().Find(info.id);
         if (!session) {
+          REXKRNL_WARN("INVITE_DIAG JOIN_BY_INFO_REGISTRY_NOT_FOUND");
           REXKRNL_ERROR("XGISessionCreateImpl: join-by-info session was not found");
           return X_E_NOTFOUND;
         }
+        REXKRNL_INFO("INVITE_DIAG JOIN_BY_INFO_REGISTRY_FOUND");
       }
       object->set_record(session);
       memory::store_and_swap<uint64_t>(memory_->TranslateVirtual(nonce_ptr), session->nonce);
@@ -415,6 +420,12 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
            !ReadableJoinArray(memory_, user_index_array, user_count, 4)))
         return X_E_INVALIDARG;
       auto session = object->record();
+      if (is_local && session->host_xuid != kernel_state_->user_profile()->xuid())
+        REXKRNL_INFO("INVITE_DIAG XGI_JOIN_BEGIN xbox_session={:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X} members={}",
+                     session->info.id[0], session->info.id[1],
+                     session->info.id[2], session->info.id[3],
+                     session->info.id[4], session->info.id[5],
+                     session->info.id[6], session->info.id[7], user_count);
       std::vector<SessionMember> members;
       std::unordered_set<uint64_t> identities;
       for (uint32_t i = 0; i < user_count; ++i) {
@@ -428,6 +439,9 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
         bool private_slot = private_slots_array &&
                             memory::load_and_swap<uint32_t>(memory_->TranslateVirtual(
                                 private_slots_array + 4 * i)) != 0;
+        if (is_local && session->host_xuid != kernel_state_->user_profile()->xuid())
+          REXKRNL_INFO("INVITE_DIAG JOIN_BY_INFO_PRIVATE_REQUEST={} xuid={:016X}",
+                       private_slot, xuid);
         SessionMember member{
             xuid,         is_local ? kernel_state_->user_profile()->name() : std::string{},
             user_index,   is_local,
@@ -454,8 +468,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
           xuid, session->host_xuid);
       auto updated = kernel_state_->session_manager()->discovery().Join(
           *session, member, 500);
-      if (!updated)
+      if (!updated) {
+        REXKRNL_WARN("INVITE_DIAG XGI_JOIN_RESULT=FAIL_NETWORK_OR_HOST_ADMISSION private_request={}",
+                     member.private_slot);
         return X_E_FAIL;
+      }
       for (auto& updated_member : updated->members) {
         if (updated_member.xuid == xuid) {
           updated_member.local = true;
@@ -467,8 +484,12 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
           std::move(*updated));
       session = kernel_state_->session_manager()->registry().Find(session->info.id);
       object->set_record(session);
+      kernel_state_->session_manager()->CompleteAcceptedInviteJoin(
+          user_index, xuid, session);
       REXKRNL_INFO("XGISessionJoinLocal: joined session with {} members",
                    session ? session->members.size() : 0);
+      REXKRNL_INFO("INVITE_DIAG XGI_JOIN_RESULT=SUCCESS private_request={} members={}",
+                   member.private_slot, session ? session->members.size() : 0);
       return X_E_SUCCESS;
     }
     case 0x000B0013: {

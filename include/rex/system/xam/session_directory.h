@@ -78,6 +78,9 @@ struct DirectoryAdmissionState {
 
 struct ReadyAcceptedSessionCandidate {
   uint32_t local_user_index = 0;
+  uint64_t local_user_xuid = 0;
+  uint32_t title_id = 0;
+  uint64_t lifecycle_token = 0;
   std::string directory_session_id;
   std::string attempt_id;
   std::string admission_generation;
@@ -178,6 +181,7 @@ class ClientAdmissionLeaseState {
   bool bound() const { return !attempt_id_.empty(); }
   bool leased() const { return !admission_generation_.empty(); }
   bool host_ready() const { return host_ready_; }
+  bool renewal_uncertain() const { return renewal_uncertainty_.has_value(); }
   bool has_ever_been_ready() const { return has_ever_been_ready_; }
   uint32_t local_user_index() const { return local_user_index_; }
   uint64_t lifecycle_token() const { return lifecycle_token_; }
@@ -224,6 +228,8 @@ class ClientAdmissionLeaseState {
   std::weak_ptr<const SessionRecord> live_session_;
   std::array<uint8_t, 8> xbox_session_id_{};
   std::array<uint8_t, 16> xbox_session_key_{};
+  std::array<uint8_t, 6> xbox_ethernet_address_{};
+  std::array<uint8_t, 20> xbox_online_address_{};
   uint32_t xbox_host_ipv4_ = 0;
   uint16_t xbox_host_port_ = 0;
   uint64_t xbox_nonce_ = 0;
@@ -383,9 +389,16 @@ class SessionDirectoryClient {
   using LocalUserIdentityProvider = std::function<std::optional<uint64_t>(uint32_t)>;
   using ClientAdmissionTransport =
       std::function<ClientAdmissionTransportResponse(const ClientAdmissionTransportRequest&)>;
+  using InviteJoinAttemptTransport =
+      std::function<std::optional<DirectoryInviteJoinAttempt>(std::string_view, uint32_t)>;
+  using JoinAttemptCompletionTransport =
+      std::function<void(const DirectoryTraversalAttempt&)>;
   explicit SessionDirectoryClient(LocalUserIdentityProvider user_identity = {},
                                   ClientAdmissionTransport client_admission_transport = {},
-                                  bool automatic_client_admission_driver = true);
+                                  bool automatic_client_admission_driver = true,
+                                  InviteJoinAttemptTransport invite_join_attempt_transport = {},
+                                  JoinAttemptCompletionTransport
+                                      join_attempt_completion_transport = {});
   ~SessionDirectoryClient();
   SessionDirectoryClient(const SessionDirectoryClient&) = delete;
   SessionDirectoryClient& operator=(const SessionDirectoryClient&) = delete;
@@ -411,8 +424,14 @@ class SessionDirectoryClient {
   void SetClientAdmissionTitle(uint32_t title_id);
   void SetClientAdmissionUserIdentity(uint32_t local_user_index, std::optional<uint64_t> xuid);
   void StopClientAdmission(uint32_t local_user_index);
+  void QueueGameplayAdmission(const std::shared_ptr<SessionRecord>& session,
+                              uint32_t user_index, uint64_t xuid,
+                              const DirectoryTraversalAttempt& attempt,
+                              const std::string& generation);
   void StopAllClientAdmissions();
   bool HasClientAdmission(uint32_t local_user_index) const;
+  std::optional<uint64_t> ClientAdmissionLifecycleToken(
+      uint32_t local_user_index) const;
   bool HasProtectedClientAdmission(uint32_t local_user_index) const;
   std::optional<uint64_t> ClientAdmissionSocketForSession(uint32_t local_user_index,
                                                           const SessionRecord& session) const;

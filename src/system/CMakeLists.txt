@@ -31,7 +31,9 @@ set(REXSYSTEM_SOURCES
     # XAM services
     xam/app_manager.cpp
     xam/content_manager.cpp
+    xam/accepted_invite.cpp
     xam/nat_probe.cpp
+    xam/gameplay_traversal.cpp
     xam/online_status.cpp
     xam/session.cpp
     xam/session_directory.cpp
@@ -113,6 +115,10 @@ if(WIN32)
     target_link_libraries(rexruntime PRIVATE bcrypt ws2_32 winhttp)
     target_link_libraries(rexruntime PUBLIC dxgi dxguid)
     target_compile_definitions(rexruntime PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(CURL REQUIRED)
+    find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+    target_link_libraries(rexruntime PRIVATE CURL::libcurl OpenSSL::Crypto)
 endif()
 
 if(REXGLUE_USE_D3D12)

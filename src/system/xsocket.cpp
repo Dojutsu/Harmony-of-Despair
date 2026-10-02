@@ -18,6 +18,7 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xsocket.h>
 #include <rex/system/xam/nat_probe.h>
+#include <rex/system/xam/gameplay_traversal.h>
 // #include <rex/system/xnet.h>
 
 #include <rex/net/socket.h>
@@ -69,6 +70,7 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
 
 X_STATUS XSocket::Close() {
   REXSYS_INFO("XSocket::Close: native={}", native_handle_);
+  xam::CloseGameplaySocket(native_handle_);
   xam::NatProbeDetach(native_handle_);
   int ret = rex::net::socket_close(native_handle_);
   if (ret != 0) {
@@ -158,6 +160,24 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
         xam::NatProbeIsGameplayPort(ntohs(actual_address.sin_port))) {
       xam::NatProbeAttach(native_handle_, xam::NatProbeRole::kGameplay,
                           {actual_address.sin_addr.s_addr, ntohs(actual_address.sin_port)}, this);
+      if (auto* manager = kernel_state() ? kernel_state()->session_manager() : nullptr) {
+        const auto local_xuid = kernel_state()->user_profile()->xuid();
+        xam::RegisterGameplaySocketCandidate(local_xuid, native_handle_,
+            guest_port_ ? guest_port_ : ntohs(actual_address.sin_port));
+        std::shared_ptr<xam::SessionRecord> exact;
+        for (const auto& record : manager->registry().List()) {
+          std::lock_guard lock(*record->mutex);
+          if (record->state == xam::SessionState::kDeleted ||
+              std::none_of(record->members.begin(), record->members.end(), [&](const auto& member) {
+                return member.xuid == local_xuid && member.local;
+              })) continue;
+          if (exact) { exact.reset(); break; }  // Never guess between sessions.
+          exact = record;
+        }
+        if (exact)
+          xam::BindGameplaySocket(exact, local_xuid, native_handle_,
+                                  guest_port_ ? guest_port_ : ntohs(actual_address.sin_port));
+      }
     }
   } else {
     bound_port_ = name->sin_port;
@@ -249,11 +269,15 @@ retry_native_receive:
                                       ntohs(nfrom.sin_port))) {
     goto retry_native_receive;
   }
+  if (ret > 0 && xam::NatProbeIsPendingGameplaySource(native_handle_,
+          {nfrom.sin_addr.s_addr, ntohs(nfrom.sin_port)}))
+    goto retry_native_receive;
   if (ret >= 0 && from) {
     from->sin_family = nfrom.sin_family;
     const uint16_t source_port = ntohs(nfrom.sin_port);
     const xam::LanAddress native_source{nfrom.sin_addr.s_addr, source_port};
     if (auto logical = xam::NatProbeNormalizeGameplaySource(native_handle_, native_source)) {
+      xam::NatProbeRecordGameplayTraffic(native_handle_, native_source, size_t(ret), false);
       from->sin_addr = ntohl(logical->ipv4);
       from->sin_port = logical->port;
       if (last_normalized_source_ipv4_ != native_source.ipv4 ||
@@ -265,6 +289,7 @@ retry_native_receive:
         last_normalized_source_port_ = native_source.port;
       }
     } else {
+      // Ordinary LAN peers retain their original source-address behavior.
       from->sin_addr = ntohl(nfrom.sin_addr.s_addr);  // BE <- BE
       from->sin_port = native_port_ != 0 && source_port == native_port_ ? guest_port_ : source_port;
     }
@@ -376,7 +401,30 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
         native_port_ != 0 && uint16_t(to->sin_port) == guest_port_ ? native_port_
                                                                    : uint16_t(to->sin_port);
     nto.sin_port = htons(destination_port);
-    if (auto peer = xam::NatProbePeer(native_handle_)) {
+    if (xam::IsAuthorizedGameplaySocket(native_handle_)) {
+      auto logical = xam::GameplayLogicalDestination(native_handle_,
+          {nto.sin_addr.s_addr, uint16_t(to->sin_port)});
+      auto peer = logical ? xam::NatProbeGameplayDestination(native_handle_, *logical) : std::nullopt;
+      if (!peer && (logical || xam::IsGameplayLogicalAddress(nto.sin_addr.s_addr))) {
+#if REX_PLATFORM_WIN32
+        WSASetLastError(WSAEWOULDBLOCK);
+#else
+        errno = EWOULDBLOCK;
+#endif
+        return -1;
+      }
+      if (peer) {
+        nto.sin_addr.s_addr = peer->ipv4;
+        nto.sin_port = htons(peer->port);
+      }
+    } else if (xam::IsGameplayLogicalAddress(nto.sin_addr.s_addr)) {
+#if REX_PLATFORM_WIN32
+      WSASetLastError(WSAEHOSTUNREACH);
+#else
+      errno = EHOSTUNREACH;
+#endif
+      return -1;
+    } else if (auto peer = xam::NatProbePeer(native_handle_)) {
       nto.sin_addr.s_addr = peer->ipv4;
       nto.sin_port = htons(peer->port);
       if (xam::NatProbeIsClient()) {
@@ -391,8 +439,12 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
     }
   }
 
-  return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
+  const int result = sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
                 to ? (sockaddr*)&nto : nullptr, to_len);
+  if (result > 0 && to)
+    xam::NatProbeRecordGameplayTraffic(native_handle_,
+        {nto.sin_addr.s_addr, ntohs(nto.sin_port)}, size_t(result), true);
+  return result;
 }
 
 bool XSocket::QueuePacket(uint32_t src_ip, uint16_t src_port, const uint8_t* buf, size_t len) {

@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -178,6 +179,11 @@ KernelState::~KernelState() {
     dispatch_cond_.notify_all();
     dispatch_thread_->Wait(0, 0, 0, nullptr);
   }
+
+  // Stop configured-invite workers before title/session objects and socket
+  // state are torn down.
+  if (session_manager_)
+    session_manager_->ShutdownAsyncActivity();
 
   // Unload through UnloadUserModule so the recompiled-DLL teardown runs.
   // call_entry=false because guest DllMain is unsafe at shutdown.
@@ -598,10 +604,17 @@ void KernelState::SetExecutableModule(object_ref<UserModule> module) {
   if (module.get() == executable_module_.get()) {
     return;
   }
+  const uint32_t previous_title_id = executable_module_ ? title_id() : 0;
   executable_module_ = std::move(module);
   if (!executable_module_) {
+    if (session_manager_ && previous_title_id)
+      session_manager_->OnTitleTransition(0);
     return;
   }
+
+  const uint32_t current_title_id = title_id();
+  if (session_manager_ && previous_title_id != current_title_id)
+    session_manager_->OnTitleTransition(current_title_id);
 
   // Update title process fields from the executable module.
   // Do NOT call InitializeProcess() again - it was already called in the
@@ -1025,6 +1038,9 @@ void KernelState::WaitForThreadsToExit(const std::vector<object_ref<XThread>>& t
 void KernelState::TerminateTitle() {
   REXSYS_DEBUG("KernelState::TerminateTitle");
 
+  if (session_manager_)
+    session_manager_->OnTitleTermination();
+
   constexpr uint32_t kCooperativeExitTimeoutMs = 200;
 
   // Guest threads poll this flag in the kernel wait primitives
@@ -1164,17 +1180,39 @@ void KernelState::UnregisterNotifyListener(XNotifyListener* listener) {
   }
 }
 
-void KernelState::BroadcastNotification(XNotificationID id, uint32_t data) {
+size_t KernelState::CountNotifyListenersAccepting(XNotificationID id) {
+  auto global_lock = global_critical_region_.Acquire();
+  return std::count_if(notify_listeners_.begin(), notify_listeners_.end(),
+                       [id](const auto& listener) {
+                         return listener->HasLiveGuestHandle() &&
+                                listener->AcceptsNotification(id);
+                       });
+}
+
+size_t KernelState::BroadcastNotification(XNotificationID id, uint32_t data) {
+  return BroadcastNotificationIfAtLeast(id, data, 0);
+}
+
+size_t KernelState::BroadcastNotificationIfAtLeast(
+    XNotificationID id, uint32_t data, size_t minimum_listeners) {
   std::vector<object_ref<XNotifyListener>> snapshot;
   {
     auto global_lock = global_critical_region_.Acquire();
+    for (const auto& listener : notify_listeners_)
+      if (listener->HasLiveGuestHandle() && listener->AcceptsNotification(id))
+        snapshot.push_back(listener);
+    if (snapshot.size() < minimum_listeners)
+      return 0;
+    if (id == 0x02000002)
+      REXSYS_INFO("INVITE_DIAG XNOTIFY_02000002_LISTENERS_MATCHED count={} required={} user={}",
+                  snapshot.size(), minimum_listeners, data);
     REXSYS_DEBUG("BroadcastNotification(id={:#x}, data={}) to {} listeners",
-                 static_cast<uint32_t>(id), data, notify_listeners_.size());
-    snapshot = notify_listeners_;
+                 static_cast<uint32_t>(id), data, snapshot.size());
   }
   for (const auto& notify_listener : snapshot) {
     notify_listener->EnqueueNotification(id, data);
   }
+  return snapshot.size();
 }
 
 void KernelState::CompleteOverlapped(uint32_t overlapped_ptr, X_RESULT result) {

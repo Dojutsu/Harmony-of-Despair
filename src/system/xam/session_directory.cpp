@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -15,12 +16,15 @@
 #include <sstream>
 #include <thread>
 #include <unordered_set>
+#include <vector>
 
 #include <inja/third_party/include/nlohmann/json.hpp>
 
+#include <rex/platform.h>
 #include <rex/logging.h>
 #include <rex/system/xam/session.h>
 #include <rex/system/xam/nat_probe.h>
+#include <rex/system/xam/gameplay_traversal.h>
 
 #if REX_PLATFORM_WIN32
 #include <windows.h>
@@ -28,6 +32,11 @@
 #include <bcrypt.h>
 #include <winhttp.h>
 #include <ws2tcpip.h>
+#elif REX_PLATFORM_GNU_LINUX
+#include <arpa/inet.h>
+#include <curl/curl.h>
+#include <sys/random.h>
+#include <unistd.h>
 #else
 #include <unistd.h>
 #endif
@@ -77,6 +86,8 @@ bool ClientAdmissionLeaseState::BindExactDiscovery(uint32_t local_user_index,
     std::lock_guard lock(*session->mutex);
     xbox_session_id_ = session->info.id;
     xbox_session_key_ = session->info.key;
+    xbox_ethernet_address_ = session->info.ethernet_address;
+    xbox_online_address_ = session->info.online_address;
     xbox_host_ipv4_ = session->info.host_address.ipv4;
     xbox_host_port_ = session->info.host_address.port;
     xbox_nonce_ = session->nonce;
@@ -101,6 +112,8 @@ bool ClientAdmissionLeaseState::BindExactDiscovery(uint32_t local_user_index,
 bool ClientAdmissionLeaseState::ExactSessionMatches(const SessionRecord& session) const {
   std::lock_guard lock(*session.mutex);
   return session.info.id == xbox_session_id_ && session.info.key == xbox_session_key_ &&
+         session.info.ethernet_address == xbox_ethernet_address_ &&
+         session.info.online_address == xbox_online_address_ &&
          session.info.host_address.ipv4 == xbox_host_ipv4_ &&
          session.info.host_address.port == xbox_host_port_ && session.nonce == xbox_nonce_ &&
          session.host_xuid == xbox_host_xuid_ &&
@@ -300,6 +313,8 @@ void ClientAdmissionLeaseState::Invalidate() {
   live_session_.reset();
   xbox_session_id_ = {};
   xbox_session_key_ = {};
+  xbox_ethernet_address_ = {};
+  xbox_online_address_ = {};
   xbox_host_ipv4_ = 0;
   xbox_host_port_ = 0;
   xbox_nonce_ = 0;
@@ -346,7 +361,8 @@ bool ClientAdmissionLeaseState::ValidateLiveness(uint32_t current_title_id,
 std::optional<ReadyAcceptedSessionCandidate> ClientAdmissionLeaseState::ReadyCandidate(
     uint32_t current_title_id, std::optional<uint64_t> current_user_xuid,
     Clock::time_point now) const {
-  if (!bound() || !leased() || !host_ready_ || now >= lease_deadline_ || !session_confirmed_ ||
+  if (!bound() || !leased() || renewal_uncertainty_ || !host_ready_ ||
+      now >= lease_deadline_ || !session_confirmed_ ||
       !ValidateLiveness(current_title_id, current_user_xuid))
     return std::nullopt;
   auto live = live_session_.lock();
@@ -369,9 +385,11 @@ std::optional<ReadyAcceptedSessionCandidate> ClientAdmissionLeaseState::ReadyCan
     snapshot->state = live->state;
     snapshot->members = live->members;
   }
-  return ReadyAcceptedSessionCandidate{local_user_index_,     directory_session_id_, attempt_id_,
-                                       admission_generation_, lease_revision_,       true,
-                                       std::move(snapshot)};
+  return ReadyAcceptedSessionCandidate{
+      local_user_index_,     local_user_xuid_,      title_id_,
+      lifecycle_token_,      directory_session_id_, attempt_id_,
+      admission_generation_, lease_revision_,       true,
+      std::move(snapshot)};
 }
 
 bool ClientAdmissionMayReplaceLifecycle(bool join_by_code_action,
@@ -398,6 +416,9 @@ void HostAdmissionGrantStore::ApplyAuthenticatedPoll(
   for (const auto& attempt : attempts) {
     if (!seen.insert(attempt.attempt_id).second)
       continue;
+    REXSYS_INFO("INVITE_DIAG INVITE_ATTEMPT_VISIBLE attempt={} admission_gen={} revision={} purpose={} host_ready={}",
+                attempt.attempt_id, attempt.admission_generation,
+                attempt.lease_revision, attempt.purpose, attempt.host_ready);
     auto found = grants_.find(attempt.attempt_id);
     const bool installable = attempt.purpose == "invite_code_private_eligible" &&
                              attempt.host_ready && IsLowerHex128(attempt.attempt_id) &&
@@ -423,6 +444,12 @@ void HostAdmissionGrantStore::ApplyAuthenticatedPoll(
       grant.lease_revision = attempt.lease_revision;
       grant.expires_at = *returned_expiry;
       grants_.emplace(grant.attempt_id, std::move(grant));
+      REXSYS_INFO("INVITE_DIAG INVITE_GRANT_CREATED attempt={} admission_gen={} revision={}",
+                  attempt.attempt_id, attempt.admission_generation,
+                  attempt.lease_revision);
+      REXSYS_INFO("INVITE_DIAG INVITE_GRANT_READY attempt={} admission_gen={} revision={}",
+                  attempt.attempt_id, attempt.admission_generation,
+                  attempt.lease_revision);
       continue;
     }
     auto& grant = found->second;
@@ -448,6 +475,9 @@ void HostAdmissionGrantStore::ApplyAuthenticatedPoll(
       grant.reserved_xuid = 0;
       grant.invalidated_while_reserved = false;
     }
+    REXSYS_INFO("INVITE_DIAG INVITE_GRANT_READY attempt={} admission_gen={} revision={}",
+                attempt.attempt_id, attempt.admission_generation,
+                grant.lease_revision);
   }
   for (auto& [attempt_id, grant] : grants_) {
     if (grant.directory_session_id == directory_session_id && !seen.contains(attempt_id))
@@ -635,7 +665,7 @@ bool IsSafeDirectoryUrl(std::string_view value) {
 bool IsIpv4(std::string_view value) {
   if (value.empty())
     return true;
-#if REX_PLATFORM_WIN32
+#if REX_PLATFORM_WIN32 || REX_PLATFORM_GNU_LINUX
   in_addr address{};
   std::string text(value);
   return inet_pton(AF_INET, text.c_str(), &address) == 1 && address.s_addr != htonl(INADDR_ANY) &&
@@ -807,11 +837,27 @@ std::optional<DirectoryTraversalAttempt> ParseTraversalAttempt(const nlohmann::j
 }
 
 std::optional<std::string> RandomUrlToken(size_t byte_count) {
-#if REX_PLATFORM_WIN32
   std::vector<uint8_t> bytes(byte_count);
+#if REX_PLATFORM_WIN32
   if (BCryptGenRandom(nullptr, bytes.data(), ULONG(bytes.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG) <
       0)
     return std::nullopt;
+#elif REX_PLATFORM_GNU_LINUX
+  size_t offset = 0;
+  while (offset < bytes.size()) {
+    const ssize_t count = ::getrandom(bytes.data() + offset, bytes.size() - offset, 0);
+    if (count < 0) {
+      if (errno == EINTR)
+        continue;
+      return std::nullopt;
+    }
+    if (!count)
+      return std::nullopt;
+    offset += static_cast<size_t>(count);
+  }
+#else
+  return std::nullopt;
+#endif
   constexpr char kHex[] = "0123456789abcdef";
   std::string result(bytes.size() * 2, '0');
   for (size_t index = 0; index < bytes.size(); ++index) {
@@ -819,9 +865,6 @@ std::optional<std::string> RandomUrlToken(size_t byte_count) {
     result[index * 2 + 1] = kHex[bytes[index] & 0x0F];
   }
   return result;
-#else
-  return std::nullopt;
-#endif
 }
 
 struct HttpResult {
@@ -914,6 +957,105 @@ std::optional<HttpResult> Request(std::string_view base_url, std::wstring_view m
   WinHttpCloseHandle(connection);
   WinHttpCloseHandle(session);
   return received ? std::optional<HttpResult>(std::move(result)) : std::nullopt;
+}
+#elif REX_PLATFORM_GNU_LINUX
+size_t AppendCurlResponse(char* data, size_t size, size_t count, void* context) {
+  auto* response = static_cast<std::string*>(context);
+  if (!response || (count && size > SIZE_MAX / count))
+    return 0;
+  const size_t bytes = size * count;
+  if (response->size() > kMaxResponseBytes || bytes > kMaxResponseBytes - response->size())
+    return 0;
+  response->append(data, bytes);
+  return bytes;
+}
+
+std::optional<HttpResult> Request(std::string_view base_url, std::wstring_view method,
+                                  std::string_view relative_path, std::string_view body,
+                                  std::string_view bearer = {}) {
+  static const CURLcode global_init = curl_global_init(CURL_GLOBAL_DEFAULT);
+  if (global_init != CURLE_OK)
+    return std::nullopt;
+
+  auto full_url = std::string(base_url);
+  while (full_url.ends_with('/'))
+    full_url.pop_back();
+  if (!relative_path.starts_with('/'))
+    full_url.push_back('/');
+  full_url.append(relative_path);
+
+  const std::string method_ascii(method.begin(), method.end());
+  if (method_ascii.empty() ||
+      !std::all_of(method_ascii.begin(), method_ascii.end(), [](unsigned char ch) {
+        return ch >= 'A' && ch <= 'Z';
+      }))
+    return std::nullopt;
+
+  CURL* request = curl_easy_init();
+  if (!request)
+    return std::nullopt;
+  struct CurlCleanup {
+    CURL* handle;
+    ~CurlCleanup() { curl_easy_cleanup(handle); }
+  } cleanup{request};
+
+  curl_slist* headers = nullptr;
+  const auto append_header = [&headers](const char* value) {
+    curl_slist* appended = curl_slist_append(headers, value);
+    if (!appended)
+      return false;
+    headers = appended;
+    return true;
+  };
+  if (!append_header("Accept: application/json") ||
+      !append_header("Content-Type: application/json")) {
+    curl_slist_free_all(headers);
+    return std::nullopt;
+  }
+  std::string authorization;
+  if (!bearer.empty()) {
+    authorization = "Authorization: Bearer ";
+    authorization.append(bearer);
+    if (!append_header(authorization.c_str())) {
+      curl_slist_free_all(headers);
+      return std::nullopt;
+    }
+  }
+  struct HeaderCleanup {
+    curl_slist* headers;
+    ~HeaderCleanup() { curl_slist_free_all(headers); }
+  } header_cleanup{headers};
+
+  HttpResult result;
+  const auto set_option = [request](CURLoption option, auto value) {
+    return curl_easy_setopt(request, option, value) == CURLE_OK;
+  };
+  if (!set_option(CURLOPT_URL, full_url.c_str()) ||
+      !set_option(CURLOPT_USERAGENT, "HarmonyRecomp/1") ||
+      !set_option(CURLOPT_HTTPHEADER, headers) ||
+      !set_option(CURLOPT_CUSTOMREQUEST, method_ascii.c_str()) ||
+      !set_option(CURLOPT_CONNECTTIMEOUT_MS, 500L) ||
+      !set_option(CURLOPT_TIMEOUT_MS, 1000L) ||
+      !set_option(CURLOPT_NOSIGNAL, 1L) ||
+      !set_option(CURLOPT_FOLLOWLOCATION, 0L) ||
+      !set_option(CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS) ||
+      !set_option(CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS) ||
+      !set_option(CURLOPT_SSL_VERIFYPEER, 1L) ||
+      !set_option(CURLOPT_SSL_VERIFYHOST, 2L) ||
+      !set_option(CURLOPT_WRITEFUNCTION, AppendCurlResponse) ||
+      !set_option(CURLOPT_WRITEDATA, &result.body) ||
+      (!body.empty() &&
+       (!set_option(CURLOPT_POSTFIELDS, body.data()) ||
+        !set_option(CURLOPT_POSTFIELDSIZE_LARGE, curl_off_t(body.size())))))
+    return std::nullopt;
+
+  long response_status = 0;
+  if (curl_easy_perform(request) != CURLE_OK ||
+      curl_easy_getinfo(request, CURLINFO_RESPONSE_CODE, &response_status) != CURLE_OK ||
+      response_status < 0 || response_status > UINT32_MAX)
+    return std::nullopt;
+  result.status = static_cast<uint32_t>(response_status);
+  return result;
 }
 #else
 std::optional<HttpResult> Request(std::string_view, std::wstring_view, std::string_view,
@@ -1128,7 +1270,8 @@ DirectoryHostPollTransition ApplyDirectoryHostPollResult(
       for (const auto& attempt : attempts) {
         next_host_attempts.insert(attempt.attempt_id);
         NatProbeInstallIdentity({attempt.attempt_id, attempt.capability, attempt.rendezvous_host,
-                                 attempt.rendezvous_port, 0});
+                                 attempt.rendezvous_port, 0,
+                                 attempt.purpose == "invite_code_private_eligible"});
         HostAdmissionPollAttempt host_attempt{
             attempt.attempt_id,     attempt.capability,
             attempt.purpose,        attempt.admission_generation,
@@ -1220,13 +1363,100 @@ void RemoveActiveInviteCodeFile(const std::filesystem::path& path) {
   std::filesystem::remove(temporary, error);
 }
 
+
+namespace {
+std::string GameplayHex(std::span<const uint8_t> bytes) {
+  static constexpr char digits[] = "0123456789abcdef";
+  std::string result;
+  for (auto b : bytes) { result += digits[b >> 4]; result += digits[b & 15]; }
+  return result;
+}
+std::string GameplayXuid(uint64_t value) {
+  std::ostringstream stream;
+  stream << std::hex << std::setfill('0') << std::setw(16) << value;
+  return stream.str();
+}
+bool GameplayHexValid(const std::string& value, size_t size) {
+  return value.size() == size && std::any_of(value.begin(), value.end(), [](char c) { return c != '0'; }) &&
+      std::all_of(value.begin(), value.end(), [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+      });
+}
+std::optional<GameplayAuthorization> ParseGameplayAuthorization(
+    std::string_view body, std::chrono::steady_clock::time_point started) {
+  try {
+    const auto document = nlohmann::json::parse(body);
+    if (document.at("role") != "gameplay" || document.at("protocol_version") != 1) return {};
+    GameplayAuthorization value;
+    value.directory_session = document.at("session_id").get<std::string>();
+    if (!IsUrlToken(value.directory_session, 64)) return {};
+    auto xbox = document.at("xbox_session").get<std::string>();
+    auto xuid = document.at("xuid").get<std::string>();
+    auto host = document.at("host_xuid").get<std::string>();
+    if (!GameplayHexValid(xbox, 16) || !GameplayHexValid(xuid, 16) || !GameplayHexValid(host, 16)) return {};
+    for (size_t i = 0; i < 8; ++i) value.xbox_session[i] = uint8_t(std::stoul(xbox.substr(i*2, 2), nullptr, 16));
+    value.xuid = std::stoull(xuid, nullptr, 16);
+    value.host_xuid = std::stoull(host, nullptr, 16);
+    value.admission_attempt = document.at("attempt_id").get<std::string>();
+    value.admission_generation = document.at("admission_generation").get<std::string>();
+    if (value.xuid == value.host_xuid) {
+      if (!value.admission_attempt.empty() || !value.admission_generation.empty()) return {};
+    } else if (!GameplayHexValid(value.admission_attempt, 32) || !GameplayHexValid(value.admission_generation, 32)) return {};
+    value.member_nonce = document.at("member_nonce").get<std::string>();
+    value.member_capability = document.at("member_capability").get<std::string>();
+    if (!GameplayHexValid(value.member_nonce, 32) || !GameplayHexValid(value.member_capability, 32)) return {};
+    auto ip = document.at("logical_ipv4").get<std::string>();
+    if (inet_pton(AF_INET, ip.c_str(), &value.logical.ipv4) != 1) return {};
+    value.logical.port = 1000;
+    auto lease = document.at("expires_in_ms").get<int64_t>();
+    if (lease <= 0 || lease > 45000) return {};
+    value.expires_at = started + std::chrono::milliseconds(lease);
+    auto server = document.at("rendezvous_host").get<std::string>();
+    auto port = document.at("rendezvous_port").get<int>();
+    if (server.empty() || port <= 0 || port > 65535) return {};
+    const auto& links = document.at("links");
+    if (!links.is_array() || links.size() > 5) return {};
+    for (const auto& link : links) {
+      GameplayPeerAuthorization peer;
+      auto peer_xuid = link.at("peer_xuid").get<std::string>();
+      if (!GameplayHexValid(peer_xuid, 16)) return {};
+      peer.xuid = std::stoull(peer_xuid, nullptr, 16);
+      peer.member_nonce = link.at("peer_nonce").get<std::string>();
+      peer.admission_attempt = link.at("peer_attempt_id").get<std::string>();
+      peer.admission_generation = link.at("peer_admission_generation").get<std::string>();
+      if (!GameplayHexValid(peer.member_nonce, 32)) return {};
+      if (peer.xuid == value.host_xuid) {
+        if (!peer.admission_attempt.empty() || !peer.admission_generation.empty()) return {};
+      } else if (!GameplayHexValid(peer.admission_attempt, 32) || !GameplayHexValid(peer.admission_generation, 32)) return {};
+      ip = link.at("peer_logical_ipv4").get<std::string>();
+      if (inet_pton(AF_INET, ip.c_str(), &peer.logical.ipv4) != 1) return {};
+      peer.logical.port = 1000;
+      peer.traversal.attempt_id = link.at("attempt_id").get<std::string>();
+      peer.traversal.capability = link.at("capability").get<std::string>();
+      auto participant = link.at("participant").get<int>();
+      if (participant < 0 || participant > 1 || !GameplayHexValid(peer.traversal.attempt_id, 32) ||
+          !GameplayHexValid(peer.traversal.capability, 32)) return {};
+      peer.traversal.participant = uint8_t(participant);
+      peer.traversal.server = server;
+      peer.traversal.port = uint16_t(port);
+      value.peers.push_back(std::move(peer));
+    }
+    return value;
+  } catch (const std::exception&) { return {}; }
+}
+}  // namespace
+
 class SessionDirectoryClient::Impl {
  public:
   explicit Impl(LocalUserIdentityProvider user_identity,
                 ClientAdmissionTransport admission_transport,
-                bool automatic_client_admission_driver)
+                bool automatic_client_admission_driver,
+                InviteJoinAttemptTransport invite_attempt_transport,
+                JoinAttemptCompletionTransport completion_transport)
       : client_admission_user_identity(std::move(user_identity)),
-        client_admission_transport(std::move(admission_transport)) {
+        client_admission_transport(std::move(admission_transport)),
+        invite_join_attempt_transport(std::move(invite_attempt_transport)),
+        join_attempt_completion_transport(std::move(completion_transport)) {
     if (automatic_client_admission_driver) {
       client_admission_worker =
           std::jthread([this](std::stop_token stop) { ClientAdmissionLoop(stop); });
@@ -1263,7 +1493,7 @@ class SessionDirectoryClient::Impl {
       return;
     }
 #if !REX_PLATFORM_WIN32
-    REXSYS_WARN("Session directory: HTTPS client is not available on this platform");
+    REXSYS_WARN("Session directory: hosting is currently Windows-only");
     return;
 #endif
     hosted = std::move(value);
@@ -1279,7 +1509,10 @@ class SessionDirectoryClient::Impl {
       wake.notify_all();
       worker.join();
     }
-    if (hosted) hosted->SetStatusInviteCode({});
+    if (hosted) {
+      RevokeGameplayAuthorization(hosted, hosted->host_xuid);
+      hosted->SetStatusInviteCode({});
+    }
     if (admission_grants) admission_grants->Clear();
     hosted.reset();
     admission_grants.reset();
@@ -1330,10 +1563,14 @@ class SessionDirectoryClient::Impl {
   std::optional<DirectoryInviteJoinAttempt> CreateInviteCodeJoinAttempt(
       std::string_view code, uint32_t value_title_id) const {
     auto normalized = NormalizeInviteCode(code);
+    if (!normalized)
+      return std::nullopt;
+    if (invite_join_attempt_transport)
+      return invite_join_attempt_transport(*normalized, value_title_id);
     auto request_id = RandomUrlToken(16);
     const auto& url = REXCVAR_GET(session_directory_url);
     const auto& build_id = REXCVAR_GET(session_directory_build_id);
-    if (!normalized || !request_id || url.empty() || build_id.empty())
+    if (!request_id || url.empty() || build_id.empty())
       return std::nullopt;
     const auto body = nlohmann::json{
         {"request_id", *request_id},
@@ -1390,13 +1627,18 @@ class SessionDirectoryClient::Impl {
   }
 
   void CompleteJoinAttempt(const DirectoryTraversalAttempt& attempt) const {
-    const auto& url = REXCVAR_GET(session_directory_url);
-    if (url.empty() || !IsUrlToken(attempt.session_id, 64) || !IsUrlToken(attempt.attempt_id, 64) ||
-        attempt.capability.empty())
-      return;
-    Request(url, L"DELETE",
-            "/sessions/" + attempt.session_id + "/join-attempts/" + attempt.attempt_id, "",
-            attempt.capability);
+    if (join_attempt_completion_transport) {
+      join_attempt_completion_transport(attempt);
+    } else {
+      const auto& url = REXCVAR_GET(session_directory_url);
+      if (!url.empty() && IsUrlToken(attempt.session_id, 64) &&
+          IsUrlToken(attempt.attempt_id, 64) && !attempt.capability.empty()) {
+        Request(url, L"DELETE",
+                "/sessions/" + attempt.session_id + "/join-attempts/" +
+                    attempt.attempt_id,
+                "", attempt.capability);
+      }
+    }
     NatProbeRetireIdentity(attempt.attempt_id);
   }
 
@@ -1474,6 +1716,11 @@ class SessionDirectoryClient::Impl {
     std::lock_guard lock(client_admission_mutex);
     if (client_admission_title_id == value_title_id)
       return;
+    { std::lock_guard gameplay_lock(gameplay_clients_mutex);
+      for (auto& context : gameplay_clients) {
+        context->cancelled = true;
+        if (auto session = context->session.lock()) RevokeGameplayAuthorization(session, context->xuid);
+      } }
     client_admission_title_id = value_title_id;
     for (auto& [_, context] : client_admissions)
       QueueCancellationLocked(context);
@@ -1483,6 +1730,12 @@ class SessionDirectoryClient::Impl {
 
   void SetClientAdmissionUserIdentity(uint32_t local_user_index, std::optional<uint64_t> xuid) {
     std::lock_guard lock(client_admission_mutex);
+    { std::lock_guard gameplay_lock(gameplay_clients_mutex);
+      for (auto& context : gameplay_clients)
+        if (context->user_index == local_user_index && xuid != context->xuid) {
+          context->cancelled = true;
+          if (auto session = context->session.lock()) RevokeGameplayAuthorization(session, context->xuid);
+        } }
     client_admission_users[local_user_index] = xuid;
     if (!xuid) {
       auto found = client_admissions.find(local_user_index);
@@ -1504,7 +1757,117 @@ class SessionDirectoryClient::Impl {
     client_admission_wake.notify_all();
   }
 
+
+  void QueueGameplayAdmission(const std::shared_ptr<SessionRecord>& session,
+      uint32_t user_index, uint64_t xuid, const DirectoryTraversalAttempt& attempt,
+      const std::string& generation) {
+    if (REXCVAR_GET(session_directory_url).empty() || !session || !xuid ||
+        !IsUrlToken(attempt.session_id, 64) || !GameplayHexValid(attempt.attempt_id, 32) ||
+        !GameplayHexValid(attempt.capability, 32) || !GameplayHexValid(generation, 32)) return;
+    if (!TrackGameplayAdmission(session, xuid)) return;
+    auto context = std::make_shared<GameplayClientContext>();
+    context->session = session;
+    context->user_index = user_index;
+    context->xuid = xuid;
+    context->attempt = attempt;
+    context->generation = generation;
+    context->claim_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    { std::lock_guard session_lock(*session->mutex); context->xbox = session->info.id; }
+    {
+      std::lock_guard lock(gameplay_clients_mutex);
+      for (auto& old : gameplay_clients)
+        if (old->user_index == user_index) old->cancelled = true;
+      gameplay_clients.push_back(std::move(context));
+    }
+    client_admission_wake.notify_all();
+  }
+
+  bool SyncHostedGameplay(const std::string& id, const std::string& token) {
+    nlohmann::json payload;
+    {
+      std::lock_guard lock(*hosted->mutex);
+      if (hosted->state == SessionState::kDeleted) return false;
+      payload = {{"xbox_session", GameplayHex(hosted->info.id)},
+                 {"host_xuid", GameplayXuid(hosted->host_xuid)},
+                 {"members", nlohmann::json::array()}};
+      for (const auto& member : hosted->members) {
+        if (member.xuid == hosted->host_xuid || !member.gameplay_admission) continue;
+        const auto& binding = *member.gameplay_admission;
+        if (binding.directory_session_id != id) continue;
+        payload["members"].push_back({{"xuid", GameplayXuid(member.xuid)},
+            {"attempt_id", binding.attempt_id}, {"admission_generation", binding.admission_generation}});
+      }
+    }
+    const auto started = std::chrono::steady_clock::now();
+    auto response = Request(REXCVAR_GET(session_directory_url), L"POST",
+        "/sessions/" + id + "/gameplay/sync", payload.dump(), token);
+    if (!response || response->status != 200) return false;
+    auto authorization = ParseGameplayAuthorization(response->body, started);
+    return authorization && authorization->directory_session == id &&
+        InstallGameplayAuthorization(hosted, *authorization);
+  }
+
+  void PollGameplayClients() {
+    std::vector<std::shared_ptr<GameplayClientContext>> snapshot;
+    { std::lock_guard lock(gameplay_clients_mutex); snapshot = gameplay_clients; }
+    for (const auto& context : snapshot) {
+      auto session = context->session.lock();
+      bool current = session && !context->cancelled;
+      if (current && client_admission_user_identity)
+        current = client_admission_user_identity(context->user_index) == context->xuid;
+      if (current) {
+        std::lock_guard lock(*session->mutex);
+        current = session->state != SessionState::kDeleted && session->info.id == context->xbox &&
+            std::any_of(session->members.begin(), session->members.end(), [&](const auto& member) {
+              const auto& binding = member.gameplay_admission;
+              return member.local && member.xuid == context->xuid && binding &&
+                  binding->directory_session_id == context->attempt.session_id &&
+                  binding->attempt_id == context->attempt.attempt_id && binding->admission_generation == context->generation;
+            });
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (context->authorization)
+        current = current && GameplayAuthorizationCurrent(session, context->xuid, context->authorization->member_nonce);
+      else current = current && now < context->claim_deadline;
+      if (current && now < context->next_poll) continue;
+      nlohmann::json body{{"xbox_session", GameplayHex(context->xbox)},
+          {"xuid", GameplayXuid(context->xuid)}, {"attempt_id", context->attempt.attempt_id},
+          {"admission_generation", context->generation}};
+      auto action = context->authorization ? (current ? "status" : "revoke") : "claim";
+      auto capability = context->attempt.capability;
+      if (context->authorization) {
+        body["member_nonce"] = context->authorization->member_nonce;
+        capability = context->authorization->member_capability;
+      }
+      if (current || context->authorization) {
+        auto response = Request(REXCVAR_GET(session_directory_url), L"POST",
+            "/sessions/" + context->attempt.session_id + "/gameplay/" + action, body.dump(), capability);
+        if (current && response && response->status == 200 && !context->cancelled) {
+          auto authorization = ParseGameplayAuthorization(response->body, now);
+          if (authorization && authorization->directory_session == context->attempt.session_id &&
+              authorization->xuid == context->xuid && authorization->admission_attempt == context->attempt.attempt_id &&
+              authorization->admission_generation == context->generation &&
+              InstallGameplayAuthorization(session, *authorization)) {
+            context->authorization = std::move(authorization);
+          } else current = false;
+        } else if (current && context->authorization && response &&
+            (response->status == 401 || response->status == 403 || response->status == 404)) current = false;
+      }
+      context->next_poll = now + std::chrono::milliseconds(context->authorization ? 1000 : 100);
+      if (!current) {
+        if (session) RevokeGameplayAuthorization(session, context->xuid);
+        std::lock_guard lock(gameplay_clients_mutex);
+        std::erase(gameplay_clients, context);
+      }
+    }
+  }
+
   void StopAllClientAdmissions() {
+    { std::lock_guard lock(gameplay_clients_mutex);
+      for (auto& context : gameplay_clients) {
+        context->cancelled = true;
+        if (auto session = context->session.lock()) RevokeGameplayAuthorization(session, context->xuid);
+      } }
     std::lock_guard lock(client_admission_mutex);
     for (auto& [_, context] : client_admissions)
       QueueCancellationLocked(context);
@@ -1515,6 +1878,15 @@ class SessionDirectoryClient::Impl {
   bool HasClientAdmission(uint32_t local_user_index) const {
     std::lock_guard lock(client_admission_mutex);
     return client_admissions.contains(local_user_index);
+  }
+
+  std::optional<uint64_t> ClientAdmissionLifecycleToken(
+      uint32_t local_user_index) const {
+    std::lock_guard lock(client_admission_mutex);
+    auto found = client_admissions.find(local_user_index);
+    if (found == client_admissions.end())
+      return std::nullopt;
+    return found->second.state.lifecycle_token();
   }
 
   bool HasProtectedClientAdmission(uint32_t local_user_index) const {
@@ -1611,6 +1983,19 @@ class SessionDirectoryClient::Impl {
   }
 
  private:
+  struct GameplayClientContext {
+    std::weak_ptr<SessionRecord> session;
+    uint32_t user_index = 0;
+    uint64_t xuid = 0;
+    std::array<uint8_t, 8> xbox{};
+    DirectoryTraversalAttempt attempt;
+    std::string generation;
+    std::atomic<bool> cancelled{false};
+    std::chrono::steady_clock::time_point claim_deadline{}, next_poll{};
+    std::optional<GameplayAuthorization> authorization;
+  };
+  std::mutex gameplay_clients_mutex;
+  std::vector<std::shared_ptr<GameplayClientContext>> gameplay_clients;
   struct ClientAdmissionContext {
     ClientAdmissionLeaseState state;
     uint64_t socket = 0;
@@ -1657,6 +2042,8 @@ class SessionDirectoryClient::Impl {
     auto& recovering = poll_state.recovering;
     auto& token = poll_state.registration_token;
     auto& public_invite_code = poll_state.public_invite_code;
+    std::unordered_set<std::string> logged_preparations;
+    std::unordered_set<std::string> logged_ready_preparations;
     auto next_heartbeat = std::chrono::steady_clock::time_point{};
     auto next_registration = std::chrono::steady_clock::time_point{};
     auto retry_delay = kHeartbeatRetryInitial;
@@ -1752,6 +2139,7 @@ class SessionDirectoryClient::Impl {
             retry_delay = std::min(retry_delay * 2, kHeartbeatInterval);
             break;
           case DirectoryHeartbeatDisposition::kRecoverRegistration:
+            RevokeGameplayAuthorization(hosted, hosted->host_xuid);
             hosted->SetStatusInviteCode({});
             REXSYS_WARN("Session directory: heartbeat returned 404; recovering logical lobby");
             if (admission_grants)
@@ -1773,6 +2161,7 @@ class SessionDirectoryClient::Impl {
         }
       }
       if (!session_id.empty() && !recovering) {
+        const bool gameplay_synced = SyncHostedGameplay(session_id, token);
         if (admission_grants) {
           auto completed = admission_grants->TakeCompletions();
           pending_completions.insert(pending_completions.end(),
@@ -1781,6 +2170,7 @@ class SessionDirectoryClient::Impl {
           std::erase_if(pending_completions, [&](const auto& completion) {
             if (completion.directory_session_id != session_id)
               return true;
+            if (!gameplay_synced) return false;
             auto response =
                 Request(REXCVAR_GET(session_directory_url), L"DELETE",
                         "/sessions/" + session_id + "/join-attempts/" + completion.attempt_id, "",
@@ -1796,6 +2186,10 @@ class SessionDirectoryClient::Impl {
               !acknowledged_ids.insert(acknowledged.attempt_id).second)
             continue;
           const auto& attempt = found->second;
+          if (logged_preparations.insert(attempt.attempt_id).second)
+            REXSYS_INFO("INVITE_DIAG HOST_GRANT_PREPARE_REQUEST attempt_ref={} admission_gen_ref={} revision={}",
+                        attempt.attempt_id.substr(0, 8),
+                        attempt.admission_generation.substr(0, 8), attempt.lease_revision);
           acknowledgements.push_back({{"attempt_id", attempt.attempt_id},
                                       {"admission_generation", attempt.admission_generation},
                                       {"lease_revision", attempt.lease_revision}});
@@ -1808,6 +2202,17 @@ class SessionDirectoryClient::Impl {
         auto snapshot = pending && pending->status == 200
                             ? ParseDirectoryHostPollSnapshot(pending->body, session_id)
                             : std::nullopt;
+        if (snapshot) {
+          for (const auto& attempt : *snapshot)
+            if (attempt.host_ready && logged_preparations.contains(attempt.attempt_id) &&
+                logged_ready_preparations.insert(attempt.attempt_id).second)
+              REXSYS_INFO("INVITE_DIAG HOST_GRANT_PREPARE_SUCCESS attempt_ref={} admission_gen_ref={} revision={}",
+                          attempt.attempt_id.substr(0, 8),
+                          attempt.admission_generation.substr(0, 8), attempt.lease_revision);
+        } else if (!acknowledged_ids.empty()) {
+          REXSYS_WARN("INVITE_DIAG HOST_GRANT_PREPARE_FAIL_POLL status={}",
+                      pending ? pending->status : 0);
+        }
         const auto disposition = ClassifyDirectoryHostPollResponse(
             pending ? std::optional<uint32_t>(pending->status) : std::nullopt,
             snapshot.has_value());
@@ -1816,6 +2221,7 @@ class SessionDirectoryClient::Impl {
         auto transition = ApplyDirectoryHostPollResult(
             disposition, attempts, poll_state, admission_grants.get(), *hosted, poll_started_at);
         if (transition.recover_now) {
+          RevokeGameplayAuthorization(hosted, hosted->host_xuid);
           REXSYS_WARN("Session directory: host poll returned 404; recovering logical lobby");
           next_registration = std::chrono::steady_clock::now();
           retry_delay = kHeartbeatRetryInitial;
@@ -2079,13 +2485,29 @@ class SessionDirectoryClient::Impl {
           applied = found->second.state.ApplyTransportFailure(operation, response_received_at);
         } else if (disposition == ClientAdmissionResponseDisposition::kApply) {
           applied = found->second.state.ApplyResponse(operation, *admission, response_received_at);
-          if (operation.action == ClientAdmissionAction::kRenew &&
+          if (operation.action == ClientAdmissionAction::kArm &&
               applied == ClientAdmissionApplyResult::kApplied)
+            REXSYS_INFO("INVITE_DIAG LEASE_ACTIVE attempt={} admission_gen={} revision={}",
+                        operation.attempt_id,
+                        found->second.state.admission_generation(),
+                        found->second.state.lease_revision());
+          if (operation.action == ClientAdmissionAction::kRenew &&
+              applied == ClientAdmissionApplyResult::kApplied) {
+            REXSYS_INFO("INVITE_DIAG LEASE_RENEWED attempt={} admission_gen={} revision={}",
+                        operation.attempt_id,
+                        found->second.state.admission_generation(),
+                        found->second.state.lease_revision());
             REXSYS_INFO("Session directory: client admission renewed revision={}",
                         found->second.state.lease_revision());
-          if (!was_ready && found->second.state.host_ready())
+          }
+          if (!was_ready && found->second.state.host_ready()) {
+            REXSYS_INFO("INVITE_DIAG HOST_GRANT_READY attempt={} admission_gen={} revision={}",
+                        operation.attempt_id,
+                        found->second.state.admission_generation(),
+                        found->second.state.lease_revision());
             REXSYS_INFO("Session directory: client admission ready revision={}",
                         found->second.state.lease_revision());
+          }
         } else {
           applied = ClientAdmissionApplyResult::kInvalidated;
         }
@@ -2100,6 +2522,7 @@ class SessionDirectoryClient::Impl {
  private:
   void ClientAdmissionLoop(std::stop_token stop) {
     for (;;) {
+      PollGameplayClients();
       PollClientAdmissions(ClientAdmissionLeaseState::Clock::now());
 
       if (stop.stop_requested()) {
@@ -2129,6 +2552,8 @@ class SessionDirectoryClient::Impl {
   mutable std::mutex client_admission_mutex;
   LocalUserIdentityProvider client_admission_user_identity;
   ClientAdmissionTransport client_admission_transport;
+  InviteJoinAttemptTransport invite_join_attempt_transport;
+  JoinAttemptCompletionTransport join_attempt_completion_transport;
   uint32_t client_admission_title_id = 0;
   uint64_t next_client_admission_token = 0;
   std::unordered_map<uint32_t, std::optional<uint64_t>> client_admission_users;
@@ -2143,10 +2568,14 @@ class SessionDirectoryClient::Impl {
 SessionDirectoryClient::SessionDirectoryClient(
     LocalUserIdentityProvider user_identity,
     ClientAdmissionTransport client_admission_transport,
-    bool automatic_client_admission_driver)
+    bool automatic_client_admission_driver,
+    InviteJoinAttemptTransport invite_join_attempt_transport,
+    JoinAttemptCompletionTransport join_attempt_completion_transport)
     : impl_(std::make_unique<Impl>(std::move(user_identity),
                                   std::move(client_admission_transport),
-                                  automatic_client_admission_driver)) {}
+                                  automatic_client_admission_driver,
+                                  std::move(invite_join_attempt_transport),
+                                  std::move(join_attempt_completion_transport))) {}
 SessionDirectoryClient::~SessionDirectoryClient() = default;
 void SessionDirectoryClient::StartHosting(
     const std::shared_ptr<SessionRecord>& session, uint32_t title_id, uint16_t discovery_port,
@@ -2201,11 +2630,20 @@ void SessionDirectoryClient::SetClientAdmissionUserIdentity(uint32_t local_user_
 void SessionDirectoryClient::StopClientAdmission(uint32_t local_user_index) {
   impl_->StopClientAdmission(local_user_index);
 }
+void SessionDirectoryClient::QueueGameplayAdmission(const std::shared_ptr<SessionRecord>& session,
+    uint32_t user_index, uint64_t xuid, const DirectoryTraversalAttempt& attempt,
+    const std::string& generation) {
+  impl_->QueueGameplayAdmission(session, user_index, xuid, attempt, generation);
+}
 void SessionDirectoryClient::StopAllClientAdmissions() {
   impl_->StopAllClientAdmissions();
 }
 bool SessionDirectoryClient::HasClientAdmission(uint32_t local_user_index) const {
   return impl_->HasClientAdmission(local_user_index);
+}
+std::optional<uint64_t> SessionDirectoryClient::ClientAdmissionLifecycleToken(
+    uint32_t local_user_index) const {
+  return impl_->ClientAdmissionLifecycleToken(local_user_index);
 }
 bool SessionDirectoryClient::HasProtectedClientAdmission(uint32_t local_user_index) const {
   return impl_->HasProtectedClientAdmission(local_user_index);

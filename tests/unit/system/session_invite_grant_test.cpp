@@ -758,7 +758,7 @@ TEST_CASE("authenticated grant drives the complete host admission path",
           HostAdmissionReservationStatus::kNoMatch);
   }
 
-  SECTION("title-selected public fallback commits and consumes") {
+  SECTION("explicit grant-backed public request commits and consumes") {
     auto session = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 3074}, 1, 3, 1);
     session->members.push_back(Member(2, true));
     auto grants = std::make_shared<HostAdmissionGrantStore>();
@@ -853,7 +853,7 @@ TEST_CASE("authoritative discovery admission preserves public and invite pools",
   CHECK(session->members[4].private_slot == before_private);
 }
 
-TEST_CASE("invited public fallback is title-selected and still transactional",
+TEST_CASE("grant-backed public request is transactional with private pool full",
           "[session][invite-grant][admission]") {
   SessionRecord session;
   session.host_xuid = 1;
@@ -874,7 +874,7 @@ TEST_CASE("invited public fallback is title-selected and still transactional",
   CHECK(session.members.size() == 3);
 }
 
-TEST_CASE("successful invited public fallback consumes its exact grant",
+TEST_CASE("successful grant-backed public request consumes its exact grant",
           "[session][invite-grant][admission][security]") {
   const auto now = Clock::time_point{} + std::chrono::seconds(35);
   HostAdmissionGrantStore store;

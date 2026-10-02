@@ -1,18 +1,30 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include <rex/platform.h>
 
 #if REX_PLATFORM_WIN32
 #include <WinSock2.h>
+#elif REX_PLATFORM_GNU_LINUX
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #else
 #include <arpa/inet.h>
 #endif
 
 #include <rex/system/xam/session.h>
+#include <rex/system/xam/session_directory.h>
 #include <rex/system/xam/nat_probe.h>
 #include <rex/system/xam/user_profile.h>
 #include <rex/cvar.h>
@@ -26,6 +38,217 @@ TEST_CASE("NAT registration polls quickly only while awaiting a peer", "[session
   CHECK(NatProbeAutomaticAttemptActive(19999, false));
   CHECK_FALSE(NatProbeAutomaticAttemptActive(20000, false));
   CHECK_FALSE(NatProbeAutomaticAttemptActive(100, true));
+}
+
+TEST_CASE("invite LAN proof binds attempt, domain, source and hosted tuple",
+          "[session][configured-invite][lan][security]") {
+#if REX_PLATFORM_WIN32 || REX_PLATFORM_GNU_LINUX
+  constexpr std::string_view attempt = "a5a17e71f6de46b63843e54034b24c78";
+  constexpr std::string_view other = "4f9d04f830ee9dbc80e72dcea3d674e4";
+  const std::array<uint8_t, 6> source_a{10, 0, 0, 217, 0xD2, 0x5E};
+  auto source_b = source_a;
+  source_b[3] = 218;
+  const auto selector = InviteLanAuthenticationTag(attempt, "invite-lan-selector-v1");
+  const auto request = InviteLanAuthenticationTag(attempt, "invite-lan-request-v1", source_a);
+  REQUIRE(selector);
+  REQUIRE(request);
+  CHECK(*selector != *request);
+  CHECK(InviteLanAuthenticationTag(attempt, "invite-lan-request-v1", source_b) != request);
+  CHECK(InviteLanAuthenticationTag(other, "invite-lan-request-v1", source_a) != request);
+  CHECK_FALSE(InviteLanAuthenticationTag("invalid", "invite-lan-selector-v1"));
+  CHECK_FALSE(InviteLanAuthenticationTag("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+                                         "invite-lan-selector-v1"));
+
+  std::array<uint8_t, 42> tuple{};
+  tuple[0] = 0x58; // title
+  tuple[4] = 1;    // Xbox session ID
+  tuple[12] = 2;   // exchange key
+  tuple[28] = 3;   // host XUID
+  tuple[36] = 10;  // hosted address
+  tuple[40] = 0x78; // gameplay port
+  const auto proof = InviteLanAuthenticationTag(attempt, "invite-lan-response-v1", tuple);
+  REQUIRE(proof);
+  CHECK(InviteLanAuthenticationTag(other, "invite-lan-response-v1", tuple) != proof);
+  for (const size_t field : std::array<size_t, 6>{0, 4, 12, 28, 36, 40}) {
+    auto altered = tuple;
+    altered[field] ^= 1;
+    CHECK(InviteLanAuthenticationTag(attempt, "invite-lan-response-v1", altered) != proof);
+  }
+#endif
+}
+
+#if REX_PLATFORM_GNU_LINUX
+TEST_CASE("Linux session directory resolves and claims an invite over loopback HTTP",
+          "[session][directory][linux]") {
+  constexpr std::string_view session_json =
+      R"({"session_id":"session-token","server_name":"Alice","player_count":1,"max_players":6,"title_id":"58410A7A","protocol_version":1,"build_id":"harmony-test","connectivity_candidates":[{"type":"public","address":"203.0.113.7","discovery_port":30741,"gameplay_port":30742}]})";
+  constexpr std::string_view attempt_json =
+      R"({"attempt_id":"0123456789abcdef0123456789abcdef","capability":"fedcba9876543210fedcba9876543210","rendezvous_host":"127.0.0.1","rendezvous_port":30740,"participant":"client","purpose":"invite_code_private_eligible"})";
+
+  const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+  REQUIRE(listener >= 0);
+  int reuse_address = 1;
+  REQUIRE(::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse_address,
+                       sizeof(reuse_address)) == 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  REQUIRE(::bind(listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0);
+  REQUIRE(::listen(listener, 4) == 0);
+  socklen_t address_size = sizeof(address);
+  REQUIRE(::getsockname(listener, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+
+  std::vector<std::string> requests;
+  std::jthread server([&] {
+    for (size_t index = 0; index < 4; ++index) {
+      pollfd pending{listener, POLLIN, 0};
+      if (::poll(&pending, 1, 1000) <= 0)
+        break;
+      const int connection = ::accept(listener, nullptr, nullptr);
+      if (connection < 0)
+        break;
+
+      std::string request;
+      std::array<char, 2048> buffer{};
+      size_t header_end = std::string::npos;
+      size_t content_length = 0;
+      while (header_end == std::string::npos ||
+             request.size() < header_end + 4 + content_length) {
+        const ssize_t count = ::recv(connection, buffer.data(), buffer.size(), 0);
+        if (count <= 0)
+          break;
+        request.append(buffer.data(), static_cast<size_t>(count));
+        if (header_end == std::string::npos) {
+          header_end = request.find("\r\n\r\n");
+          if (header_end != std::string::npos) {
+            const auto length_header = request.find("Content-Length:");
+            if (length_header != std::string::npos && length_header < header_end) {
+              const auto value_start = request.find_first_not_of(' ', length_header + 15);
+              if (value_start != std::string::npos && value_start < header_end)
+                content_length = static_cast<size_t>(std::stoul(request.substr(value_start)));
+            }
+          }
+        }
+      }
+      requests.push_back(request);
+
+      std::string status = "404 Not Found";
+      std::string body;
+      if (request.starts_with("GET /sessions/by-code/ABC234 ")) {
+        status = "200 OK";
+        body = "{\"session\":" + std::string(session_json) + "}";
+      } else if (request.starts_with("POST /sessions/by-code/ABC234/join-attempts ")) {
+        status = "201 Created";
+        body = "{\"session\":" + std::string(session_json) + ",\"attempt\":" +
+               std::string(attempt_json) + "}";
+      } else if (request.starts_with(
+                     "DELETE /sessions/session-token/join-attempts/0123456789abcdef0123456789abcdef ")) {
+        status = "204 No Content";
+      }
+      const std::string response =
+          "HTTP/1.1 " + status + "\r\nContent-Type: application/json\r\nContent-Length: " +
+          std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+      size_t sent = 0;
+      while (sent < response.size()) {
+        const ssize_t count = ::send(connection, response.data() + sent, response.size() - sent,
+                                     MSG_NOSIGNAL);
+        if (count <= 0)
+          break;
+        sent += static_cast<size_t>(count);
+      }
+      ::close(connection);
+    }
+  });
+
+  const auto previous_url = REXCVAR_GET(session_directory_url);
+  const auto previous_build_id = REXCVAR_GET(session_directory_build_id);
+  struct CvarRestore {
+    std::string url;
+    std::string build_id;
+    ~CvarRestore() {
+      REXCVAR_SET(session_directory_build_id, build_id);
+      REXCVAR_SET(session_directory_url, url);
+    }
+  } restore{previous_url, previous_build_id};
+  REXCVAR_SET(session_directory_url,
+              "http://127.0.0.1:" + std::to_string(ntohs(address.sin_port)));
+  REXCVAR_SET(session_directory_build_id, "harmony-test");
+
+  SessionDirectoryClient directory;
+  const auto resolved = directory.ResolveInviteCode("abc234", 0x58410A7A);
+  const auto joined = directory.CreateInviteCodeJoinAttempt("ABC234", 0x58410A7A);
+  DirectoryTraversalAttempt completion = joined ? joined->attempt : DirectoryTraversalAttempt{};
+  if (!joined) {
+    completion.session_id = "session-token";
+    completion.attempt_id = "0123456789abcdef0123456789abcdef";
+    completion.capability = "fedcba9876543210fedcba9876543210";
+  }
+  directory.CompleteJoinAttempt(completion);
+  server.join();
+  ::close(listener);
+
+  REQUIRE(resolved);
+  CHECK(resolved->session_id == "session-token");
+  REQUIRE(joined);
+  CHECK(joined->attempt.purpose == "invite_code_private_eligible");
+  REQUIRE(requests.size() == 3);
+  CHECK(requests[0].starts_with("GET /sessions/by-code/ABC234 "));
+  CHECK(requests[1].starts_with("POST /sessions/by-code/ABC234/join-attempts "));
+  const auto request_id = requests[1].find("\"request_id\":\"");
+  REQUIRE(request_id != std::string::npos);
+  const auto token_start = request_id + std::string_view("\"request_id\":\"").size();
+  const auto token_end = requests[1].find('"', token_start);
+  REQUIRE(token_end != std::string::npos);
+  CHECK(token_end - token_start == 32);
+  CHECK(std::all_of(requests[1].begin() + token_start, requests[1].begin() + token_end,
+                    [](char value) {
+                      return (value >= '0' && value <= '9') ||
+                             (value >= 'a' && value <= 'f');
+                    }));
+  CHECK(requests[2].starts_with(
+      "DELETE /sessions/session-token/join-attempts/0123456789abcdef0123456789abcdef "));
+  CHECK(requests[2].find("Authorization: Bearer fedcba9876543210fedcba9876543210\r\n") !=
+        std::string::npos);
+}
+#endif
+
+TEST_CASE("configured invite LAN peer is attempt-owned and route selection is immutable",
+          "[session][configured-invite][lan][race]") {
+  constexpr uint64_t socket = 0xF1234;
+  constexpr std::string_view attempt = "a5a17e71f6de46b63843e54034b24c78";
+  constexpr std::string_view capability = "00112233445566778899aabbccddeeff";
+  const LanAddress local{htonl(0x0A0000D9u), 53854};
+  const LanAddress host{htonl(0x0A0000D5u), 30741};
+  const LanAddress unrelated{htonl(0x0A0000D4u), 30741};
+  struct Cleanup {
+    uint64_t socket;
+    std::string_view attempt;
+    ~Cleanup() {
+      NatProbeRetireIdentity(attempt);
+      NatProbeDetach(socket);
+    }
+  } cleanup{socket, attempt};
+  NatProbeAttach(socket, NatProbeRole::kDiscovery, local);
+  REQUIRE(NatProbeInstallIdentityForSocket(
+      {std::string(attempt), std::string(capability), "127.0.0.1", 30740, 1, true},
+      socket));
+  CHECK_FALSE(NatProbeRegisterInviteLanPeer(socket, "00000000000000000000000000000000",
+                                             host));
+  CHECK_FALSE(NatProbeSelectInviteDiscoveryPeer(socket, attempt, host));
+  REQUIRE(NatProbeRegisterInviteLanPeer(socket, attempt, host));
+  CHECK_FALSE(NatProbeRegisterInviteLanPeer(socket, attempt, unrelated));
+  CHECK(NatProbeMatchAcknowledgedDiscoveryAttempts(socket, host) ==
+        std::vector<std::string>{std::string(attempt)});
+  CHECK(NatProbeMatchAcknowledgedDiscoveryAttempts(socket, unrelated).empty());
+  REQUIRE(NatProbeSelectInviteDiscoveryPeer(socket, attempt, host));
+  CHECK(NatProbePeer(socket) == host);
+  CHECK_FALSE(NatProbeSelectInviteDiscoveryPeer(socket, attempt, unrelated));
+  CHECK(NatProbeSelectInviteDiscoveryPeer(socket, attempt, host));
+  CHECK(NatProbeMatchAcknowledgedDiscoveryAttempts(socket, unrelated).empty());
+  NatProbeRetireIdentity(attempt);
+  CHECK_FALSE(NatProbePeer(socket));
+  CHECK(NatProbeMatchAcknowledgedDiscoveryAttempts(socket, host).empty());
 }
 
 TEST_CASE("NAT acknowledgement follows the peer endpoint", "[session][network][nat]") {
@@ -616,6 +839,27 @@ TEST_CASE("stopping a LAN advertisement removes the hosted session", "[session][
 
   LanDiscoveryService client(title_id, discovery_port);
   CHECK(client.Search(100, 4).empty());
+}
+
+TEST_CASE("discovered XNADDR reconstruction is byte-identical to host generation",
+          "[session][xnaddr]") {
+  constexpr uint64_t host_xuid = 0xB13E102030405060ull;
+  SessionRegistry registry;
+  auto hosted = registry.Create(host_xuid, "Host",
+                                {htonl(INADDR_LOOPBACK), 30742}, 1, 4, 2);
+  const auto discovered = ReconstructXnAddrIdentity(host_xuid);
+  REQUIRE(hosted);
+  CHECK(std::memcmp(hosted->info.ethernet_address.data(),
+                    discovered.ethernet_address.data(),
+                    discovered.ethernet_address.size()) == 0);
+  CHECK(std::memcmp(hosted->info.online_address.data(),
+                    discovered.online_address.data(),
+                    discovered.online_address.size()) == 0);
+  CHECK(hosted->info.ethernet_address ==
+        std::array<uint8_t, 6>{0x60, 0x50, 0x40, 0x30, 0x20, 0x10});
+  CHECK(hosted->info.online_address ==
+        std::array<uint8_t, 20>{0x60, 0x50, 0x40, 0x30, 0x20, 0x10, 0x3E,
+                                0xB1});
 }
 
 }  // namespace rex::system::xam

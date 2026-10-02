@@ -32,6 +32,12 @@ void XNotifyListener::Initialize(uint64_t mask, uint32_t max_version) {
   kernel_state_->RegisterNotifyListener(this);
 }
 
+bool XNotifyListener::AcceptsNotification(XNotificationID id) const {
+  const auto key = XNotificationKey(id);
+  return (mask_ & (uint64_t{1} << key.mask_index)) &&
+         key.version <= max_version_;
+}
+
 void XNotifyListener::EnqueueNotification(XNotificationID id, uint32_t data) {
   auto key = XNotificationKey(id);
   // Ignore if the notification doesn't match our mask.

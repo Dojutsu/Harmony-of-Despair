@@ -13,10 +13,16 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xam/nat_probe.h>
 
+#if REX_PLATFORM_GNU_LINUX
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#endif
+
 #if REX_PLATFORM_WIN32
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <bcrypt.h>
 using socket_len_t = int;
 static constexpr SOCKET kInvalidSocket = INVALID_SOCKET;
 #else
@@ -108,21 +114,28 @@ bool ValidMemberAccounting(std::span<const SessionMember> members, uint32_t publ
 bool ApplyMemberBatch(SessionRecord& session, std::span<const SessionMember> members,
                       MemberUpdateSource source) {
   std::lock_guard lock(*session.mutex);
+  auto reject = [&](const char* reason) {
+    if (source != MemberUpdateSource::kTitleAllocatedPool)
+      REXSYS_WARN("INVITE_DIAG HOST_ADMISSION_REJECTED_{} source={} batch={}", reason,
+                  source == MemberUpdateSource::kInviteGrant ? "invite_grant" : "public",
+                  members.size());
+    return false;
+  };
   if (session.state == SessionState::kDeleted || members.empty() ||
       !ValidMemberAccounting(session.members, session.max_public_slots, session.max_private_slots))
-    return false;
+    return reject("DELETED_EMPTY_OR_INVALID_ROSTER");
   if (source == MemberUpdateSource::kInviteGrant && members.size() != 1)
-    return false;
+    return reject("INVALID_GRANT_BATCH");
   auto candidate = session.members;
   std::unordered_set<uint64_t> batch_ids;
   for (auto member : members) {
     if (!member.xuid || !batch_ids.insert(member.xuid).second)
-      return false;
+      return reject("ZERO_OR_DUPLICATE_XUID");
     auto it = std::find_if(candidate.begin(), candidate.end(),
                            [&](const auto& current) { return current.xuid == member.xuid; });
     if (source != MemberUpdateSource::kTitleAllocatedPool) {
       if (member.xuid == session.host_xuid)
-        return false;
+        return reject("HOST_XUID");
       if (it != candidate.end())
         continue;
       member.local = false;
@@ -133,14 +146,27 @@ bool ApplyMemberBatch(SessionRecord& session, std::span<const SessionMember> mem
       // title retries membership with no display-name field.
       member.name = it->name;
     }
+    // Ordinary title metadata updates preserve the existing admission instance.
+    // Removing and subsequently recreating a member does not inherit it.
+    if (it != candidate.end()) member.gameplay_admission = it->gameplay_admission;
     if (it == candidate.end())
       candidate.push_back(std::move(member));
     else
       *it = std::move(member);
   }
-  if (!ValidMemberAccounting(candidate, session.max_public_slots, session.max_private_slots))
-    return false;
+  if (!ValidMemberAccounting(candidate, session.max_public_slots,
+                             session.max_private_slots))
+    return reject("CAPACITY_OR_DUPLICATE_ROSTER");
   session.members.swap(candidate);
+  if (source != MemberUpdateSource::kTitleAllocatedPool) {
+    const auto private_count = std::count_if(session.members.begin(), session.members.end(),
+                                             [](const auto& member) { return member.private_slot; });
+    REXSYS_INFO("INVITE_DIAG HOST_ADMISSION_ACCEPTED source={} public={} private={} total={} public_cap={} private_cap={}",
+                source == MemberUpdateSource::kInviteGrant ? "invite_grant" : "public",
+                session.members.size() - private_count, private_count,
+                session.members.size(), session.max_public_slots,
+                session.max_private_slots);
+  }
   session.NotifyStatus();
   return true;
 }
@@ -184,7 +210,120 @@ struct DiscoveryPacket {
   char host_name[16];
   WireMember members[kMaxWireMembers];
 };
+struct InviteLanPacket {
+  char magic[4];
+  uint8_t version;
+  uint8_t type;
+  uint16_t reserved;
+  uint8_t selector[16];
+  uint8_t proof[16];
+};
 #pragma pack(pop)
+static_assert(sizeof(InviteLanPacket) == 40);
+
+constexpr uint8_t kInviteLanRequest = 1;
+constexpr uint8_t kInviteLanResponse = 2;
+
+std::optional<std::array<uint8_t, 16>> InviteLanMac(
+    std::string_view attempt_id, std::string_view domain,
+    std::span<const uint8_t> payload = {}) {
+#if REX_PLATFORM_WIN32
+  if (attempt_id.size() != 32 ||
+      !std::all_of(attempt_id.begin(), attempt_id.end(), [](char value) {
+        return (value >= '0' && value <= '9') ||
+               (value >= 'a' && value <= 'f');
+      }))
+    return std::nullopt;
+  BCRYPT_ALG_HANDLE algorithm = nullptr;
+  if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr,
+                                 BCRYPT_ALG_HANDLE_HMAC_FLAG) < 0)
+    return std::nullopt;
+  std::vector<uint8_t> input(domain.begin(), domain.end());
+  input.insert(input.end(), payload.begin(), payload.end());
+  std::array<uint8_t, 32> digest{};
+  const auto status = BCryptHash(
+      algorithm, reinterpret_cast<PUCHAR>(const_cast<char*>(attempt_id.data())),
+      ULONG(attempt_id.size()), input.data(), ULONG(input.size()), digest.data(),
+      ULONG(digest.size()));
+  BCryptCloseAlgorithmProvider(algorithm, 0);
+  if (status < 0)
+    return std::nullopt;
+  std::array<uint8_t, 16> result{};
+  std::copy_n(digest.begin(), result.size(), result.begin());
+  return result;
+#elif REX_PLATFORM_GNU_LINUX
+  if (attempt_id.size() != 32 ||
+      !std::all_of(attempt_id.begin(), attempt_id.end(), [](char value) {
+        return (value >= '0' && value <= '9') ||
+               (value >= 'a' && value <= 'f');
+      }))
+    return std::nullopt;
+  std::vector<uint8_t> input(domain.begin(), domain.end());
+  input.insert(input.end(), payload.begin(), payload.end());
+  std::array<uint8_t, EVP_MAX_MD_SIZE> digest{};
+  unsigned int digest_size = 0;
+  if (!HMAC(EVP_sha256(), attempt_id.data(), static_cast<int>(attempt_id.size()), input.data(),
+            input.size(), digest.data(), &digest_size) ||
+      digest_size < 16)
+    return std::nullopt;
+  std::array<uint8_t, 16> result{};
+  std::copy_n(digest.begin(), result.size(), result.begin());
+  return result;
+#else
+  (void)attempt_id;
+  (void)domain;
+  (void)payload;
+  return std::nullopt;
+#endif
+}
+
+std::array<uint8_t, 6> InviteLanSourceBytes(LanAddress source) {
+  std::array<uint8_t, 6> bytes{};
+  std::memcpy(bytes.data(), &source.ipv4, 4);
+  const auto port = htons(source.port);
+  std::memcpy(bytes.data() + 4, &port, 2);
+  return bytes;
+}
+
+std::array<uint8_t, 42> InviteLanTupleBytes(const DiscoveryPacket& packet) {
+  std::array<uint8_t, 42> bytes{};
+  size_t offset = 0;
+  auto append = [&](const void* data, size_t size) {
+    std::memcpy(bytes.data() + offset, data, size);
+    offset += size;
+  };
+  append(&packet.title_id, 4);
+  append(packet.session_id, 8);
+  append(packet.session_key, 16);
+  append(&packet.host_xuid, 8);
+  append(&packet.host_ipv4, 4);
+  append(&packet.host_port, 2);
+  return bytes;
+}
+
+bool InviteLanEqual(const uint8_t* left, const uint8_t* right, size_t size) {
+  uint8_t difference = 0;
+  for (size_t i = 0; i < size; ++i)
+    difference |= left[i] ^ right[i];
+  return difference == 0;
+}
+
+bool InviteLanPacketValid(const InviteLanPacket& packet, uint8_t type) {
+  return std::memcmp(packet.magic, "HILN", 4) == 0 && packet.version == 1 &&
+         packet.type == type && packet.reserved == 0;
+}
+
+InviteLanPacket MakeInviteLanPacket(uint8_t type,
+                                   const std::array<uint8_t, 16>& selector,
+                                   const std::array<uint8_t, 16>& proof) {
+  InviteLanPacket packet{};
+  std::memcpy(packet.magic, "HILN", 4);
+  packet.version = 1;
+  packet.type = type;
+  std::copy(selector.begin(), selector.end(), packet.selector);
+  std::copy(proof.begin(), proof.end(), packet.proof);
+  return packet;
+}
 
 uint64_t Swap64(uint64_t value) {
   const uint32_t high = htonl(static_cast<uint32_t>(value >> 32));
@@ -268,6 +407,9 @@ std::optional<SessionRecord> Decode(const DiscoveryPacket& packet, uint32_t titl
   std::memcpy(session.info.id.data(), packet.session_id, 8);
   std::memcpy(session.info.key.data(), packet.session_key, 16);
   session.host_xuid = Swap64(packet.host_xuid);
+  const auto xnaddr = ReconstructXnAddrIdentity(session.host_xuid);
+  session.info.ethernet_address = xnaddr.ethernet_address;
+  session.info.online_address = xnaddr.online_address;
   session.host_name.assign(packet.host_name, strnlen(packet.host_name, sizeof(packet.host_name)));
   session.info.host_address = {packet.host_ipv4 ? packet.host_ipv4 : source_ipv4,
                                ntohs(packet.host_port)};
@@ -359,6 +501,9 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
         // embedded by a multi-homed host.
         result->info.host_address.ipv4 = session.info.host_address.ipv4;
         result->discovery_address = session.discovery_address;
+        result->traversal_session_id = session.traversal_session_id;
+        result->traversal_attempt_id = session.traversal_attempt_id;
+        result->traversal_capability = session.traversal_capability;
       }
       if (result && (result->info.id != session.info.id || result->info.key != session.info.key ||
                      result->host_xuid != session.host_xuid))
@@ -384,6 +529,61 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
   return result;
 }
 }  // namespace
+
+std::optional<std::array<uint8_t, 16>> InviteLanAuthenticationTag(
+    std::string_view attempt_id, std::string_view domain,
+    std::span<const uint8_t> payload) {
+  return InviteLanMac(attempt_id, domain, payload);
+}
+
+XnAddrIdentity ReconstructXnAddrIdentity(uint64_t xuid) {
+  XnAddrIdentity result;
+  for (size_t i = 0; i < result.ethernet_address.size(); ++i)
+    result.ethernet_address[i] = uint8_t(xuid >> (i * 8));
+  std::memcpy(result.online_address.data(), &xuid, sizeof(xuid));
+  return result;
+}
+
+std::array<uint8_t, 60> SerializeGuestSessionInfo(const SessionInfo& info) {
+  std::array<uint8_t, 60> output{};
+  std::memcpy(output.data(), info.id.data(), info.id.size());
+  std::memcpy(output.data() + 8, &info.host_address.ipv4, 4);
+  std::memcpy(output.data() + 12, &info.host_address.ipv4, 4);
+  output[16] = uint8_t(info.host_address.port >> 8);
+  output[17] = uint8_t(info.host_address.port);
+  std::memcpy(output.data() + 18, info.ethernet_address.data(), 6);
+  std::memcpy(output.data() + 24, info.online_address.data(), 20);
+  std::memcpy(output.data() + 44, info.key.data(), 16);
+  return output;
+}
+
+std::optional<AcceptedInviteRecord> SerializeAcceptedInviteRecord(
+    const ReadyConfiguredInvite& ready) {
+  if (!ready.host_ready || !ready.private_allocation_eligible ||
+      !ready.operation.local_xuid || !ready.host_xuid || !ready.operation.title_id ||
+      !ready.client_admission_lifecycle_token ||
+      ready.xnaddr != ReconstructXnAddrIdentity(ready.host_xuid))
+    return std::nullopt;
+  SessionInfo info;
+  info.id = ready.xbox_session_id;
+  info.host_address = ready.host_endpoint;
+  info.ethernet_address = ready.xnaddr.ethernet_address;
+  info.online_address = ready.xnaddr.online_address;
+  info.key = ready.exchange_key;
+  AcceptedInviteRecord record{};
+  auto store64 = [&](size_t offset, uint64_t value) {
+    for (size_t i = 0; i < 8; ++i)
+      record[offset + i] = uint8_t(value >> ((7 - i) * 8));
+  };
+  store64(0, ready.operation.local_xuid);
+  store64(8, ready.host_xuid);
+  for (size_t i = 0; i < 4; ++i)
+    record[16 + i] = uint8_t(ready.operation.title_id >> ((3 - i) * 8));
+  const auto guest_info = SerializeGuestSessionInfo(info);
+  std::memcpy(record.data() + 20, guest_info.data(), guest_info.size());
+  record[83] = 1;
+  return record;
+}
 
 bool ApplyDiscoveryMemberBatch(SessionRecord& session, std::span<const SessionMember> members,
                                DiscoveryAdmissionContext context) {
@@ -432,9 +632,9 @@ std::shared_ptr<SessionRecord> SessionRegistry::Create(uint64_t host_xuid, std::
   session->host_xuid = host_xuid;
   session->host_name = std::move(host_name);
   session->info.host_address = host_address;
-  for (size_t i = 0; i < session->info.ethernet_address.size(); ++i)
-    session->info.ethernet_address[i] = uint8_t(host_xuid >> (i * 8));
-  std::memcpy(session->info.online_address.data(), &host_xuid, sizeof(host_xuid));
+  const auto xnaddr = ReconstructXnAddrIdentity(host_xuid);
+  session->info.ethernet_address = xnaddr.ethernet_address;
+  session->info.online_address = xnaddr.online_address;
   session->flags = flags;
   session->max_public_slots = public_slots;
   session->max_private_slots = private_slots;
@@ -446,30 +646,41 @@ std::shared_ptr<SessionRecord> SessionRegistry::Create(uint64_t host_xuid, std::
   return session;
 }
 bool SessionRegistry::Delete(const std::array<uint8_t, 8>& id) {
-  std::lock_guard lock(mutex_);
-  auto it = sessions_.find(IdKey(id));
-  if (it == sessions_.end())
-    return false;
-  std::lock_guard session_lock(*it->second->mutex);
-  it->second->state = SessionState::kDeleted;
-  it->second->NotifyStatus();
-  sessions_.erase(it);
+  {
+    std::lock_guard lock(mutex_);
+    auto it = sessions_.find(IdKey(id));
+    if (it == sessions_.end())
+      return false;
+    std::lock_guard session_lock(*it->second->mutex);
+    it->second->state = SessionState::kDeleted;
+    it->second->NotifyStatus();
+    sessions_.erase(it);
+  }
+  if (change_observer_)
+    change_observer_(id);
   return true;
 }
 size_t SessionRegistry::DeleteHostedBy(uint64_t host_xuid) {
-  std::lock_guard lock(mutex_);
+  std::vector<std::array<uint8_t, 8>> deleted;
   size_t removed = 0;
-  for (auto it = sessions_.begin(); it != sessions_.end();) {
-    std::lock_guard session_lock(*it->second->mutex);
-    if (it->second->host_xuid == host_xuid) {
-      it->second->state = SessionState::kDeleted;
-      it->second->NotifyStatus();
-      it = sessions_.erase(it);
-      ++removed;
-    } else {
-      ++it;
+  {
+    std::lock_guard lock(mutex_);
+    for (auto it = sessions_.begin(); it != sessions_.end();) {
+      std::lock_guard session_lock(*it->second->mutex);
+      if (it->second->host_xuid == host_xuid) {
+        deleted.push_back(it->second->info.id);
+        it->second->state = SessionState::kDeleted;
+        it->second->NotifyStatus();
+        it = sessions_.erase(it);
+        ++removed;
+      } else {
+        ++it;
+      }
     }
   }
+  if (change_observer_)
+    for (const auto& id : deleted)
+      change_observer_(id);
   return removed;
 }
 size_t SessionRegistry::UpdateHostedPort(uint64_t host_xuid, uint16_t port) {
@@ -579,17 +790,31 @@ bool SessionRegistry::End(const std::array<uint8_t, 8>& id) {
 }
 std::shared_ptr<SessionRecord> SessionRegistry::UpsertDiscovered(SessionRecord record) {
   auto session = std::make_shared<SessionRecord>(std::move(record));
-  std::lock_guard lock(mutex_);
-  auto id_key = IdKey(session->info.id);
-  if (local_session_ids_.contains(id_key))
-    return nullptr;
-  sessions_[id_key] = std::move(session);
-  return sessions_[id_key];
+  {
+    std::lock_guard lock(mutex_);
+    auto id_key = IdKey(session->info.id);
+    if (local_session_ids_.contains(id_key))
+      return nullptr;
+    auto existing = sessions_.find(id_key);
+    if (existing != sessions_.end()) {
+      std::lock_guard existing_lock(*existing->second->mutex);
+      // A public Search observation cannot replace an exact invite correlation
+      // with the same Xbox session ID or redirect its endpoint.
+      if (!existing->second->traversal_attempt_id.empty() &&
+          session->traversal_attempt_id.empty())
+        return existing->second;
+    }
+    sessions_[id_key] = session;
+  }
+  if (change_observer_)
+    change_observer_(session->info.id);
+  return session;
 }
 
 class LanDiscoveryService::Impl {
  public:
-  Impl(uint32_t title_id, uint16_t port, std::shared_ptr<HostAdmissionGrantStore> admission_grants)
+  Impl(uint32_t title_id, uint16_t port,
+       std::shared_ptr<HostAdmissionGrantStore> admission_grants)
       : title_id(title_id), port(port), admission_grants(std::move(admission_grants)) {}
   ~Impl() { Stop(); }
   bool Start(std::shared_ptr<SessionRecord> value) {
@@ -685,8 +910,55 @@ class LanDiscoveryService::Impl {
       DiscoveryPacket query{};
       int count = recvfrom(socket, reinterpret_cast<char*>(&query), sizeof(query), 0,
                            reinterpret_cast<sockaddr*>(&source), &length);
+      if (count > 0)
+        REXSYS_INFO("NAT_DIAG discovery listener datagram socket={} source={:08X}:{} bytes={}",
+                    uint64_t(socket), source.sin_addr.s_addr, ntohs(source.sin_port), count);
       if (count > 0 && NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&query), count,
                                        source.sin_addr.s_addr, ntohs(source.sin_port))) {
+        continue;
+      }
+      if (count == sizeof(InviteLanPacket)) {
+        InviteLanPacket invite_packet{};
+        std::memcpy(&invite_packet, &query, sizeof(invite_packet));
+        const LanAddress remote{source.sin_addr.s_addr, ntohs(source.sin_port)};
+        if (!InviteLanPacketValid(invite_packet, kInviteLanRequest) ||
+            (!IsPrivateLanIpv4(remote.ipv4) &&
+             (ntohl(remote.ipv4) & 0xFF000000u) != 0x7F000000u) || !advertised) {
+          REXSYS_INFO("INVITE_LAN_RESPONSE_REJECTED_MALFORMED");
+          continue;
+        }
+        bool matched = false;
+        for (const auto& attempt_id : NatProbeHostedInviteAttempts(uint64_t(socket))) {
+          const auto selector = InviteLanMac(attempt_id, "invite-lan-selector-v1");
+          const auto source_bytes = InviteLanSourceBytes(remote);
+          const auto request_proof =
+              InviteLanMac(attempt_id, "invite-lan-request-v1", source_bytes);
+          if (!selector || !request_proof ||
+              !InviteLanEqual(invite_packet.selector, selector->data(), selector->size()) ||
+              !InviteLanEqual(invite_packet.proof, request_proof->data(),
+                              request_proof->size()))
+            continue;
+          DiscoveryPacket hosted_packet = Encode(*advertised, title_id);
+          const auto tuple = InviteLanTupleBytes(hosted_packet);
+          const auto response_proof =
+              InviteLanMac(attempt_id, "invite-lan-response-v1", tuple);
+          if (!response_proof)
+            break;
+          const auto reply = MakeInviteLanPacket(kInviteLanResponse, *selector,
+                                                 *response_proof);
+          const int sent = sendto(socket, reinterpret_cast<const char*>(&reply),
+                                  sizeof(reply), 0,
+                                  reinterpret_cast<sockaddr*>(&source), length);
+          if (sent == sizeof(reply) &&
+              NatProbeRegisterInviteLanPeer(uint64_t(socket), attempt_id, remote)) {
+            REXSYS_INFO("INVITE_LAN_RESPONSE_SENT attempt_ref={} peer={:08X}:{}",
+                        attempt_id.substr(0, 8), remote.ipv4, remote.port);
+          }
+          matched = true;
+          break;
+        }
+        if (!matched)
+          REXSYS_INFO("INVITE_LAN_RESPONSE_REJECTED_ATTEMPT_OR_PROOF");
         continue;
       }
       bool valid = count == sizeof(query) && ntohl(query.magic) == kDiscoveryMagic &&
@@ -700,6 +972,13 @@ class LanDiscoveryService::Impl {
         const auto& wire = query.members[0];
         const uint32_t flags = ntohl(wire.flags);
         const uint64_t xuid = Swap64(wire.xuid);
+        if (query.type == kJoin)
+          REXSYS_INFO("INVITE_DIAG HOST_JOIN_REQUEST_RECEIVED xuid={:016X} xbox_session={:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X} private_request={} flags={}",
+                      xuid, query.session_id[0], query.session_id[1],
+                      query.session_id[2], query.session_id[3],
+                      query.session_id[4], query.session_id[5],
+                      query.session_id[6], query.session_id[7],
+                      (flags & 2) != 0, flags);
         bool existing = false;
         {
           std::lock_guard lock(*advertised->mutex);
@@ -723,6 +1002,8 @@ class LanDiscoveryService::Impl {
                                (flags & 4) != 0};
           HostAdmissionReservation reservation;
           DiscoveryAdmissionContext context;
+          REXSYS_INFO("INVITE_DIAG HOST_ADMISSION_BEGIN xuid={:016X} private_request={} existing={}",
+                      xuid, member.private_slot, existing);
           if (!existing) {
             // NAT snapshot -> atomic grant reservation -> membership commit ->
             // finalization. No pair of these lock domains is nested.
@@ -733,9 +1014,18 @@ class LanDiscoveryService::Impl {
               auto authority = admission_grants->Reserve(*directory_session, uint64_t(socket),
                                                          source.sin_addr.s_addr,
                                                          ntohs(source.sin_port), matches, xuid);
+              REXSYS_INFO("INVITE_DIAG HOST_GRANT_MATCH xuid={:016X} status={} attempt={} admission_gen={} revision={}",
+                          xuid, static_cast<int>(authority.status),
+                          authority.reservation.attempt_id,
+                          authority.reservation.admission_generation,
+                          authority.reservation.lease_revision);
               if (authority.status == HostAdmissionReservationStatus::kReserved) {
                 reservation = std::move(authority.reservation);
                 context.source = DiscoveryAdmissionSource::kInviteGrant;
+                member.gameplay_admission = std::make_shared<const GameplayAdmissionBinding>(
+                    GameplayAdmissionBinding{reservation.directory_session_id,
+                                              reservation.attempt_id,
+                                              reservation.admission_generation});
               } else if (authority.status ==
                          HostAdmissionReservationStatus::kDuplicateReservation) {
                 // The winning packet owns the one synchronous transaction.
@@ -746,16 +1036,21 @@ class LanDiscoveryService::Impl {
             }
           }
           if (valid)
-            valid = ApplyDiscoveryMemberBatch(*advertised,
-                                              std::span<const SessionMember>(&member, 1), context);
+            valid = ApplyDiscoveryMemberBatch(
+                *advertised, std::span<const SessionMember>(&member, 1), context);
           if (reservation)
             admission_grants->Finish(reservation, valid);
+          if (!valid)
+            REXSYS_WARN("INVITE_DIAG HOST_ADMISSION_REJECTED_GRANT_OR_ROSTER xuid={:016X} private_request={}",
+                        xuid, member.private_slot);
           if (valid) {
-            REXSYS_INFO("LAN discovery: host accepted join xuid={:016X} source={} from {:08X}:{}",
-                        xuid,
-                        context.source == DiscoveryAdmissionSource::kInviteGrant ? "invite-grant"
-                                                                                 : "public",
-                        source.sin_addr.s_addr, ntohs(source.sin_port));
+            REXSYS_INFO(
+                "LAN discovery: host accepted join xuid={:016X} source={} from {:08X}:{}",
+                xuid,
+                context.source == DiscoveryAdmissionSource::kInviteGrant
+                    ? "invite-grant"
+                    : "public",
+                source.sin_addr.s_addr, ntohs(source.sin_port));
           }
         } else if (valid) {
           std::lock_guard lock(*advertised->mutex);
@@ -800,12 +1095,17 @@ LanDiscoveryService::LanDiscoveryService(
     uint32_t title_id, uint16_t port, std::shared_ptr<HostAdmissionGrantStore> admission_grants,
     SessionDirectoryClient::LocalUserIdentityProvider user_identity,
     SessionDirectoryClient::ClientAdmissionTransport client_admission_transport,
-    bool automatic_client_admission_driver)
+    bool automatic_client_admission_driver,
+    SessionDirectoryClient::InviteJoinAttemptTransport invite_join_attempt_transport,
+    SessionDirectoryClient::JoinAttemptCompletionTransport
+        join_attempt_completion_transport)
     : admission_grants_(admission_grants ? std::move(admission_grants)
                                          : std::make_shared<HostAdmissionGrantStore>()),
       impl_(std::make_unique<Impl>(title_id, port, admission_grants_)),
       directory_(std::move(user_identity), std::move(client_admission_transport),
-                 automatic_client_admission_driver) {}
+                 automatic_client_admission_driver,
+                 std::move(invite_join_attempt_transport),
+                 std::move(join_attempt_completion_transport)) {}
 LanDiscoveryService::~LanDiscoveryService() = default;
 void LanDiscoveryService::SetTitleId(uint32_t title_id) {
   directory_.SetClientAdmissionTitle(title_id);
@@ -828,8 +1128,23 @@ bool LanDiscoveryService::ConfirmClientAdmissionSession(
 bool LanDiscoveryService::HasClientAdmission(uint32_t local_user_index) const {
   return directory_.HasClientAdmission(local_user_index);
 }
+std::optional<uint64_t> LanDiscoveryService::ClientAdmissionLifecycleToken(
+    uint32_t local_user_index) const {
+  return directory_.ClientAdmissionLifecycleToken(local_user_index);
+}
 void LanDiscoveryService::PollClientAdmissions(std::chrono::steady_clock::time_point now) {
   directory_.PollClientAdmissions(now);
+}
+void LanDiscoveryService::StopClientAdmission(uint32_t local_user_index) {
+  directory_.StopClientAdmission(local_user_index);
+}
+void LanDiscoveryService::QueueGameplayAdmission(const std::shared_ptr<SessionRecord>& session,
+    uint32_t user_index, uint64_t xuid, const DirectoryTraversalAttempt& attempt,
+    const std::string& generation) {
+  directory_.QueueGameplayAdmission(session, user_index, xuid, attempt, generation);
+}
+void LanDiscoveryService::StopAllClientAdmissions() {
+  directory_.StopAllClientAdmissions();
 }
 bool LanDiscoveryService::Advertise(const std::shared_ptr<SessionRecord>& session) {
   if (!impl_->Start(session))
@@ -844,8 +1159,289 @@ void LanDiscoveryService::StopAdvertising() {
 bool LanDiscoveryService::IsAdvertising() const {
   return impl_->running;
 }
+std::optional<DirectoryInviteJoinAttempt>
+LanDiscoveryService::IssueConfiguredInviteAttempt(std::string_view code,
+                                                  uint32_t title_id) {
+  if (!title_id || title_id != impl_->title_id)
+    return std::nullopt;
+  return directory_.CreateInviteCodeJoinAttempt(code, title_id);
+}
+void LanDiscoveryService::ReleaseConfiguredInviteAttempt(
+    const DirectoryTraversalAttempt& attempt) {
+  directory_.CompleteJoinAttempt(attempt);
+}
+std::optional<ConfiguredInviteDiscoveryResult>
+LanDiscoveryService::DiscoverConfiguredInvite(
+    const DirectoryInviteJoinAttempt& issued, uint32_t timeout_ms,
+    const std::function<bool()>& operation_is_current,
+    const std::function<void(ConfiguredInviteStage)>& stage_observer,
+    LanAddress lan_probe_target) {
+  auto current = [&] {
+    return !operation_is_current || operation_is_current();
+  };
+  auto observe = [&](ConfiguredInviteStage stage) {
+    if (stage_observer)
+      stage_observer(stage);
+    return current();
+  };
+
+  const auto& attempt = issued.attempt;
+  if (!current() || attempt.participant != 1 ||
+      attempt.purpose != "invite_code_private_eligible" ||
+      attempt.session_id != issued.session.session_id)
+    return std::nullopt;
+  const DirectoryCandidate* endpoint = nullptr;
+  for (const auto& candidate : issued.session.connectivity_candidates) {
+    if (candidate.type != "public")
+      continue;
+    if (endpoint)
+      return std::nullopt;
+    endpoint = &candidate;
+  }
+  in_addr authoritative_ipv4{};
+  if (!endpoint || !endpoint->discovery_port || !endpoint->gameplay_port ||
+      inet_pton(AF_INET, endpoint->address.c_str(), &authoritative_ipv4) != 1)
+    return std::nullopt;
+  if (!observe(ConfiguredInviteStage::kBeforeSocketSetup) ||
+      !EnsureSocketRuntime())
+    return std::nullopt;
+
+  SOCKET socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (socket == kInvalidSocket)
+    return std::nullopt;
+  bool transferred = false;
+  auto cleanup = [&] {
+    if (transferred)
+      return;
+    NatProbeDetach(uint64_t(socket));
+    CloseSocket(socket);
+    NatProbeRetireIdentity(attempt.attempt_id);
+  };
+  if (!current() || !BindLanSocket(socket, 0)) {
+    REXSYS_WARN(
+        "Configured invite: operation-owned discovery socket bind failed after attempt issuance");
+    cleanup();
+    return std::nullopt;
+  }
+  if (!SetNonBlocking(socket)) {
+    cleanup();
+    return std::nullopt;
+  }
+  sockaddr_in local_address{};
+  socket_len_t local_length = sizeof(local_address);
+  if (getsockname(socket, reinterpret_cast<sockaddr*>(&local_address),
+                  &local_length) != 0) {
+    cleanup();
+    return std::nullopt;
+  }
+  NatProbeAttach(uint64_t(socket), NatProbeRole::kDiscovery,
+                 {local_address.sin_addr.s_addr,
+                  ntohs(local_address.sin_port)});
+  if (!current() || !NatProbeInstallIdentityForSocket(
+                        {attempt.attempt_id, attempt.capability,
+                         attempt.rendezvous_host, attempt.rendezvous_port, 1, true},
+                        uint64_t(socket))) {
+    cleanup();
+    return std::nullopt;
+  }
+
+  const auto started = std::chrono::steady_clock::now();
+  const auto deadline =
+      started + std::chrono::milliseconds(timeout_ms + SearchTimingBudget::kNatGraceMs);
+  DiscoveryPacket query{};
+  query.magic = htonl(kDiscoveryMagic);
+  query.version = htons(kDiscoveryVersion);
+  query.type = kQuery;
+  query.title_id = htonl(impl_->title_id);
+  const LanAddress local{local_address.sin_addr.s_addr, ntohs(local_address.sin_port)};
+  const auto selector = InviteLanMac(attempt.attempt_id, "invite-lan-selector-v1");
+  const auto source_bytes = InviteLanSourceBytes(local);
+  const auto request_proof =
+      InviteLanMac(attempt.attempt_id, "invite-lan-request-v1", source_bytes);
+  int broadcast_enabled = 1;
+  const bool lan_enabled = selector && request_proof &&
+                           setsockopt(socket, SOL_SOCKET, SO_BROADCAST,
+                                      reinterpret_cast<const char*>(&broadcast_enabled),
+                                      sizeof(broadcast_enabled)) == 0;
+  if (lan_enabled)
+    REXSYS_INFO("INVITE_LAN_DISCOVERY_STARTED attempt_ref={}",
+                attempt.attempt_id.substr(0, 8));
+  struct Candidate {
+    LanAddress peer;
+    bool lan = false;
+    std::array<uint8_t, 16> proof{};
+    std::chrono::steady_clock::time_point next_query{};
+  };
+  std::vector<Candidate> candidates;
+  auto next_lan_probe = started;
+  bool sent_once = false;
+  bool waiting_observed = false;
+  bool traversal_observed = false;
+  while (current() && std::chrono::steady_clock::now() < deadline) {
+    const auto now = std::chrono::steady_clock::now();
+    NatProbeTick(uint64_t(socket));
+    if (lan_enabled && now >= next_lan_probe) {
+      const auto probe = MakeInviteLanPacket(kInviteLanRequest, *selector,
+                                             *request_proof);
+      sockaddr_in broadcast{};
+      broadcast.sin_family = AF_INET;
+      broadcast.sin_addr.s_addr = lan_probe_target.ipv4 ? lan_probe_target.ipv4
+                                                        : htonl(INADDR_BROADCAST);
+      broadcast.sin_port = htons(lan_probe_target.port ? lan_probe_target.port
+                                                       : endpoint->discovery_port);
+      sendto(socket, reinterpret_cast<const char*>(&probe), sizeof(probe), 0,
+             reinterpret_cast<sockaddr*>(&broadcast), sizeof(broadcast));
+      next_lan_probe = now + std::chrono::milliseconds(100);
+    }
+    for (const auto& peer : NatProbePeerAttempts(uint64_t(socket))) {
+      if (peer.attempt_id != attempt.attempt_id ||
+          std::any_of(candidates.begin(), candidates.end(), [&](const Candidate& value) {
+            return !value.lan && value.peer == peer.peer;
+          }))
+        continue;
+      candidates.push_back({peer.peer, false, {}, now});
+      REXSYS_INFO("INVITE_PUBLIC_CANDIDATE_VALIDATED attempt_ref={} endpoint={:08X}:{}",
+                  attempt.attempt_id.substr(0, 8), peer.peer.ipv4, peer.peer.port);
+    }
+    if (!candidates.empty() && !traversal_observed) {
+      traversal_observed = true;
+      if (!observe(ConfiguredInviteStage::kTraversalReady)) {
+        cleanup();
+        return std::nullopt;
+      }
+    }
+    for (auto& candidate : candidates) {
+      if (now < candidate.next_query)
+        continue;
+      if (!observe(sent_once ? ConfiguredInviteStage::kBeforeDiscoveryRetry
+                             : ConfiguredInviteStage::kBeforeFirstDiscoverySend)) {
+        cleanup();
+        return std::nullopt;
+      }
+      sockaddr_in target{};
+      target.sin_family = AF_INET;
+      target.sin_addr.s_addr = candidate.peer.ipv4;
+      target.sin_port = htons(candidate.peer.port);
+      const int sent = sendto(socket, reinterpret_cast<const char*>(&query),
+                              sizeof(query), 0,
+                              reinterpret_cast<sockaddr*>(&target), sizeof(target));
+      if (sent != sizeof(query)) {
+        cleanup();
+        return std::nullopt;
+      }
+      sent_once = true;
+      candidate.next_query = now + std::chrono::milliseconds(50);
+      if (!waiting_observed) {
+        waiting_observed = true;
+        if (!observe(ConfiguredInviteStage::kDiscoveryWaiting)) {
+          cleanup();
+          return std::nullopt;
+        }
+      }
+    }
+    sockaddr_in source{};
+    socket_len_t length = sizeof(source);
+    DiscoveryPacket response{};
+    int count = recvfrom(socket, reinterpret_cast<char*>(&response),
+                         sizeof(response), 0,
+                         reinterpret_cast<sockaddr*>(&source), &length);
+    if (count > 0 && NatProbeConsume(
+                         uint64_t(socket),
+                         reinterpret_cast<const uint8_t*>(&response), size_t(count),
+                         source.sin_addr.s_addr, ntohs(source.sin_port))) {
+      continue;
+    }
+    if (count == sizeof(InviteLanPacket) && lan_enabled) {
+      InviteLanPacket lan_response{};
+      std::memcpy(&lan_response, &response, sizeof(lan_response));
+      const LanAddress responding{source.sin_addr.s_addr, ntohs(source.sin_port)};
+      REXSYS_INFO("INVITE_LAN_RESPONSE_RECEIVED attempt_ref={} endpoint={:08X}:{}",
+                  attempt.attempt_id.substr(0, 8), responding.ipv4, responding.port);
+      if (!InviteLanPacketValid(lan_response, kInviteLanResponse) ||
+          !InviteLanEqual(lan_response.selector, selector->data(), selector->size()) ||
+          (!IsPrivateLanIpv4(responding.ipv4) &&
+           (ntohl(responding.ipv4) & 0xFF000000u) != 0x7F000000u) ||
+          candidates.size() >= 8) {
+        REXSYS_INFO("INVITE_LAN_RESPONSE_REJECTED_MALFORMED attempt_ref={}",
+                    attempt.attempt_id.substr(0, 8));
+        continue;
+      }
+      Candidate candidate{responding, true, {}, now};
+      std::copy_n(lan_response.proof, candidate.proof.size(),
+                  candidate.proof.begin());
+      if (std::none_of(candidates.begin(), candidates.end(), [&](const Candidate& value) {
+            return value.lan && value.peer == responding && value.proof == candidate.proof;
+          })) {
+        candidates.push_back(candidate);
+      }
+      continue;
+    }
+    if (count == sizeof(response) && current()) {
+      const LanAddress responding{source.sin_addr.s_addr,
+                                  ntohs(source.sin_port)};
+      auto decoded = Decode(response, impl_->title_id, source.sin_addr.s_addr);
+      if (!decoded || !current()) {
+        REXSYS_INFO("INVITE_LAN_RESPONSE_REJECTED_TUPLE_OR_TITLE attempt_ref={}",
+                    attempt.attempt_id.substr(0, 8));
+        continue;
+      }
+      const auto tuple = InviteLanTupleBytes(response);
+      const auto expected = InviteLanMac(attempt.attempt_id,
+                                         "invite-lan-response-v1", tuple);
+      auto candidate = std::find_if(candidates.begin(), candidates.end(),
+                                    [&](const Candidate& value) {
+        return value.peer == responding &&
+               (!value.lan || (expected && InviteLanEqual(
+                   value.proof.data(), expected->data(), expected->size())));
+      });
+      if (candidate == candidates.end())
+        continue;
+      if (candidate->lan) {
+        if (response.host_ipv4 != responding.ipv4 ||
+            ntohs(response.host_port) != endpoint->gameplay_port ||
+            !NatProbeRegisterInviteLanPeer(uint64_t(socket), attempt.attempt_id,
+                                           responding)) {
+          REXSYS_INFO("INVITE_LAN_RESPONSE_REJECTED_TUPLE_OR_PROOF attempt_ref={}",
+                      attempt.attempt_id.substr(0, 8));
+          continue;
+        }
+        REXSYS_INFO("INVITE_LAN_CANDIDATE_VALIDATED attempt_ref={} endpoint={:08X}:{}",
+                    attempt.attempt_id.substr(0, 8), responding.ipv4, responding.port);
+      }
+      const auto matches = NatProbeMatchAcknowledgedDiscoveryAttempts(
+          uint64_t(socket), responding);
+      if (std::find(matches.begin(), matches.end(), attempt.attempt_id) ==
+              matches.end() ||
+          !NatProbeSelectInviteDiscoveryPeer(uint64_t(socket), attempt.attempt_id,
+                                            responding))
+        continue;
+      decoded->discovery_address = responding;
+      if (!candidate->lan)
+        decoded->info.host_address = {authoritative_ipv4.s_addr,
+                                      endpoint->gameplay_port};
+      decoded->traversal_session_id = attempt.session_id;
+      decoded->traversal_attempt_id = attempt.attempt_id;
+      decoded->traversal_capability = attempt.capability;
+      NatProbeSetLogicalGameplayPeer(attempt.attempt_id,
+                                     decoded->info.host_address);
+      REXSYS_INFO("INVITE_ROUTE_SELECTED_{} attempt_ref={} discovery={:08X}:{} gameplay={:08X}:{}",
+                  candidate->lan ? "LAN" : "PUBLIC", attempt.attempt_id.substr(0, 8),
+                  responding.ipv4, responding.port, decoded->info.host_address.ipv4,
+                  decoded->info.host_address.port);
+      transferred = true;
+      return ConfiguredInviteDiscoveryResult{std::move(*decoded),
+                                             uint64_t(socket)};
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  REXSYS_INFO("NAT_DIAG configured invite traversal ended attempt={} selected=false current={}",
+              attempt.attempt_id, current());
+  cleanup();
+  return std::nullopt;
+}
 std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint32_t max_results,
                                                        uint32_t local_user_index) {
+  (void)local_user_index;
   static std::atomic<uint64_t> next_search_attempt{0};
   const uint64_t search_attempt = ++next_search_attempt;
   const auto search_started = std::chrono::steady_clock::now();
@@ -866,7 +1462,6 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
   bool directory_selected = false;
   bool directory_browse = false;
   std::vector<DirectoryTraversalAttempt> directory_attempts;
-  const auto& invite_code = REXCVAR_GET(session_directory_invite_code);
   const bool automatic_public_traversal =
       selected_address.empty() && !REXCVAR_GET(session_directory_url).empty() &&
       REXCVAR_GET(session_directory_candidate_type) == "public" &&
@@ -892,7 +1487,7 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
       } else {
         REXSYS_WARN("Session directory: selected index {} is unavailable", index);
       }
-    } else if (REXCVAR_GET(session_directory_invite_code).empty()) {
+    } else {
       // Normal guest searches never wait on HTTPS. A completed cache entry is
       // converted into ordinary discovery probes below; a slow or unavailable
       // directory leaves LAN broadcast unaffected.
@@ -901,37 +1496,23 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
     }
   }
   if (automatic_public_traversal) {
+    auto sessions = directory_.List(impl_->title_id);
     size_t issued = 0;
-    if (invite_code.empty()) {
-      auto sessions = directory_.List(impl_->title_id);
-      for (const auto& session : sessions) {
-        if (issued >= max_results || session.connectivity_candidates.empty() ||
-            session.connectivity_candidates.front().type != "public")
-          continue;
-        auto attempt = directory_.CreateJoinAttempt(session.session_id);
-        if (!attempt)
-          continue;
-        if (NatProbeInstallIdentity({attempt->attempt_id, attempt->capability,
-                                     attempt->rendezvous_host, attempt->rendezvous_port, 1}))
-          directory_attempts.push_back(*attempt), ++issued;
-      }
-    } else if (auto invited =
-                   directory_.CreateInviteCodeJoinAttempt(invite_code, impl_->title_id)) {
-      REXSYS_INFO("Session directory: invite code resolved '{}'", invited->session.server_name);
-      if (!invited->session.connectivity_candidates.empty() &&
-          invited->session.connectivity_candidates.front().type == "public" &&
-          NatProbeInstallIdentity({invited->attempt.attempt_id, invited->attempt.capability,
-                                   invited->attempt.rendezvous_host,
-                                   invited->attempt.rendezvous_port, 1})) {
-        directory_attempts.push_back(std::move(invited->attempt));
-        ++issued;
-      }
-    } else {
-      REXSYS_WARN("Session directory: invite code did not resolve to a compatible lobby");
+    for (const auto& session : sessions) {
+      if (issued >= max_results || session.connectivity_candidates.empty() ||
+          session.connectivity_candidates.front().type != "public")
+        continue;
+      auto attempt = directory_.CreateJoinAttempt(session.session_id);
+      if (!attempt)
+        continue;
+      if (NatProbeInstallIdentity({attempt->attempt_id, attempt->capability,
+                                   attempt->rendezvous_host, attempt->rendezvous_port, 1}))
+        directory_attempts.push_back(*attempt), ++issued;
     }
     directory_browse = false;
-    REXSYS_INFO("Session directory: Search generation={} obtained {} traversal attempt(s) mode={}",
-                search_attempt, issued, invite_code.empty() ? "public-list" : "invite-code");
+    REXSYS_INFO(
+        "Session directory: Search generation={} obtained {} public traversal attempt(s)",
+        search_attempt, issued);
   }
   const bool direct = !selected_address.empty();
   const bool traversal = NatProbeEnabled();
@@ -1215,55 +1796,15 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
               results.size() >= max_results ? "max_results"
                                             : (traversal ? "nat_deadline" : "original_deadline"));
   if (NatProbeEnabled()) {
-    bool admission_owns_socket = false;
-    bool discard_invite_socket = false;
-    if (!invite_code.empty()) {
-      for (const auto& result : results) {
-        auto attempt = std::find_if(directory_attempts.begin(), directory_attempts.end(),
-                                    [&](const auto& value) {
-                                      return value.purpose == "invite_code_private_eligible" &&
-                                             result.traversal_session_id == value.session_id &&
-                                             result.traversal_attempt_id == value.attempt_id &&
-                                             result.traversal_capability == value.capability;
-                                    });
-        if (attempt != directory_attempts.end()) {
-          auto prepared = directory_.PrepareClientAdmission(local_user_index, impl_->title_id,
-                                                            *attempt, result, uint64_t(socket));
-          if (prepared == ClientAdmissionPrepareResult::kPrepared) {
-            admission_owns_socket = true;
-          } else if (prepared == ClientAdmissionPrepareResult::kBusy) {
-            REXSYS_WARN("Session directory: ready invite lifecycle is busy for user={}",
-                        local_user_index);
-            discard_invite_socket = true;
-          } else {
-            REXSYS_WARN("Session directory: exact invite discovery could not arm client admission");
-            discard_invite_socket = true;
-          }
-          break;
-        }
-      }
-    }
-    if (discard_invite_socket) {
-      for (const auto& attempt : directory_attempts)
-        directory_.CompleteJoinAttempt(attempt);
-      NatProbeDetach(socket);
-      CloseSocket(socket);
-      results.clear();
-    } else if (!admission_owns_socket) {
-      impl_->client_socket = socket;
-      impl_->client_attempt_ids.reserve(directory_attempts.size());
-      for (const auto& attempt : directory_attempts)
-        impl_->client_attempt_ids.push_back(attempt.attempt_id);
-      impl_->retained_search.Retain(search_attempt);
-      impl_->client_running = true;
-      REXSYS_INFO("NAT traversal: retained discovery search generation={} socket={} for Join/Leave",
-                  search_attempt, socket);
-      impl_->client_thread = std::thread([impl = impl_.get()] { impl->RunClient(); });
-    } else {
-      REXSYS_INFO(
-          "Session directory: transferred exact invite socket={} to admission lifecycle user={}",
-          socket, local_user_index);
-    }
+    impl_->client_socket = socket;
+    impl_->client_attempt_ids.reserve(directory_attempts.size());
+    for (const auto& attempt : directory_attempts)
+      impl_->client_attempt_ids.push_back(attempt.attempt_id);
+    impl_->retained_search.Retain(search_attempt);
+    impl_->client_running = true;
+    REXSYS_INFO("NAT traversal: retained discovery search generation={} socket={} for Join/Leave",
+                search_attempt, socket);
+    impl_->client_thread = std::thread([impl = impl_.get()] { impl->RunClient(); });
   } else {
     CloseSocket(socket);
   }
@@ -1296,8 +1837,56 @@ std::optional<SessionRecord> LanDiscoveryService::Leave(const SessionRecord& ses
   impl_->client_exchange = false;
   return result;
 }
-std::optional<ReadyAcceptedSessionCandidate> LanDiscoveryService::ReadyAcceptedSession(
+std::optional<ReadyConfiguredInvite>
+LanDiscoveryService::ReadyConfiguredInviteResult(
+    const ConfiguredInviteOperationIdentity& operation,
+    const DirectoryTraversalAttempt& attempt,
+    uint64_t client_admission_lifecycle_token,
     uint32_t local_user_index) {
+  auto candidate = directory_.ReadyClientAdmission(local_user_index);
+  if (!candidate || !candidate->session ||
+      candidate->local_user_index != operation.local_user_index ||
+      candidate->local_user_xuid != operation.local_xuid ||
+      candidate->title_id != operation.title_id ||
+      !client_admission_lifecycle_token ||
+      candidate->lifecycle_token != client_admission_lifecycle_token ||
+      candidate->directory_session_id != attempt.session_id ||
+      candidate->attempt_id != attempt.attempt_id ||
+      candidate->directory_session_id != candidate->session->traversal_session_id ||
+      candidate->attempt_id != candidate->session->traversal_attempt_id ||
+      candidate->session->traversal_capability != attempt.capability ||
+      !candidate->private_allocation_eligible)
+    return std::nullopt;
+  ReadyConfiguredInvite ready;
+  ready.operation = operation;
+  ready.directory_session_id = candidate->directory_session_id;
+  ready.directory_attempt_id = candidate->attempt_id;
+  ready.admission_generation = candidate->admission_generation;
+  ready.lease_revision = candidate->lease_revision;
+  ready.client_admission_lifecycle_token = candidate->lifecycle_token;
+  ready.host_ready = true;
+  ready.private_allocation_eligible = true;
+  {
+    std::lock_guard lock(*candidate->session->mutex);
+    ready.xbox_session_id = candidate->session->info.id;
+    ready.host_xuid = candidate->session->host_xuid;
+    ready.exchange_key = candidate->session->info.key;
+    ready.host_endpoint = candidate->session->info.host_address;
+    ready.discovery_endpoint = candidate->session->discovery_address;
+    ready.xnaddr = {candidate->session->info.ethernet_address,
+                    candidate->session->info.online_address};
+    ready.nonce = candidate->session->nonce;
+  }
+  if (!ready.host_xuid || !ready.host_endpoint.ipv4 ||
+      !ready.host_endpoint.port || !ready.discovery_endpoint.ipv4 ||
+      !ready.discovery_endpoint.port ||
+      ready.xnaddr != ReconstructXnAddrIdentity(ready.host_xuid))
+    return std::nullopt;
+  return ready;
+}
+
+std::optional<ReadyAcceptedSessionCandidate>
+LanDiscoveryService::ReadyAcceptedSession(uint32_t local_user_index) {
   return directory_.ReadyClientAdmission(local_user_index);
 }
 uint32_t LanDiscoveryService::DetermineLanIpv4() {
@@ -1364,21 +1953,110 @@ void XSession::set_record(std::shared_ptr<SessionRecord> record) {
   record_ = std::move(record);
   kernel_state()->session_manager()->online_status().Attach(this, record_);
 }
-SessionManager::SessionManager(KernelState* state, uint16_t discovery_port)
+struct SessionManager::ConfiguredInviteOperation {
+  explicit ConfiguredInviteOperation(ConfiguredInviteOperationIdentity value)
+      : identity(std::move(value)) {}
+
+  void PublishWorker(std::jthread value) {
+    std::lock_guard lock(worker_mutex);
+    worker = std::move(value);
+    worker_published = true;
+    worker_cv.notify_all();
+  }
+  void RequestStop() {
+    stop_source.request_stop();
+    wait_cv.notify_all();
+    worker_cv.notify_all();
+  }
+  void WaitUntilPublishedAndJoin() {
+    std::lock_guard join_lock(join_mutex);
+    std::unique_lock lock(worker_mutex);
+    worker_cv.wait(lock, [this] { return worker_published; });
+    auto* published_worker = &worker;
+    lock.unlock();
+    if (published_worker->joinable() &&
+        published_worker->get_id() != std::this_thread::get_id())
+      published_worker->join();
+  }
+
+  ConfiguredInviteOperationIdentity identity;
+  std::stop_source stop_source;
+  std::mutex worker_mutex;
+  std::condition_variable worker_cv;
+  bool worker_published = false;
+  std::jthread worker;
+  std::mutex join_mutex;
+  std::mutex wait_mutex;
+  std::condition_variable wait_cv;
+  std::optional<DirectoryTraversalAttempt> issued_attempt;
+  uint64_t operation_socket = 0;
+  bool admission_owns_attempt = false;
+  uint64_t admission_lifecycle_token = 0;
+  std::shared_ptr<SessionRecord> correlated_session;
+  std::string last_handoff_deferral;
+  bool handoff_began = false;
+  // One successful notification belongs to this operation token/title generation.
+  // Lease renewal or client-session teardown must not notify the title again.
+  bool handoff_notified = false;
+};
+
+SessionManager::SessionManager(KernelState* state, uint16_t discovery_port,
+                               SessionManagerDependencies dependencies)
     // KernelState constructs the session service before the executable module
     // is loaded, so the title ID is not available yet. XGI binds the actual
     // title ID immediately before advertising or searching.
     : kernel_state_(state),
-      online_status_(state->user_profile()->xuid(), state->user_profile()->name(),
+      online_status_(state && state->user_profile() ? state->user_profile()->xuid() : 0,
+                     state && state->user_profile() ? state->user_profile()->name() : "",
                      REXCVAR_GET(online_status_directory)),
-      discovery_(0, discovery_port, {},
-                 [state](uint32_t local_user_index) -> std::optional<uint64_t> {
-                   auto* profile = state->user_profile();
-                   return ResolveRexGlueLocalUserXuid(
-                       local_user_index,
-                       profile ? std::optional<uint64_t>(profile->xuid()) : std::nullopt);
-                 }) {}
-SessionManager::~SessionManager() = default;
+      registry_([this](const auto& id) { OnRegistryChanged(id); }),
+      user_identity_(
+          dependencies.user_identity
+              ? std::move(dependencies.user_identity)
+              : SessionDirectoryClient::LocalUserIdentityProvider(
+                    [state](uint32_t local_user_index) -> std::optional<uint64_t> {
+                      auto* profile = state ? state->user_profile() : nullptr;
+                      return ResolveRexGlueLocalUserXuid(
+                          local_user_index,
+                          profile ? std::optional<uint64_t>(profile->xuid())
+                                  : std::nullopt);
+                    })),
+      configured_invite_discovery_(
+          dependencies.configured_invite_discovery
+              ? std::move(dependencies.configured_invite_discovery)
+              : ConfiguredInviteDiscoveryOperation(
+                    [](LanDiscoveryService& discovery,
+                       const DirectoryInviteJoinAttempt& issued,
+                       uint32_t timeout_ms,
+                       const std::function<bool()>& current,
+                       const std::function<void(ConfiguredInviteStage)>& observe) {
+                      return discovery.DiscoverConfiguredInvite(
+                          issued, timeout_ms, current, observe);
+                    })),
+      configured_invite_stage_observer_(
+          std::move(dependencies.configured_invite_stage_observer)),
+      accepting_listener_count_(
+          dependencies.accepting_listener_count
+              ? std::move(dependencies.accepting_listener_count)
+              : [state](uint32_t id) -> size_t {
+                  return state ? state->CountNotifyListenersAccepting(id) : 0;
+                }),
+      broadcast_notification_(
+          dependencies.broadcast_notification
+              ? std::move(dependencies.broadcast_notification)
+              : [state](uint32_t id, uint32_t data) -> size_t {
+                  return state ? state->BroadcastNotificationIfAtLeast(id, data, 1) : 0;
+                }),
+      current_title_id_(dependencies.current_title_id
+                            ? std::move(dependencies.current_title_id)
+                            : [state] { return state ? state->title_id() : 0; }),
+      discovery_(0, discovery_port, {}, user_identity_,
+                 std::move(dependencies.client_admission_transport), false,
+                 std::move(dependencies.invite_join_attempt_transport),
+                 std::move(dependencies.join_attempt_completion_transport)) {}
+SessionManager::~SessionManager() {
+  ShutdownAsyncActivity();
+}
 void SessionManager::RegisterObject(XSession* session) {
   std::lock_guard lock(object_mutex_);
   objects_[session->guest_object()] = session;
@@ -1391,7 +2069,7 @@ void SessionManager::UnregisterObject(XSession* session) {
 void SessionManager::ReleaseRecord(const std::shared_ptr<SessionRecord>& record) {
   if (!record)
     return;
-  auto* profile = kernel_state_->user_profile();
+  auto* profile = kernel_state_ ? kernel_state_->user_profile() : nullptr;
   if (profile && record->host_xuid == profile->xuid()) {
     discovery_.StopAdvertising();
     registry_.Delete(record->info.id);
@@ -1401,5 +2079,724 @@ XSession* SessionManager::LookupObject(uint32_t guest_object) const {
   std::lock_guard lock(object_mutex_);
   auto it = objects_.find(guest_object);
   return it == objects_.end() ? nullptr : it->second;
+}
+
+namespace {
+bool SessionMatchesReady(const SessionRecord& session,
+                         const ReadyConfiguredInvite& ready) {
+  std::lock_guard lock(*session.mutex);
+  return session.state != SessionState::kDeleted &&
+         session.info.id == ready.xbox_session_id &&
+         session.info.host_address == ready.host_endpoint &&
+         session.info.ethernet_address == ready.xnaddr.ethernet_address &&
+         session.info.online_address == ready.xnaddr.online_address &&
+         session.info.key == ready.exchange_key &&
+         session.host_xuid == ready.host_xuid &&
+         session.traversal_session_id == ready.directory_session_id &&
+         session.traversal_attempt_id == ready.directory_attempt_id;
+}
+
+AcceptedInviteIdentity AcceptedIdentity(const ReadyConfiguredInvite& ready) {
+  AcceptedInviteIdentity identity;
+  identity.operation_token = ready.operation.operation_token;
+  identity.title_generation = ready.operation.title_generation;
+  identity.title_id = ready.operation.title_id;
+  identity.local_user_index = ready.operation.local_user_index;
+  identity.local_xuid = ready.operation.local_xuid;
+  identity.directory_session_id = ready.directory_session_id;
+  identity.directory_attempt_id = ready.directory_attempt_id;
+  identity.admission_generation = ready.admission_generation;
+  identity.admission_lifecycle_token = ready.client_admission_lifecycle_token;
+  identity.xbox_session_id = ready.xbox_session_id;
+  return identity;
+}
+}  // namespace
+
+bool SessionManager::RuntimeIdentityMatches(
+    const ConfiguredInviteOperationIdentity& identity) const {
+  const auto user = user_identity_ ? user_identity_(identity.local_user_index)
+                                   : std::nullopt;
+  const auto title = current_title_id_ ? current_title_id_() : 0;
+  return user && *user == identity.local_xuid &&
+         (!kernel_state_ || title == identity.title_id) &&
+         (!title || title == identity.title_id);
+}
+
+void SessionManager::OnRegistryChanged(
+    const std::array<uint8_t, 8>& session_id) {
+  auto snapshot = accepted_invites_.Snapshot(0);
+  if (!snapshot || snapshot->first.xbox_session_id != session_id)
+    return;
+  auto registered = registry_.Find(session_id);
+  if (!registered) {
+    REXSYS_INFO("INVITE_DIAG op={} gen={} ACCEPTED_RECORD_INVALIDATED_REGISTRY_DELETED",
+                snapshot->first.operation_token,
+                snapshot->first.title_generation);
+    accepted_invites_.Invalidate(snapshot->first);
+    return;
+  }
+  SessionInfo info;
+  uint64_t host_xuid = 0;
+  bool current = false;
+  {
+    std::lock_guard lock(*registered->mutex);
+    info = registered->info;
+    host_xuid = registered->host_xuid;
+    current = registered->state != SessionState::kDeleted &&
+              registered->traversal_session_id ==
+                  snapshot->first.directory_session_id &&
+              registered->traversal_attempt_id ==
+                  snapshot->first.directory_attempt_id;
+  }
+  const auto guest_info = SerializeGuestSessionInfo(info);
+  bool xuid_matches = true;
+  for (size_t i = 0; i < 8; ++i)
+    xuid_matches &= snapshot->second[8 + i] ==
+                    uint8_t(host_xuid >> ((7 - i) * 8));
+  if (!current ||
+      !std::equal(guest_info.begin(), guest_info.end(),
+                  snapshot->second.begin() + 20) ||
+      !xuid_matches) {
+    REXSYS_INFO("INVITE_DIAG op={} gen={} ACCEPTED_RECORD_INVALIDATED_REGISTRY_MISMATCH",
+                snapshot->first.operation_token,
+                snapshot->first.title_generation);
+    accepted_invites_.Invalidate(snapshot->first);
+  }
+}
+
+void SessionManager::TryPublishAcceptedInvite(
+    const std::shared_ptr<ConfiguredInviteOperation>& operation) {
+  std::lock_guard lock(configured_invite_mutex_);
+  auto defer = [&](std::string_view reason) {
+    if (operation->last_handoff_deferral != reason) {
+      operation->last_handoff_deferral = reason;
+      REXSYS_INFO("INVITE_DIAG op={} gen={} ACCEPTED_INVITE_HANDOFF_DEFERRED_{}",
+                  operation->identity.operation_token,
+                  operation->identity.title_generation, reason);
+    }
+  };
+  if (operation->handoff_notified ||
+      configured_invite_state_ == ConfiguredInviteLifecycleState::kPublished)
+    return;
+  if (async_shutdown_.load(std::memory_order_acquire) ||
+      configured_invite_operation_ != operation ||
+      operation->stop_source.stop_requested()) {
+    defer("OPERATION_NOT_CURRENT");
+    return;
+  }
+  if (configured_invite_state_ !=
+      ConfiguredInviteLifecycleState::kReadyForAcceptedInvite ||
+      !ready_configured_invite_ || !operation->issued_attempt) {
+    defer("READY_STATE_MISSING");
+    return;
+  }
+  if (!RuntimeIdentityMatches(operation->identity)) {
+    defer("IDENTITY_OR_TITLE_CHANGED");
+    return;
+  }
+  const auto listeners = accepting_listener_count_(kXnLiveInviteAccepted);
+  if (!listeners) {
+    defer("NO_ACCEPTING_LISTENER");
+    return;
+  }
+  if (!operation->handoff_began) {
+    operation->handoff_began = true;
+    REXSYS_INFO("INVITE_DIAG op={} gen={} ACCEPTED_INVITE_HANDOFF_BEGIN listeners={}",
+                operation->identity.operation_token,
+                operation->identity.title_generation, listeners);
+  }
+  const auto ready = *ready_configured_invite_;
+  auto current = discovery_.ReadyConfiguredInviteResult(
+      operation->identity, *operation->issued_attempt,
+      operation->admission_lifecycle_token,
+      operation->identity.local_user_index);
+  if (!current || current->directory_attempt_id != ready.directory_attempt_id ||
+      current->directory_session_id != ready.directory_session_id ||
+      current->admission_generation != ready.admission_generation ||
+      current->lease_revision != ready.lease_revision ||
+      current->xbox_session_id != ready.xbox_session_id ||
+      current->host_xuid != ready.host_xuid ||
+      !ready.host_ready || !ready.private_allocation_eligible ||
+      !operation->correlated_session ||
+      !SessionMatchesReady(*operation->correlated_session, ready)) {
+    REXSYS_WARN("INVITE_DIAG op={} gen={} ACCEPTED_INVITE_HANDOFF_FAILED_GRANT_OR_CORRELATION private={} host_ready={}",
+                operation->identity.operation_token,
+                operation->identity.title_generation,
+                ready.private_allocation_eligible, ready.host_ready);
+    return;
+  }
+  REXSYS_INFO("INVITE_DIAG op={} gen={} ACCEPTED_RECORD_BUILD_BEGIN invitee={:016X} inviter={:016X} title={:08X} xbox_session={:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X} private={}",
+              operation->identity.operation_token,
+              operation->identity.title_generation,
+              ready.operation.local_xuid, ready.host_xuid,
+              ready.operation.title_id,
+              ready.xbox_session_id[0], ready.xbox_session_id[1],
+              ready.xbox_session_id[2], ready.xbox_session_id[3],
+              ready.xbox_session_id[4], ready.xbox_session_id[5],
+              ready.xbox_session_id[6], ready.xbox_session_id[7],
+              ready.private_allocation_eligible);
+  auto record = SerializeAcceptedInviteRecord(ready);
+  if (!record) {
+    REXSYS_WARN("INVITE_DIAG op={} gen={} ACCEPTED_RECORD_BUILD_FAIL reason=serialization",
+                operation->identity.operation_token,
+                operation->identity.title_generation);
+    return;
+  }
+
+  // XGI joins by the Xbox session ID. Never notify until that exact record is
+  // present and can be looked up through the same registry path.
+  REXSYS_INFO("INVITE_DIAG op={} gen={} SESSION_REGISTRY_INSTALL_BEGIN",
+              operation->identity.operation_token,
+              operation->identity.title_generation);
+  auto registered = registry_.Find(ready.xbox_session_id);
+  bool public_observation = false;
+  if (registered) {
+    std::lock_guard record_lock(*registered->mutex);
+    public_observation = registered->traversal_attempt_id.empty();
+  }
+  if (!registered || public_observation)
+    registered = registry_.UpsertDiscovered(*operation->correlated_session);
+  if (!registered || !SessionMatchesReady(*registered, ready) ||
+      registry_.Find(ready.xbox_session_id) != registered) {
+    REXSYS_WARN("INVITE_DIAG op={} gen={} SESSION_REGISTRY_INSTALL_FAIL",
+                operation->identity.operation_token,
+                operation->identity.title_generation);
+    return;
+  }
+  REXSYS_INFO("INVITE_DIAG op={} gen={} SESSION_REGISTRY_INSTALL_SUCCESS SESSION_REGISTRY_LOOKUP_SUCCESS",
+              operation->identity.operation_token,
+              operation->identity.title_generation);
+  const auto identity = AcceptedIdentity(ready);
+  if (!accepted_invites_.Publish(identity, *record)) {
+    auto existing = accepted_invites_.Snapshot(identity.local_user_index);
+    if (existing && existing->first == identity && existing->second == *record) {
+      configured_invite_state_ = ConfiguredInviteLifecycleState::kPublished;
+    } else {
+      REXSYS_WARN("INVITE_DIAG op={} gen={} ACCEPTED_INVITE_HANDOFF_FAILED_STORE_CONFLICT",
+                  operation->identity.operation_token,
+                  operation->identity.title_generation);
+    }
+    return;
+  }
+  REXSYS_INFO("INVITE_DIAG op={} gen={} ACCEPTED_RECORD_PUBLISHED private={}",
+              operation->identity.operation_token,
+              operation->identity.title_generation,
+              ready.private_allocation_eligible);
+  if (broadcast_notification_(kXnLiveInviteAccepted, 0) < 1) {
+    REXSYS_WARN("INVITE_DIAG op={} gen={} XNOTIFY_02000002_BROADCAST_FAIL no_listeners",
+                operation->identity.operation_token,
+                operation->identity.title_generation);
+    accepted_invites_.Invalidate(identity);
+    return;
+  }
+  REXSYS_INFO("INVITE_DIAG op={} gen={} XNOTIFY_02000002_BROADCAST user=0",
+              operation->identity.operation_token,
+              operation->identity.title_generation);
+  operation->handoff_notified = true;
+  configured_invite_state_ = ConfiguredInviteLifecycleState::kPublished;
+}
+
+std::optional<AcceptedInviteStore::ReadLease>
+SessionManager::GetAcceptedInviteRecord(uint32_t local_user_index,
+                                        uint32_t title_id) {
+  std::lock_guard lock(configured_invite_mutex_);
+  auto operation = configured_invite_operation_;
+  if (!operation || configured_invite_state_ !=
+                        ConfiguredInviteLifecycleState::kPublished ||
+      !ready_configured_invite_ ||
+      local_user_index != operation->identity.local_user_index ||
+      title_id != operation->identity.title_id ||
+      !RuntimeIdentityMatches(operation->identity) ||
+      !operation->issued_attempt) {
+    REXSYS_WARN("INVITE_DIAG XLIVEBASE_58023_FAIL_NO_PUBLISHED_OPERATION user={} title={:08X} op={} gen={}",
+                local_user_index, title_id,
+                operation ? operation->identity.operation_token : 0,
+                operation ? operation->identity.title_generation : 0);
+    return std::nullopt;
+  }
+  auto current = discovery_.ReadyConfiguredInviteResult(
+      operation->identity, *operation->issued_attempt,
+      operation->admission_lifecycle_token, local_user_index);
+  if (!current || !current->host_ready ||
+      !current->private_allocation_eligible ||
+      current->admission_generation !=
+          ready_configured_invite_->admission_generation ||
+      current->xbox_session_id != ready_configured_invite_->xbox_session_id ||
+      current->host_xuid != ready_configured_invite_->host_xuid) {
+    REXSYS_WARN("INVITE_DIAG op={} gen={} XLIVEBASE_58023_FAIL_GRANT_NOT_CURRENT",
+                operation->identity.operation_token,
+                operation->identity.title_generation);
+    return std::nullopt;
+  }
+  auto registered = registry_.Find(current->xbox_session_id);
+  if (!registered || !SessionMatchesReady(*registered, *current)) {
+    REXSYS_WARN("INVITE_DIAG op={} gen={} XLIVEBASE_58023_FAIL_REGISTRY_NOT_FOUND",
+                operation->identity.operation_token,
+                operation->identity.title_generation);
+    return std::nullopt;
+  }
+  auto lease = accepted_invites_.Acquire(local_user_index, title_id);
+  REXSYS_INFO("INVITE_DIAG op={} gen={} XLIVEBASE_58023_{} user={} title={:08X}",
+              operation->identity.operation_token,
+              operation->identity.title_generation,
+              lease ? "STORE_ACQUIRED" : "FAIL_STORE_EMPTY",
+              local_user_index, title_id);
+  return lease;
+}
+
+bool SessionManager::CompleteAcceptedInviteJoin(
+    uint32_t local_user_index, uint64_t local_xuid,
+    const std::shared_ptr<SessionRecord>& session) {
+  std::lock_guard lock(configured_invite_mutex_);
+  auto operation = configured_invite_operation_;
+  if (!operation || configured_invite_state_ !=
+                        ConfiguredInviteLifecycleState::kPublished ||
+      !ready_configured_invite_ || !session ||
+      local_user_index != operation->identity.local_user_index ||
+      local_xuid != operation->identity.local_xuid ||
+      registry_.Find(session->info.id) != session ||
+      !SessionMatchesReady(*session, *ready_configured_invite_))
+    return false;
+  {
+    std::lock_guard session_lock(*session->mutex);
+    if (std::none_of(session->members.begin(), session->members.end(),
+                     [local_xuid](const SessionMember& member) {
+                       return member.xuid == local_xuid && member.local;
+                     }))
+      return false;
+  }
+  if (operation->issued_attempt && !REXCVAR_GET(session_directory_url).empty()) {
+    {
+      std::lock_guard session_lock(*session->mutex);
+      for (auto& member : session->members)
+        if (member.local && member.xuid == local_xuid)
+          member.gameplay_admission = std::make_shared<const GameplayAdmissionBinding>(
+              GameplayAdmissionBinding{ready_configured_invite_->directory_session_id,
+                  ready_configured_invite_->directory_attempt_id,
+                  ready_configured_invite_->admission_generation});
+    }
+    discovery_.QueueGameplayAdmission(session, local_user_index, local_xuid,
+        *operation->issued_attempt, ready_configured_invite_->admission_generation);
+  }
+  accepted_invites_.Invalidate(AcceptedIdentity(*ready_configured_invite_));
+  ready_configured_invite_.reset();
+  configured_invite_state_ = ConfiguredInviteLifecycleState::kCompleted;
+  operation->RequestStop();
+  return true;
+}
+
+bool SessionManager::IsConfiguredInviteOperationCurrent(
+    const ConfiguredInviteOperationIdentity& identity) const {
+  if (async_shutdown_.load(std::memory_order_acquire))
+    return false;
+  std::lock_guard lock(configured_invite_mutex_);
+  return configured_invite_operation_ &&
+         configured_invite_operation_->identity.operation_token ==
+             identity.operation_token &&
+         configured_invite_operation_->identity.title_generation ==
+             identity.title_generation &&
+         configured_invite_operation_->identity.title_id == identity.title_id &&
+         configured_invite_operation_->identity.local_user_index ==
+             identity.local_user_index &&
+         configured_invite_operation_->identity.local_xuid ==
+             identity.local_xuid &&
+         configured_invite_operation_->identity.invite_code ==
+             identity.invite_code &&
+         configured_invite_state_ !=
+             ConfiguredInviteLifecycleState::kCancelled;
+}
+
+void SessionManager::SetConfiguredInviteState(
+    const std::shared_ptr<ConfiguredInviteOperation>& operation,
+    ConfiguredInviteLifecycleState state) {
+  std::lock_guard lock(configured_invite_mutex_);
+  if (configured_invite_operation_ != operation ||
+      configured_invite_state_ == ConfiguredInviteLifecycleState::kCancelled)
+    return;
+  configured_invite_state_ = state;
+  if (state != ConfiguredInviteLifecycleState::kReadyForAcceptedInvite &&
+      state != ConfiguredInviteLifecycleState::kPublished)
+    ready_configured_invite_.reset();
+  if (state == ConfiguredInviteLifecycleState::kFailed ||
+      state == ConfiguredInviteLifecycleState::kExpired)
+    if (auto identity = accepted_invites_.Identity(
+            operation->identity.local_user_index);
+        identity && identity->operation_token ==
+                        operation->identity.operation_token)
+      accepted_invites_.Invalidate(*identity);
+}
+
+void SessionManager::ObserveConfiguredInviteStage(
+    const std::shared_ptr<ConfiguredInviteOperation>& operation,
+    ConfiguredInviteStage stage) const {
+  // The operation token and title generation distinguish retries without
+  // disclosing the invite code or the traversal capability.
+  const auto token = operation->identity.operation_token;
+  const auto generation = operation->identity.title_generation;
+  switch (stage) {
+    case ConfiguredInviteStage::kAttemptIssued:
+      REXSYS_INFO("INVITE_DIAG op={} gen={} BY_CODE_ATTEMPT_ISSUED", token, generation);
+      break;
+    case ConfiguredInviteStage::kTraversalReady:
+      REXSYS_INFO("INVITE_DIAG op={} gen={} TRAVERSAL_READY", token, generation);
+      break;
+    case ConfiguredInviteStage::kHostCorrelated:
+      REXSYS_INFO("INVITE_DIAG op={} gen={} HOST_CORRELATED", token, generation);
+      break;
+    case ConfiguredInviteStage::kReadyForAcceptedInvite:
+      REXSYS_INFO("INVITE_DIAG op={} gen={} READY_FOR_ACCEPTED_INVITE", token, generation);
+      break;
+    default:
+      break;
+  }
+  if (configured_invite_stage_observer_)
+    configured_invite_stage_observer_(stage, operation->identity);
+}
+
+bool SessionManager::StartConfiguredInviteOperation(uint32_t title_id) {
+  if (!title_id || async_shutdown_.load(std::memory_order_acquire))
+    return false;
+  auto normalized = NormalizeDirectoryInviteCode(
+      REXCVAR_GET(session_directory_invite_code));
+  auto local_xuid = user_identity_ ? user_identity_(0) : std::nullopt;
+  if (!normalized || !local_xuid || !*local_xuid)
+    return false;
+
+  std::shared_ptr<ConfiguredInviteOperation> operation;
+  {
+    std::lock_guard lock(configured_invite_mutex_);
+    const bool active =
+        configured_invite_operation_ &&
+        configured_invite_state_ != ConfiguredInviteLifecycleState::kCompleted &&
+        configured_invite_state_ != ConfiguredInviteLifecycleState::kCancelled &&
+        configured_invite_state_ != ConfiguredInviteLifecycleState::kExpired &&
+        configured_invite_state_ != ConfiguredInviteLifecycleState::kFailed;
+    if (active || configured_invite_claim_token_)
+      return false;
+    ConfiguredInviteOperationIdentity identity;
+    identity.operation_token = ++next_configured_invite_operation_token_;
+    if (!identity.operation_token)
+      identity.operation_token = ++next_configured_invite_operation_token_;
+    identity.title_generation = configured_invite_title_generation_;
+    identity.title_id = title_id;
+    identity.local_user_index = 0;
+    identity.local_xuid = *local_xuid;
+    identity.invite_code = *normalized;
+    operation = std::make_shared<ConfiguredInviteOperation>(std::move(identity));
+    configured_invite_operation_ = operation;
+    configured_invite_claim_token_ = operation->identity.operation_token;
+    configured_invite_state_ = ConfiguredInviteLifecycleState::kClaimed;
+    ready_configured_invite_.reset();
+  }
+  REXSYS_INFO("INVITE_DIAG op={} gen={} CONFIGURED_INVITE_CLAIMED title={:08X} xuid={:016X}",
+              operation->identity.operation_token,
+              operation->identity.title_generation, title_id, *local_xuid);
+
+  discovery_.SetLocalUserIdentity(0, operation->identity.local_xuid);
+  std::jthread worker([this, operation] {
+    {
+      std::unique_lock lock(operation->worker_mutex);
+      operation->worker_cv.wait(lock,
+                                [&] { return operation->worker_published; });
+    }
+    RunConfiguredInviteOperation(operation);
+  });
+  operation->PublishWorker(std::move(worker));
+  return true;
+}
+
+void SessionManager::RunConfiguredInviteOperation(
+    const std::shared_ptr<ConfiguredInviteOperation>& operation) {
+  auto current = [this, operation] {
+    return !operation->stop_source.stop_requested() &&
+           IsConfiguredInviteOperationCurrent(operation->identity) &&
+           RuntimeIdentityMatches(operation->identity);
+  };
+  auto observe = [this, operation](ConfiguredInviteStage stage) {
+    ObserveConfiguredInviteStage(operation, stage);
+    if (stage == ConfiguredInviteStage::kTraversalReady)
+      SetConfiguredInviteState(
+          operation, ConfiguredInviteLifecycleState::kTraversalReady);
+  };
+  auto fail = [&](ConfiguredInviteLifecycleState state) {
+    if (current())
+      SetConfiguredInviteState(operation, state);
+  };
+  auto cleanup = [&] {
+    ObserveConfiguredInviteStage(operation, ConfiguredInviteStage::kCleanup);
+    if (operation->admission_owns_attempt ||
+        discovery_.HasClientAdmission(operation->identity.local_user_index)) {
+      discovery_.StopClientAdmission(operation->identity.local_user_index);
+      discovery_.PollClientAdmissions();
+    } else {
+      if (operation->operation_socket) {
+        NatProbeDetach(operation->operation_socket);
+#if REX_PLATFORM_WIN32
+        closesocket(SOCKET(operation->operation_socket));
+#else
+        close(int(operation->operation_socket));
+#endif
+        operation->operation_socket = 0;
+      }
+      if (operation->issued_attempt)
+        discovery_.ReleaseConfiguredInviteAttempt(*operation->issued_attempt);
+    }
+    operation->correlated_session.reset();
+    if (auto identity = accepted_invites_.Identity(
+            operation->identity.local_user_index);
+        identity && identity->operation_token ==
+                        operation->identity.operation_token &&
+        configured_invite_state() != ConfiguredInviteLifecycleState::kPublished)
+      accepted_invites_.Invalidate(*identity);
+    {
+      std::lock_guard lock(configured_invite_mutex_);
+      if (configured_invite_claim_token_ ==
+          operation->identity.operation_token)
+        configured_invite_claim_token_ = 0;
+      if (configured_invite_operation_ == operation &&
+          configured_invite_state_ !=
+              ConfiguredInviteLifecycleState::kReadyForAcceptedInvite)
+        ready_configured_invite_.reset();
+    }
+    ObserveConfiguredInviteStage(operation,
+                                 ConfiguredInviteStage::kCleanupComplete);
+  };
+
+  ObserveConfiguredInviteStage(operation, ConfiguredInviteStage::kWorkerStarted);
+  if (!current()) {
+    cleanup();
+    return;
+  }
+  ObserveConfiguredInviteStage(operation,
+                               ConfiguredInviteStage::kBeforeAttemptIssue);
+  if (!current()) {
+    cleanup();
+    return;
+  }
+  auto issued = discovery_.IssueConfiguredInviteAttempt(
+      operation->identity.invite_code, operation->identity.title_id);
+  if (!issued) {
+    fail(ConfiguredInviteLifecycleState::kFailed);
+    cleanup();
+    return;
+  }
+  operation->issued_attempt = issued->attempt;
+  REXSYS_INFO("INVITE_DIAG op={} gen={} BY_CODE_ATTEMPT_DETAILS attempt={} revision={}",
+              operation->identity.operation_token,
+              operation->identity.title_generation,
+              issued->attempt.attempt_id, issued->attempt.lease_revision);
+  SetConfiguredInviteState(operation,
+                           ConfiguredInviteLifecycleState::kAttemptIssued);
+  ObserveConfiguredInviteStage(operation, ConfiguredInviteStage::kAttemptIssued);
+  if (!current()) {
+    cleanup();
+    return;
+  }
+
+  auto discovered = configured_invite_discovery_(
+      discovery_, *issued, 250, current, observe);
+  if (!discovered || !current()) {
+    fail(ConfiguredInviteLifecycleState::kFailed);
+    cleanup();
+    return;
+  }
+  operation->operation_socket = discovered->socket;
+  operation->correlated_session =
+      std::make_shared<SessionRecord>(std::move(discovered->session));
+  REXSYS_INFO("INVITE_DIAG op={} gen={} HOST_DISCOVERY_RECEIVED host_xuid={:016X} xbox_session={:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+              operation->identity.operation_token,
+              operation->identity.title_generation,
+              operation->correlated_session->host_xuid,
+              operation->correlated_session->info.id[0], operation->correlated_session->info.id[1],
+              operation->correlated_session->info.id[2], operation->correlated_session->info.id[3],
+              operation->correlated_session->info.id[4], operation->correlated_session->info.id[5],
+              operation->correlated_session->info.id[6], operation->correlated_session->info.id[7]);
+  SetConfiguredInviteState(operation,
+                           ConfiguredInviteLifecycleState::kHostCorrelated);
+  ObserveConfiguredInviteStage(operation,
+                               ConfiguredInviteStage::kHostCorrelated);
+  if (!current()) {
+    cleanup();
+    return;
+  }
+  auto prepared = discovery_.PrepareClientAdmission(
+      operation->identity.local_user_index, *operation->issued_attempt,
+      *operation->correlated_session, operation->operation_socket);
+  if (prepared != ClientAdmissionPrepareResult::kPrepared) {
+    fail(ConfiguredInviteLifecycleState::kFailed);
+    cleanup();
+    return;
+  }
+  operation->admission_owns_attempt = true;
+  operation->operation_socket = 0;
+  auto admission_lifecycle_token = discovery_.ClientAdmissionLifecycleToken(
+      operation->identity.local_user_index);
+  if (!admission_lifecycle_token || !*admission_lifecycle_token) {
+    fail(ConfiguredInviteLifecycleState::kFailed);
+    cleanup();
+    return;
+  }
+  operation->admission_lifecycle_token = *admission_lifecycle_token;
+  if (!current() || !discovery_.ConfirmClientAdmissionSession(
+                        operation->identity.local_user_index,
+                        operation->correlated_session)) {
+    fail(ConfiguredInviteLifecycleState::kFailed);
+    cleanup();
+    return;
+  }
+
+  bool ready_observed = false;
+  while (current()) {
+    discovery_.PollClientAdmissions();
+    if (!current())
+      break;
+    if (!discovery_.HasClientAdmission(operation->identity.local_user_index)) {
+      fail(ready_observed ? ConfiguredInviteLifecycleState::kExpired
+                          : ConfiguredInviteLifecycleState::kFailed);
+      break;
+    }
+    auto ready = discovery_.ReadyConfiguredInviteResult(
+        operation->identity, *operation->issued_attempt,
+        operation->admission_lifecycle_token,
+        operation->identity.local_user_index);
+    if (ready) {
+      if (!ready_observed)
+        REXSYS_INFO("INVITE_DIAG op={} gen={} HOST_GRANT_READY attempt={} admission_gen={} revision={} private={}",
+                    operation->identity.operation_token,
+                    operation->identity.title_generation,
+                    ready->directory_attempt_id, ready->admission_generation,
+                    ready->lease_revision, ready->private_allocation_eligible);
+      {
+        std::lock_guard lock(configured_invite_mutex_);
+        if (configured_invite_operation_ == operation &&
+            configured_invite_state_ !=
+                ConfiguredInviteLifecycleState::kCancelled) {
+          ready_configured_invite_ = std::move(*ready);
+          if (configured_invite_state_ !=
+              ConfiguredInviteLifecycleState::kPublished)
+            configured_invite_state_ = operation->handoff_notified
+                                           ? ConfiguredInviteLifecycleState::kPublished
+                                           : ConfiguredInviteLifecycleState::kReadyForAcceptedInvite;
+        }
+      }
+      if (!ready_observed) {
+        ready_observed = true;
+        ObserveConfiguredInviteStage(
+            operation, ConfiguredInviteStage::kReadyForAcceptedInvite);
+      }
+      TryPublishAcceptedInvite(operation);
+    } else {
+      std::lock_guard lock(configured_invite_mutex_);
+      if (configured_invite_operation_ == operation) {
+        ready_configured_invite_.reset();
+        configured_invite_state_ =
+            ConfiguredInviteLifecycleState::kHostCorrelated;
+      }
+    }
+    std::unique_lock wait_lock(operation->wait_mutex);
+    operation->wait_cv.wait_for(
+        wait_lock, std::chrono::milliseconds(5),
+        [&] { return operation->stop_source.stop_requested(); });
+  }
+  cleanup();
+}
+
+void SessionManager::CancelConfiguredInviteOperation() {
+  std::shared_ptr<ConfiguredInviteOperation> operation;
+  {
+    std::lock_guard lock(configured_invite_mutex_);
+    operation = configured_invite_operation_;
+    if (!operation)
+      return;
+    configured_invite_state_ = ConfiguredInviteLifecycleState::kCancelled;
+    ready_configured_invite_.reset();
+    if (auto identity = accepted_invites_.Identity(
+            operation->identity.local_user_index);
+        identity && identity->operation_token ==
+                        operation->identity.operation_token)
+      accepted_invites_.Invalidate(*identity);
+  }
+  operation->RequestStop();
+  ObserveConfiguredInviteStage(operation,
+                               ConfiguredInviteStage::kCancellationVisible);
+  // Removing the exact admission context before joining prevents an in-flight
+  // HTTP response from restoring authority after cancellation became visible.
+  discovery_.StopClientAdmission(operation->identity.local_user_index);
+  operation->WaitUntilPublishedAndJoin();
+  {
+    std::lock_guard lock(configured_invite_mutex_);
+    if (configured_invite_operation_ == operation)
+      configured_invite_operation_.reset();
+    if (configured_invite_claim_token_ ==
+        operation->identity.operation_token)
+      configured_invite_claim_token_ = 0;
+  }
+}
+
+void SessionManager::OnTitleTransition(uint32_t title_id) {
+  std::lock_guard control_lock(configured_invite_control_mutex_);
+  auto configured_code = NormalizeDirectoryInviteCode(
+      REXCVAR_GET(session_directory_invite_code));
+  auto local_xuid = user_identity_ ? user_identity_(0) : std::nullopt;
+  {
+    std::lock_guard lock(configured_invite_mutex_);
+    if (configured_invite_operation_ && configured_code && local_xuid &&
+        configured_invite_operation_->identity.title_id == title_id &&
+        configured_invite_operation_->identity.invite_code ==
+            *configured_code &&
+        configured_invite_operation_->identity.local_xuid == *local_xuid &&
+        configured_invite_state_ != ConfiguredInviteLifecycleState::kFailed &&
+        configured_invite_state_ != ConfiguredInviteLifecycleState::kExpired &&
+        configured_invite_state_ != ConfiguredInviteLifecycleState::kCompleted &&
+        configured_invite_state_ != ConfiguredInviteLifecycleState::kCancelled)
+      return;
+  }
+  CancelConfiguredInviteOperation();
+  accepted_invites_.Clear();
+  discovery_.StopAllClientAdmissions();
+  discovery_.SetTitleId(title_id);
+  {
+    std::lock_guard lock(configured_invite_mutex_);
+    ++configured_invite_title_generation_;
+    configured_invite_state_ = ConfiguredInviteLifecycleState::kUnclaimed;
+  }
+  StartConfiguredInviteOperation(title_id);
+}
+
+void SessionManager::OnTitleTermination() {
+  std::lock_guard control_lock(configured_invite_control_mutex_);
+  CancelConfiguredInviteOperation();
+  accepted_invites_.Clear();
+  discovery_.StopAllClientAdmissions();
+  discovery_.PollClientAdmissions();
+  discovery_.SetTitleId(0);
+  std::lock_guard lock(configured_invite_mutex_);
+  ++configured_invite_title_generation_;
+  configured_invite_state_ = ConfiguredInviteLifecycleState::kUnclaimed;
+  ready_configured_invite_.reset();
+}
+
+void SessionManager::ShutdownAsyncActivity() {
+  std::unique_lock lock(async_shutdown_mutex_);
+  if (async_shutdown_complete_)
+    return;
+  std::lock_guard control_lock(configured_invite_control_mutex_);
+  async_shutdown_.store(true, std::memory_order_release);
+  CancelConfiguredInviteOperation();
+  accepted_invites_.Close();
+  discovery_.StopAllClientAdmissions();
+  discovery_.PollClientAdmissions();
+  async_shutdown_complete_ = true;
+}
+
+ConfiguredInviteLifecycleState SessionManager::configured_invite_state() const {
+  std::lock_guard lock(configured_invite_mutex_);
+  return configured_invite_state_;
+}
+
+std::optional<ReadyConfiguredInvite>
+SessionManager::ready_configured_invite() const {
+  std::lock_guard lock(configured_invite_mutex_);
+  return ready_configured_invite_;
 }
 }  // namespace rex::system::xam

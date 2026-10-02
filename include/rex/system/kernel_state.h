@@ -293,7 +293,10 @@ class KernelState {
 
   void RegisterNotifyListener(XNotifyListener* listener);
   void UnregisterNotifyListener(XNotifyListener* listener);
-  void BroadcastNotification(XNotificationID id, uint32_t data);
+  size_t CountNotifyListenersAccepting(XNotificationID id);
+  size_t BroadcastNotification(XNotificationID id, uint32_t data);
+  size_t BroadcastNotificationIfAtLeast(XNotificationID id, uint32_t data,
+                                        size_t minimum_listeners);
 
   util::NativeList* dpc_list() { return &dpc_list_; }
 

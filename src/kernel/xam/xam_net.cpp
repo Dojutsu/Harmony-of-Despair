@@ -37,6 +37,7 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xevent.h>
 #include <rex/system/xam/session.h>
+#include <rex/system/xam/gameplay_traversal.h>
 #include <rex/system/xsocket.h>
 #include <rex/system/xthread.h>
 #include <rex/system/xtypes.h>
@@ -820,10 +821,11 @@ u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
   // "Mac address is a poor solution because you can't have multiple connections
   // from the same system"
   uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
-  for (size_t i = 0; i < 6; ++i)
-    addr_ptr->abEnet[i] = uint8_t(xuid >> (i * 8));
-  std::memset(addr_ptr->abOnline, 0, 20);
-  std::memcpy(addr_ptr->abOnline, &xuid, sizeof(xuid));
+  const auto identity = rex::system::xam::ReconstructXnAddrIdentity(xuid);
+  std::memcpy(addr_ptr->abEnet, identity.ethernet_address.data(),
+              identity.ethernet_address.size());
+  std::memcpy(addr_ptr->abOnline, identity.online_address.data(),
+              identity.online_address.size());
 
   uint32_t status =
       XnAddrStatus::XNET_GET_XNADDR_DHCP | XnAddrStatus::XNET_GET_XNADDR_ETHERNET;
@@ -856,7 +858,19 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
                                     mapped_void in_addr) {
   if (!xn_addr || !in_addr)
     return 0x2726;
+  if (xid) {
+    std::array<uint8_t, 8> session_id{};
+    std::memcpy(session_id.data(), xid.host_address(), session_id.size());
+    XnAddrIdentity identity;
+    std::memcpy(identity.ethernet_address.data(), xn_addr->abEnet, identity.ethernet_address.size());
+    std::memcpy(identity.online_address.data(), xn_addr->abOnline, identity.online_address.size());
+    if (auto peer = GameplayXnAddrToLogical(session_id, identity)) {
+      std::memcpy(in_addr.host_address(), &peer->logical.ipv4, sizeof(uint32_t));
+      return 0;
+    }
+  }
   uint32_t address = xn_addr->ina.s_addr ? xn_addr->ina.s_addr : xn_addr->inaOnline.s_addr;
+  if (IsGameplayLogicalAddress(address)) return 0x2741;
   if (!address)
     return 0x2741;
   std::memcpy(in_addr.host_address(), &address, sizeof(address));
@@ -872,6 +886,18 @@ u32 NetDll_XNetInAddrToXnAddr_entry(u32 caller, u32 address, ppc_ptr_t<XNADDR> x
                                     mapped_void xid) {
   if (!xn_addr)
     return 0x2726;
+  if (auto peer = GameplayLogicalToXnAddr(htonl(address))) {
+    xn_addr.Zero();
+    xn_addr->ina.s_addr = peer->logical.ipv4;
+    xn_addr->inaOnline.s_addr = peer->logical.ipv4;
+    xn_addr->wPortOnline = peer->logical.port;
+    const auto identity = ReconstructXnAddrIdentity(peer->xuid);
+    std::memcpy(xn_addr->abEnet, identity.ethernet_address.data(), identity.ethernet_address.size());
+    std::memcpy(xn_addr->abOnline, identity.online_address.data(), identity.online_address.size());
+    if (xid) std::memcpy(xid.host_address(), peer->session_id.data(), peer->session_id.size());
+    return 0;
+  }
+  if (IsGameplayLogicalAddress(htonl(address))) return 0x2741;
   std::lock_guard lock(xnet_registry_mutex);
   auto it = xnet_address_registry.find(address);
   if (it != xnet_address_registry.end()) {
@@ -904,10 +930,12 @@ u32 NetDll_XNetUnregisterInAddr_entry(u32 caller, u32 address) {
   return 0;
 }
 u32 NetDll_XNetConnect_entry(u32 caller, u32 address) {
+  if (GameplayLogicalToXnAddr(htonl(address))) return 0;
   std::lock_guard lock(xnet_registry_mutex);
   return xnet_address_registry.contains(address) ? 0 : 0x2741;
 }
 u32 NetDll_XNetGetConnectStatus_entry(u32 caller, u32 address) {
+  if (GameplayLogicalToXnAddr(htonl(address))) return 2;
   std::lock_guard lock(xnet_registry_mutex);
   // XNET_CONNECT_STATUS_CONNECTED.
   return xnet_address_registry.contains(address) ? 2 : 0;

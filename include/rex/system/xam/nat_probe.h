@@ -23,6 +23,7 @@ struct NatProbeIdentity {
   std::string server;
   uint16_t port = 30740;
   uint8_t participant = 0;
+  bool invite_lan_eligible = false;
 };
 
 struct NatProbePeerAttempt {
@@ -55,6 +56,19 @@ class NatProbeEndpointState {
 
 bool NatProbeEnabled();
 bool NatProbeInstallIdentity(const NatProbeIdentity& identity);
+// Installs one operation-owned identity on exactly one socket. Other discovery
+// and gameplay sockets cannot observe or consume it.
+bool NatProbeInstallIdentityForSocket(const NatProbeIdentity& identity,
+                                      uint64_t owner_socket);
+// Gameplay tickets are installed on one already-attached gameplay socket only.
+// They never enter the automatic discovery identity collection.
+bool NatProbeInstallGameplayIdentity(const NatProbeIdentity& identity, uint64_t socket,
+                                      LanAddress logical,
+                                      std::chrono::steady_clock::time_point expires_at);
+void NatProbeRemoveGameplayIdentity(uint64_t socket, std::string_view attempt_id);
+std::optional<LanAddress> NatProbeGameplayDestination(uint64_t socket, LanAddress logical);
+bool NatProbeIsPendingGameplaySource(uint64_t socket, LanAddress native);
+void NatProbeRecordGameplayTraffic(uint64_t socket, LanAddress native, size_t bytes, bool sent);
 void NatProbeSetLogicalGameplayPeer(std::string_view attempt_id, LanAddress logical);
 void NatProbeRetireIdentity(std::string_view attempt_id);
 void NatProbeRetireParticipant(uint8_t participant);
@@ -75,9 +89,18 @@ std::vector<NatProbePeerAttempt> NatProbePeerAttempts(uint64_t socket,
                                                        bool require_ack = true);
 std::vector<std::string> NatProbeMatchAcknowledgedDiscoveryAttempts(
     uint64_t socket, LanAddress source);
+// Host poll preparation: public punch ACK, or a signed invite-scoped LAN
+// request that the host answered successfully for this server-issued attempt.
 std::vector<NatProbePeerAttempt> NatProbeAcknowledgedDiscoveryAttempts();
 bool NatProbeRendezvousAttemptActive(uint64_t socket,
                                      std::string_view attempt_id);
+// LAN invite correlation is separate from the server-observed public endpoint.
+// It never creates private admission authority; the host grant still does that.
+std::vector<std::string> NatProbeHostedInviteAttempts(uint64_t socket);
+bool NatProbeRegisterInviteLanPeer(uint64_t socket, std::string_view attempt_id,
+                                   LanAddress peer);
+bool NatProbeSelectInviteDiscoveryPeer(uint64_t socket, std::string_view attempt_id,
+                                       LanAddress peer);
 std::optional<LanAddress> NatProbeNormalizeGameplaySource(uint64_t socket,
                                                           LanAddress source);
 
