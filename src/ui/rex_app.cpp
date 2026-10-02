@@ -490,7 +490,16 @@ void ReXApp::LaunchModule() {
       OnGuestThreadExit(main_thread.get());
       REXLOG_INFO("Execution complete");
       if (!shutting_down_.load(std::memory_order_acquire)) {
-        app_context().CallInUIThread([this]() { app_context().QuitFromUIThread(); });
+        app_context().CallInUIThread([this]() {
+          if (shutting_down_.load(std::memory_order_acquire)) {
+            return;
+          }
+          // A guest-initiated exit must use the same process-exit policy as a
+          // window close. UI teardown can still touch guest-owned resources.
+          REXLOG_INFO("Title completed; hard-exiting process.");
+          rex::FlushLogging();
+          std::_Exit(0);
+        });
       }
     });
   });
