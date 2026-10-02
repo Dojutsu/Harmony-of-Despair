@@ -1251,6 +1251,15 @@ class HttpTests(unittest.TestCase):
             "admission_generation": armed["admission_generation"],
             "lease_revision": 1,
         }
+        # Physical same-LAN discovery alone is not a server-side grant. The
+        # authenticated host must still acknowledge this exact generation/revision.
+        status, unprepared = self.request(
+            "POST", poll_path, {"acknowledged": []},
+            created["registration_token"])
+        self.assertEqual(200, status)
+        self.assertFalse(next(
+            value for value in unprepared["attempts"]
+            if value["attempt_id"] == client["attempt_id"])["host_ready"])
         status, polled = self.request(
             "POST", poll_path, {"acknowledged": [acknowledgement]},
             created["registration_token"])

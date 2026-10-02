@@ -23,6 +23,11 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+try:
+    from .gameplay import GameplayRegistry, GameplayError
+except ImportError:
+    from gameplay import GameplayRegistry, GameplayError
+
 
 MAX_BODY_BYTES = 8 * 1024
 MAX_SERVER_NAME = 48
@@ -512,6 +517,18 @@ class SessionRegistry:
                 return "not_found", None
             return "ok", traversal.host_poll(session_id, acknowledged)
 
+    def gameplay_request(self, session_id, action, credential, payload, traversal):
+        # Existing directory -> traversal lock order; hosting authentication and
+        # directory lifetime are checked atomically with every gameplay operation.
+        with self._lock:
+            self._expire_locked(self.clock())
+            session = self._sessions.get(session_id)
+            if session is None:
+                return None
+            if action == "sync" and not secrets.compare_digest(session.registration_token, credential):
+                return None
+            return traversal.gameplay_request(session_id, action, credential, payload)
+
     def revoke_admission(
         self, session_id: str, attempt_id: str, credential: str,
         traversal: RendezvousRegistry,
@@ -698,6 +715,19 @@ class DirectoryHandler(BaseHTTPRequestHandler):
                 )
                 return
             parts = parsed.path.strip("/").split("/")
+            if (len(parts) == 4 and parts[0] == "sessions" and parts[2] == "gameplay" and
+                    parts[3] in ("sync", "claim", "status", "revoke")):
+                try:
+                    value = self.registry.gameplay_request(
+                        parts[1], parts[3], self._bearer(), payload, self.traversal)
+                except GameplayError as exc:
+                    self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
+                    return
+                if value is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "gameplay membership unavailable"})
+                else:
+                    self._json(HTTPStatus.OK, value)
+                return
             if (len(parts) == 4 and parts[0] == "sessions" and
                     parts[1] == "by-code" and parts[3] == "join-attempts"):
                 code = normalize_invite_code(parts[2])
@@ -921,6 +951,7 @@ class RendezvousRegistry:
         self._request_ids_by_session: dict[str, set[str]] = {}
         self.rendezvous_host = rendezvous_host
         self.rendezvous_port = rendezvous_port
+        self.gameplay = GameplayRegistry()
 
     @staticmethod
     def _purpose(value: Any) -> AttemptPurpose | None:
@@ -1330,6 +1361,7 @@ class RendezvousRegistry:
 
     def remove_session(self, session_id: str) -> None:
         with self._lock:
+            self.gameplay.remove_session(session_id)
             for key in list(self._by_session.get(session_id, set())):
                 self._remove_attempt_locked(key, "session_removed")
             for key in self._terminal_by_session.pop(session_id, set()):
@@ -1364,6 +1396,34 @@ class RendezvousRegistry:
                 attempt_id, purpose, attempt.admission, now, include_host_seen=False))
         return value
 
+    def gameplay_request(self, session, action, credential, payload):
+        now = self.clock()
+        with self._lock:
+            self._expire_locked(now)
+            if action == "sync":
+                def attest(attempt_text, generation):
+                    key = self._decode_128(attempt_text)
+                    attempt = self._attempts.get(key) or self._terminal_attempts.get(key)
+                    if (attempt is None or attempt.session_id != session or
+                            self._purpose(attempt.purpose) is not AttemptPurpose.INVITE_CODE_PRIVATE_ELIGIBLE or
+                            attempt.admission is None or attempt.admission.generation.hex() != generation or
+                            attempt.admission.host_seen_generation != attempt.admission.generation or
+                            attempt.admission.host_seen_revision != attempt.admission.lease_revision):
+                        return None
+                    # Only a live grant or its successful completion is a usable
+                    # prerequisite. Host authentication (above) attests the actual
+                    # roster commit; the client cannot manufacture that assertion.
+                    if isinstance(attempt, TerminalAttempt) and attempt.terminal_reason != "completed":
+                        return None
+                    return attempt.credentials[1]
+                result = self.gameplay.sync(session, payload, now, attest)
+            else:
+                result = self.gameplay.client(session, action, payload, credential, now)
+            if result is not None:
+                result["rendezvous_host"] = self.rendezvous_host
+                result["rendezvous_port"] = self.rendezvous_port
+            return result
+
     def register(
         self, attempt_id: bytes, credential: bytes, participant: int, role: int,
         source: tuple[str, int],
@@ -1374,6 +1434,8 @@ class RendezvousRegistry:
         key = (participant, role)
         with self._lock:
             self._expire_locked(now)
+            if attempt_id in self.gameplay.links:
+                return self.gameplay.register(attempt_id, credential, participant, role, source, now)
             attempt = self._attempts.get(attempt_id)
             if attempt is not None and self._purpose(attempt.purpose) is None:
                 self._remove_attempt_locked(attempt_id, "invalid_purpose")
@@ -1381,6 +1443,8 @@ class RendezvousRegistry:
             if (attempt is None or attempt.completed or now >= attempt.expires_at or
                     not secrets.compare_digest(attempt.credentials[participant], credential)):
                 return None
+            if role == 1 and self._purpose(attempt.purpose) is AttemptPurpose.INVITE_CODE_PRIVATE_ELIGIBLE:
+                return None  # Invite discovery capabilities never authorize gameplay sockets.
             previous = attempt.endpoint_seen.get(key)
             if previous is not None and now - previous < RENDEZVOUS_MIN_INTERVAL_SECONDS:
                 return None
