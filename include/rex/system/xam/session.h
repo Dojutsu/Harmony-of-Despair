@@ -97,6 +97,20 @@ struct SessionMember {
   bool ready = false;
 };
 
+struct SessionRecord;
+
+enum class DiscoveryAdmissionSource { kPublicDiscovery, kInviteGrant };
+
+struct DiscoveryAdmissionContext {
+  DiscoveryAdmissionSource source = DiscoveryAdmissionSource::kPublicDiscovery;
+};
+
+// Authoritative hosted-session mutation seam. Public discovery ignores a peer
+// private-bit claim; an invite context may honor the title-selected slot pool.
+bool ApplyDiscoveryMemberBatch(SessionRecord& session,
+                               std::span<const SessionMember> members,
+                               DiscoveryAdmissionContext context);
+
 enum class SessionState : uint32_t { kLobby, kRegistration, kInGame, kReporting, kDeleted };
 
 struct SessionRecord {
@@ -141,8 +155,6 @@ class SessionRegistry {
   std::vector<std::shared_ptr<SessionRecord>> List() const;
   std::vector<std::shared_ptr<SessionRecord>> ListRemote(uint64_t local_xuid) const;
   bool Join(const std::array<uint8_t, 8>& id, SessionMember member);
-  // Guest-title updates target the exact attached record. On clients these
-  // update observations only; local joining still requires a host response.
   bool JoinBatch(const std::shared_ptr<SessionRecord>& expected,
                  std::span<const SessionMember> members);
   bool Leave(const std::array<uint8_t, 8>& id, uint64_t xuid);
@@ -164,7 +176,9 @@ class SessionRegistry {
 
 class LanDiscoveryService {
  public:
-  LanDiscoveryService(uint32_t title_id, uint16_t port);
+  LanDiscoveryService(
+      uint32_t title_id, uint16_t port,
+      std::shared_ptr<HostAdmissionGrantStore> admission_grants = {});
   ~LanDiscoveryService();
   LanDiscoveryService(const LanDiscoveryService&) = delete;
   LanDiscoveryService& operator=(const LanDiscoveryService&) = delete;
@@ -182,6 +196,7 @@ class LanDiscoveryService {
 
  private:
   class Impl;
+  std::shared_ptr<HostAdmissionGrantStore> admission_grants_;
   std::unique_ptr<Impl> impl_;
   SessionDirectoryClient directory_;
 };

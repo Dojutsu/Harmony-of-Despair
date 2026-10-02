@@ -6,6 +6,7 @@
 #include <cstring>
 #include <random>
 #include <thread>
+#include <unordered_set>
 
 #include <rex/logging.h>
 #include <rex/cvar.h>
@@ -83,13 +84,16 @@ constexpr uint8_t kJoin = 3;
 constexpr uint8_t kLeave = 4;
 constexpr size_t kMaxWireMembers = 8;
 
-// These are caller provenance, not a client-controlled eligibility flag.
-// XGI supplies an already allocated pool; discovery can request public only.
-enum class MemberUpdateSource { kTitleAllocatedPool, kDiscoveryPublic };
+enum class MemberUpdateSource {
+  kTitleAllocatedPool,
+  kDiscoveryPublic,
+  kInviteGrant,
+};
 
-bool ValidMemberAccounting(std::span<const SessionMember> members, uint32_t public_slots,
-                           uint32_t private_slots) {
-  uint64_t public_count = 0, private_count = 0;
+bool ValidMemberAccounting(std::span<const SessionMember> members,
+                           uint32_t public_slots, uint32_t private_slots) {
+  uint64_t public_count = 0;
+  uint64_t private_count = 0;
   std::unordered_set<uint64_t> identities;
   for (const auto& member : members) {
     if (!member.xuid || !identities.insert(member.xuid).second)
@@ -99,13 +103,17 @@ bool ValidMemberAccounting(std::span<const SessionMember> members, uint32_t publ
   return public_count <= public_slots && private_count <= private_slots;
 }
 
-// The only join mutation for hosted records. No callbacks, registry access, or
-// network I/O occur under this lock. Commit the complete candidate or nothing.
-bool ApplyMemberBatch(SessionRecord& session, std::span<const SessionMember> members,
+// Complete candidate planning and commit use one record lock. NAT and grant
+// locks are never held here.
+bool ApplyMemberBatch(SessionRecord& session,
+                      std::span<const SessionMember> members,
                       MemberUpdateSource source) {
   std::lock_guard lock(*session.mutex);
   if (session.state == SessionState::kDeleted || members.empty() ||
-      !ValidMemberAccounting(session.members, session.max_public_slots, session.max_private_slots))
+      !ValidMemberAccounting(session.members, session.max_public_slots,
+                             session.max_private_slots))
+    return false;
+  if (source == MemberUpdateSource::kInviteGrant && members.size() != 1)
     return false;
   auto candidate = session.members;
   std::unordered_set<uint64_t> batch_ids;
@@ -113,23 +121,25 @@ bool ApplyMemberBatch(SessionRecord& session, std::span<const SessionMember> mem
     if (!member.xuid || !batch_ids.insert(member.xuid).second)
       return false;
     auto it = std::find_if(candidate.begin(), candidate.end(),
-                           [&](const auto& current) { return current.xuid == member.xuid; });
-    if (source == MemberUpdateSource::kDiscoveryPublic) {
-      // A wire request cannot impersonate the host, reclassify an existing
-      // member, or change its authoritative metadata on a retry.
+                           [&](const auto& current) {
+                             return current.xuid == member.xuid;
+                           });
+    if (source != MemberUpdateSource::kTitleAllocatedPool) {
       if (member.xuid == session.host_xuid)
         return false;
       if (it != candidate.end())
         continue;
-      member.private_slot = false;
       member.local = false;
+      if (source == MemberUpdateSource::kDiscoveryPublic)
+        member.private_slot = false;
     }
     if (it == candidate.end())
       candidate.push_back(std::move(member));
     else
       *it = std::move(member);
   }
-  if (!ValidMemberAccounting(candidate, session.max_public_slots, session.max_private_slots))
+  if (!ValidMemberAccounting(candidate, session.max_public_slots,
+                             session.max_private_slots))
     return false;
   session.members.swap(candidate);
   return true;
@@ -279,7 +289,8 @@ std::optional<SessionRecord> Decode(const DiscoveryPacket& packet, uint32_t titl
   }
   if (session.members.empty())
     session.members.push_back({session.host_xuid, session.host_name, 0, false, false, false});
-  if (!ValidMemberAccounting(session.members, session.max_public_slots, session.max_private_slots))
+  if (!ValidMemberAccounting(session.members, session.max_public_slots,
+                             session.max_private_slots))
     return std::nullopt;
   return session;
 }
@@ -351,7 +362,8 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
         result->info.host_address.ipv4 = session.info.host_address.ipv4;
         result->discovery_address = session.discovery_address;
       }
-      if (result && (result->info.id != session.info.id || result->info.key != session.info.key ||
+      if (result && (result->info.id != session.info.id ||
+                     result->info.key != session.info.key ||
                      result->host_xuid != session.host_xuid))
         result.reset();
       if (result && member && type == kJoin &&
@@ -375,6 +387,16 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
   return result;
 }
 }  // namespace
+
+bool ApplyDiscoveryMemberBatch(SessionRecord& session,
+                               std::span<const SessionMember> members,
+                               DiscoveryAdmissionContext context) {
+  return ApplyMemberBatch(
+      session, members,
+      context.source == DiscoveryAdmissionSource::kInviteGrant
+          ? MemberUpdateSource::kInviteGrant
+          : MemberUpdateSource::kDiscoveryPublic);
+}
 
 uint32_t SessionRecord::FilledPublicSlots() const {
   std::lock_guard lock(*mutex);
@@ -505,17 +527,17 @@ bool SessionRegistry::Join(const std::array<uint8_t, 8>& id, SessionMember membe
   return JoinBatch(Find(id), std::span<const SessionMember>(&member, 1));
 }
 bool SessionRegistry::JoinBatch(const std::shared_ptr<SessionRecord>& expected,
-                                 std::span<const SessionMember> members) {
+                                std::span<const SessionMember> members) {
   if (!expected)
     return false;
-  // Registry -> record is the existing deletion lock order. Pin the mapping
-  // through commit so a replaced client observation or deleted record cannot
-  // receive an update through a stale XSession pointer.
+  // Registry -> record is the existing deletion lock order. No NAT, grant, or
+  // network operation occurs while either lock is held.
   std::lock_guard registry_lock(mutex_);
   auto it = sessions_.find(IdKey(expected->info.id));
   if (it == sessions_.end() || it->second != expected)
     return false;
-  return ApplyMemberBatch(*expected, members, MemberUpdateSource::kTitleAllocatedPool);
+  return ApplyMemberBatch(*expected, members,
+                          MemberUpdateSource::kTitleAllocatedPool);
 }
 bool SessionRegistry::Leave(const std::array<uint8_t, 8>& id, uint64_t xuid) {
   auto session = Find(id);
@@ -566,7 +588,9 @@ void SessionRegistry::UpsertDiscovered(SessionRecord record) {
 
 class LanDiscoveryService::Impl {
  public:
-  Impl(uint32_t title_id, uint16_t port) : title_id(title_id), port(port) {}
+  Impl(uint32_t title_id, uint16_t port,
+       std::shared_ptr<HostAdmissionGrantStore> admission_grants)
+      : title_id(title_id), port(port), admission_grants(std::move(admission_grants)) {}
   ~Impl() { Stop(); }
   bool Start(std::shared_ptr<SessionRecord> value) {
     Stop();
@@ -618,6 +642,7 @@ class LanDiscoveryService::Impl {
     NatProbeDetach(socket);
     socket = kInvalidSocket;
     advertised.reset();
+    admission_grants->Clear();
     StopClient();
   }
   void StopClient() {
@@ -669,27 +694,72 @@ class LanDiscoveryService::Impl {
                     ntohs(source.sin_port));
       }
       if (valid && (query.type == kJoin || query.type == kLeave)) {
-        std::lock_guard lock(*advertised->mutex);
         const auto& wire = query.members[0];
         const uint32_t flags = ntohl(wire.flags);
         const uint64_t xuid = Swap64(wire.xuid);
-        // The packet has no build-ID field or authenticated player identity.
-        // Match the exact advertised incarnation; this is routing validation,
-        // not an admission credential. Never trust the wire private bit.
-        valid = advertised->state != SessionState::kDeleted &&
-                ntohl(query.member_count) == 1 && !query.reserved && !query.reserved2 &&
-                !(flags & ~6u) && xuid && xuid != advertised->host_xuid &&
-                Swap64(query.host_xuid) == advertised->host_xuid &&
-                std::memcmp(query.session_id, advertised->info.id.data(), 8) == 0 &&
-                std::memcmp(query.session_key, advertised->info.key.data(), 16) == 0;
+        bool existing = false;
+        {
+          std::lock_guard lock(*advertised->mutex);
+          // Routing validation is not an admission credential. The only
+          // private authority is a separately reserved host grant below.
+          valid = advertised->state != SessionState::kDeleted &&
+                  ntohl(query.member_count) == 1 && !query.reserved &&
+                  !query.reserved2 && !(flags & ~6u) && xuid &&
+                  xuid != advertised->host_xuid &&
+                  Swap64(query.host_xuid) == advertised->host_xuid &&
+                  std::memcmp(query.session_id, advertised->info.id.data(), 8) == 0 &&
+                  std::memcmp(query.session_key, advertised->info.key.data(), 16) == 0;
+          existing = valid && std::any_of(
+                                  advertised->members.begin(), advertised->members.end(),
+                                  [&](const auto& member) { return member.xuid == xuid; });
+        }
         if (valid && query.type == kJoin) {
           SessionMember member{xuid,
-                               std::string(wire.name, strnlen(wire.name, sizeof(wire.name))),
-                               0, false, false, (flags & 4) != 0};
-          valid = ApplyMemberBatch(*advertised, std::span<const SessionMember>(&member, 1),
-                                   MemberUpdateSource::kDiscoveryPublic);
+                               std::string(wire.name,
+                                           strnlen(wire.name, sizeof(wire.name))),
+                               0, false, (flags & 2) != 0, (flags & 4) != 0};
+          HostAdmissionReservation reservation;
+          DiscoveryAdmissionContext context;
+          if (!existing) {
+            // NAT snapshot -> atomic grant reservation -> membership commit ->
+            // finalization. No pair of these lock domains is nested.
+            auto matches = NatProbeMatchAcknowledgedDiscoveryAttempts(
+                socket, {source.sin_addr.s_addr, ntohs(source.sin_port)});
+            auto directory_session = admission_grants->hosted_directory_session();
+            if (directory_session) {
+              auto authority = admission_grants->Reserve(
+                  *directory_session, uint64_t(socket), source.sin_addr.s_addr,
+                  ntohs(source.sin_port), matches, xuid);
+              if (authority.status == HostAdmissionReservationStatus::kReserved) {
+                reservation = std::move(authority.reservation);
+                context.source = DiscoveryAdmissionSource::kInviteGrant;
+              } else if (authority.status ==
+                         HostAdmissionReservationStatus::kDuplicateReservation) {
+                // The winning packet owns the one synchronous transaction.
+                // This duplicate mutates nothing and may retry after the
+                // winner publishes the resulting roster.
+                valid = false;
+              }
+            }
+          }
+          if (valid)
+            valid = ApplyDiscoveryMemberBatch(
+                *advertised, std::span<const SessionMember>(&member, 1), context);
+          if (reservation)
+            admission_grants->Finish(reservation, valid);
+          if (valid) {
+            REXSYS_INFO(
+                "LAN discovery: host accepted join xuid={:016X} source={} from {:08X}:{}",
+                xuid,
+                context.source == DiscoveryAdmissionSource::kInviteGrant
+                    ? "invite-grant"
+                    : "public",
+                source.sin_addr.s_addr, ntohs(source.sin_port));
+          }
         } else if (valid) {
-          std::erase_if(advertised->members, [&](const auto& value) { return value.xuid == xuid; });
+          std::lock_guard lock(*advertised->mutex);
+          std::erase_if(advertised->members,
+                        [&](const auto& value) { return value.xuid == xuid; });
         }
       }
       if (valid && (query.type == kQuery || query.type == kJoin || query.type == kLeave)) {
@@ -718,10 +788,15 @@ class LanDiscoveryService::Impl {
   std::atomic<bool> client_exchange = false;
   std::thread client_thread;
   RetainedDiscoverySearchState retained_search;
+  std::shared_ptr<HostAdmissionGrantStore> admission_grants;
 };
 
-LanDiscoveryService::LanDiscoveryService(uint32_t title_id, uint16_t port)
-    : impl_(std::make_unique<Impl>(title_id, port)) {}
+LanDiscoveryService::LanDiscoveryService(
+    uint32_t title_id, uint16_t port,
+    std::shared_ptr<HostAdmissionGrantStore> admission_grants)
+    : admission_grants_(admission_grants ? std::move(admission_grants)
+                                        : std::make_shared<HostAdmissionGrantStore>()),
+      impl_(std::make_unique<Impl>(title_id, port, admission_grants_)) {}
 LanDiscoveryService::~LanDiscoveryService() = default;
 void LanDiscoveryService::SetTitleId(uint32_t title_id) {
   impl_->title_id = title_id;
@@ -729,7 +804,8 @@ void LanDiscoveryService::SetTitleId(uint32_t title_id) {
 bool LanDiscoveryService::Advertise(const std::shared_ptr<SessionRecord>& session) {
   if (!impl_->Start(session))
     return false;
-  directory_.StartHosting(session, impl_->title_id, impl_->port);
+  directory_.StartHosting(session, impl_->title_id, impl_->port,
+                          admission_grants_);
   return true;
 }
 void LanDiscoveryService::StopAdvertising() {

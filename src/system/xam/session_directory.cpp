@@ -9,6 +9,7 @@
 #include <fstream>
 #include <future>
 #include <iomanip>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -30,6 +31,251 @@
 #endif
 
 namespace rex::system::xam {
+
+namespace {
+bool IsLowerHex128(std::string_view value) {
+  return value.size() == 32 &&
+         std::all_of(value.begin(), value.end(), [](char ch) {
+           return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+         });
+}
+
+std::optional<HostAdmissionGrantStore::Clock::time_point> AdmissionDeadline(
+    HostAdmissionGrantStore::Clock::time_point poll_started_at,
+    uint32_t admission_expires_in_ms) {
+  if (!admission_expires_in_ms || admission_expires_in_ms == UINT32_MAX)
+    return std::nullopt;
+  const auto remaining = std::chrono::duration_cast<HostAdmissionGrantStore::Clock::duration>(
+      std::chrono::milliseconds(admission_expires_in_ms));
+  if (remaining <= HostAdmissionGrantStore::Clock::duration::zero() ||
+      poll_started_at > HostAdmissionGrantStore::Clock::time_point::max() - remaining)
+    return std::nullopt;
+  return poll_started_at + remaining;
+}
+}  // namespace
+
+void HostAdmissionGrantStore::InvalidateGrantLocked(Grant& grant) {
+  if (grant.reservation_id) {
+    grant.invalidated_while_reserved = true;
+  } else if (!grant.consumed_xuid) {
+    grant.expires_at = {};
+  }
+}
+
+void HostAdmissionGrantStore::ApplyAuthenticatedPoll(
+    std::string_view directory_session_id, std::span<const HostAdmissionPollAttempt> attempts,
+    Clock::time_point poll_started_at) {
+  std::lock_guard lock(mutex_);
+  hosted_directory_session_ = std::string(directory_session_id);
+  std::unordered_set<std::string> seen;
+  for (const auto& attempt : attempts) {
+    if (!seen.insert(attempt.attempt_id).second)
+      continue;
+    auto found = grants_.find(attempt.attempt_id);
+    const bool installable = attempt.purpose == "invite_code_private_eligible" &&
+                             attempt.host_ready && IsLowerHex128(attempt.attempt_id) &&
+                             IsLowerHex128(attempt.admission_generation) &&
+                             attempt.lease_revision && attempt.admission_expires_in_ms;
+    const auto returned_expiry =
+        installable ? AdmissionDeadline(poll_started_at, attempt.admission_expires_in_ms)
+                    : std::nullopt;
+    if (!installable || !returned_expiry) {
+      if (found != grants_.end())
+        InvalidateGrantLocked(found->second);
+      continue;
+    }
+    // The server computed its remaining lifetime before transmitting the
+    // response. Anchor to the earlier local request time so response transit
+    // can only shorten, never extend, private authority.
+    if (found == grants_.end()) {
+      Grant grant;
+      grant.directory_session_id = directory_session_id;
+      grant.attempt_id = attempt.attempt_id;
+      grant.capability = attempt.capability;
+      grant.admission_generation = attempt.admission_generation;
+      grant.lease_revision = attempt.lease_revision;
+      grant.expires_at = *returned_expiry;
+      grants_.emplace(grant.attempt_id, std::move(grant));
+      continue;
+    }
+    auto& grant = found->second;
+    if (grant.directory_session_id != directory_session_id ||
+        grant.admission_generation != attempt.admission_generation ||
+        attempt.lease_revision < grant.lease_revision ||
+        attempt.lease_revision > grant.lease_revision + 1 || grant.consumed_xuid)
+      continue;
+    if (grant.reservation_id) {
+      if (attempt.lease_revision != grant.lease_revision)
+        grant.invalidated_while_reserved = true;
+      continue;
+    }
+    grant.capability = attempt.capability;
+    if (attempt.lease_revision == grant.lease_revision) {
+      grant.expires_at = std::min(grant.expires_at, *returned_expiry);
+    } else {
+      grant.lease_revision = attempt.lease_revision;
+      grant.expires_at = *returned_expiry;
+      grant.reserved_socket = 0;
+      grant.reserved_ipv4 = 0;
+      grant.reserved_port = 0;
+      grant.reserved_xuid = 0;
+      grant.invalidated_while_reserved = false;
+    }
+  }
+  for (auto& [attempt_id, grant] : grants_) {
+    if (grant.directory_session_id == directory_session_id && !seen.contains(attempt_id))
+      InvalidateGrantLocked(grant);
+  }
+  std::erase_if(grants_, [](const auto& item) {
+    const auto& grant = item.second;
+    return !grant.reservation_id && !grant.consumed_xuid && grant.expires_at == Clock::time_point{};
+  });
+}
+
+HostAdmissionReservationResult HostAdmissionGrantStore::Reserve(
+    std::string_view directory_session_id, uint64_t discovery_socket,
+    uint32_t peer_ipv4, uint16_t peer_port,
+    std::span<const std::string> acknowledged_attempt_ids, uint64_t xuid,
+    Clock::time_point now) {
+  HostAdmissionReservationResult result;
+  if (!xuid || !discovery_socket || !peer_ipv4 || !peer_port)
+    return result;
+  std::lock_guard lock(mutex_);
+  std::unordered_set<std::string> acknowledged(acknowledged_attempt_ids.begin(),
+                                                acknowledged_attempt_ids.end());
+  std::vector<Grant*> candidates;
+  Grant* consumed_duplicate = nullptr;
+  size_t consumed_duplicate_count = 0;
+  for (auto& [attempt_id, grant] : grants_) {
+    if (!acknowledged.contains(attempt_id) ||
+        grant.directory_session_id != directory_session_id)
+      continue;
+    if (grant.consumed_xuid) {
+      if (grant.consumed_xuid == xuid) {
+        consumed_duplicate = &grant;
+        ++consumed_duplicate_count;
+      }
+      continue;
+    }
+    if (!grant.reservation_id && now >= grant.expires_at)
+      continue;
+    if (grant.reservation_id &&
+        (grant.reserved_socket != discovery_socket || grant.reserved_ipv4 != peer_ipv4 ||
+         grant.reserved_port != peer_port || grant.reserved_xuid != xuid))
+      continue;
+    candidates.push_back(&grant);
+  }
+  if (candidates.size() > 1) {
+    result.status = HostAdmissionReservationStatus::kAmbiguous;
+    return result;
+  }
+  if (candidates.empty()) {
+    if (consumed_duplicate_count > 1)
+      result.status = HostAdmissionReservationStatus::kAmbiguous;
+    else if (consumed_duplicate)
+      result.status = HostAdmissionReservationStatus::kConsumedDuplicate;
+    return result;
+  }
+  auto& grant = *candidates.front();
+  if (grant.reservation_id) {
+    result.status = HostAdmissionReservationStatus::kDuplicateReservation;
+  } else {
+    grant.reservation_id = next_reservation_id_++;
+    if (!grant.reservation_id)
+      grant.reservation_id = next_reservation_id_++;
+    grant.reserved_socket = discovery_socket;
+    grant.reserved_ipv4 = peer_ipv4;
+    grant.reserved_port = peer_port;
+    grant.reserved_xuid = xuid;
+    result.status = HostAdmissionReservationStatus::kReserved;
+  }
+  result.reservation = {grant.directory_session_id, grant.attempt_id,
+                        grant.admission_generation, grant.lease_revision,
+                        discovery_socket, peer_ipv4, peer_port, xuid,
+                        grant.reservation_id};
+  return result;
+}
+
+void HostAdmissionGrantStore::Finish(const HostAdmissionReservation& reservation,
+                                     bool committed, Clock::time_point now) {
+  if (!reservation)
+    return;
+  std::lock_guard lock(mutex_);
+  auto found = grants_.find(reservation.attempt_id);
+  if (found == grants_.end())
+    return;
+  auto& grant = found->second;
+  if (grant.directory_session_id != reservation.directory_session_id ||
+      grant.admission_generation != reservation.admission_generation ||
+      grant.lease_revision != reservation.lease_revision ||
+      grant.reservation_id != reservation.reservation_id ||
+      grant.reserved_socket != reservation.discovery_socket ||
+      grant.reserved_ipv4 != reservation.peer_ipv4 ||
+      grant.reserved_port != reservation.peer_port ||
+      grant.reserved_xuid != reservation.xuid)
+    return;
+  if (committed) {
+    grant.consumed_xuid = reservation.xuid;
+    grant.reservation_id = 0;
+    completions_.push_back(
+        {grant.directory_session_id, grant.attempt_id, grant.capability});
+    return;
+  }
+  if (grant.invalidated_while_reserved || now >= grant.expires_at) {
+    grants_.erase(found);
+    return;
+  }
+  grant.reservation_id = 0;
+  grant.reserved_socket = 0;
+  grant.reserved_ipv4 = 0;
+  grant.reserved_port = 0;
+  grant.reserved_xuid = 0;
+}
+
+void HostAdmissionGrantStore::InvalidateSession(std::string_view directory_session_id) {
+  std::lock_guard lock(mutex_);
+  for (auto& [_, grant] : grants_)
+    if (grant.directory_session_id == directory_session_id)
+      InvalidateGrantLocked(grant);
+  std::erase_if(grants_, [](const auto& item) {
+    const auto& grant = item.second;
+    return !grant.reservation_id && !grant.consumed_xuid && grant.expires_at == Clock::time_point{};
+  });
+  std::erase_if(completions_, [&](const auto& completion) {
+    return completion.directory_session_id == directory_session_id;
+  });
+  if (hosted_directory_session_ == directory_session_id)
+    hosted_directory_session_.clear();
+}
+
+void HostAdmissionGrantStore::Clear() {
+  std::lock_guard lock(mutex_);
+  grants_.clear();
+  completions_.clear();
+  hosted_directory_session_.clear();
+}
+
+std::vector<HostAdmissionCompletion> HostAdmissionGrantStore::TakeCompletions() {
+  std::lock_guard lock(mutex_);
+  auto result = std::move(completions_);
+  completions_.clear();
+  return result;
+}
+
+std::optional<std::string> HostAdmissionGrantStore::hosted_directory_session() const {
+  std::lock_guard lock(mutex_);
+  if (hosted_directory_session_.empty())
+    return std::nullopt;
+  return hosted_directory_session_;
+}
+
+size_t HostAdmissionGrantStore::available_grant_count(Clock::time_point now) const {
+  std::lock_guard lock(mutex_);
+  return std::count_if(grants_.begin(), grants_.end(), [&](const auto& item) {
+    const auto& grant = item.second;
+    return !grant.reservation_id && !grant.consumed_xuid && now < grant.expires_at;
+  });
+}
 
 namespace {
 constexpr uint32_t kDirectoryProtocolVersion = 1;
@@ -194,21 +440,49 @@ std::optional<DirectoryTraversalAttempt> ParseTraversalAttempt(const nlohmann::j
                                                                uint8_t participant) {
   if (!document.is_object())
     return std::nullopt;
-  auto attempt = document.value("attempt_id", "");
-  auto capability = document.value("capability", "");
-  auto host = document.value("rendezvous_host", "");
-  auto port = document.value("rendezvous_port", 0u);
-  auto role = document.value("participant", "");
-  auto hex = [](std::string_view text) {
-    return text.size() == 32 && std::all_of(text.begin(), text.end(), [](unsigned char ch) {
-             return std::isxdigit(ch) != 0;
-           });
-  };
-  if (!hex(attempt) || !hex(capability) || host.empty() || host.size() > 255 || !port ||
-      port > 65535 || role != (participant ? "client" : "host"))
+  try {
+    auto attempt = document.value("attempt_id", "");
+    auto capability = document.value("capability", "");
+    auto host = document.value("rendezvous_host", "");
+    auto port = document.value("rendezvous_port", 0u);
+    auto role = document.value("participant", "");
+    auto purpose = document.value("purpose", "");
+    if (!IsLowerHex128(attempt) || !IsLowerHex128(capability) || host.empty() ||
+        host.size() > 255 || !port || port > 65535 ||
+        role != (participant ? "client" : "host") ||
+        (purpose != "public" && purpose != "invite_code_private_eligible"))
+      return std::nullopt;
+    DirectoryTraversalAttempt result;
+    result.session_id = std::move(session_id);
+    result.attempt_id = std::move(attempt);
+    result.capability = std::move(capability);
+    result.rendezvous_host = std::move(host);
+    result.rendezvous_port = uint16_t(port);
+    result.participant = participant;
+    result.purpose = std::move(purpose);
+    auto generation = document.find("admission_generation");
+    auto revision = document.find("lease_revision");
+    auto expires = document.find("admission_expires_in_ms");
+    auto ready = document.find("host_ready");
+    if (generation != document.end() && !generation->is_null()) {
+      if (!generation->is_string() ||
+          !IsLowerHex128(generation->get_ref<const std::string&>()) ||
+          revision == document.end() || !revision->is_number_unsigned() ||
+          !revision->get<uint64_t>() || expires == document.end() ||
+          !expires->is_number_unsigned() ||
+          !expires->get<uint64_t>() || expires->get<uint64_t>() >= UINT32_MAX ||
+          ready == document.end() ||
+          !ready->is_boolean())
+        return std::nullopt;
+      result.admission_generation = generation->get<std::string>();
+      result.lease_revision = revision->get<uint64_t>();
+      result.admission_expires_in_ms = uint32_t(expires->get<uint64_t>());
+      result.host_ready = ready->get<bool>();
+    }
+    return result;
+  } catch (const nlohmann::json::exception&) {
     return std::nullopt;
-  return DirectoryTraversalAttempt{std::move(session_id), std::move(attempt), std::move(capability),
-                                   std::move(host),       uint16_t(port),     participant};
+  }
 }
 
 std::optional<std::string> RandomUrlToken(size_t byte_count) {
@@ -363,6 +637,23 @@ std::optional<DirectorySession> ParseInviteCodeSessionResponse(std::string_view 
   return ParseDirectorySession(document["session"], title_id, build_id);
 }
 
+std::optional<std::vector<DirectoryTraversalAttempt>> ParseDirectoryHostPollSnapshot(
+    std::string_view body, std::string_view directory_session_id) {
+  auto document = nlohmann::json::parse(body, nullptr, false);
+  if (!document.is_object() || !document.contains("attempts") ||
+      !document["attempts"].is_array())
+    return std::nullopt;
+  std::vector<DirectoryTraversalAttempt> attempts;
+  attempts.reserve(document["attempts"].size());
+  for (const auto& item : document["attempts"]) {
+    auto attempt = ParseTraversalAttempt(item, std::string(directory_session_id), 0);
+    if (!attempt)
+      return std::nullopt;
+    attempts.push_back(std::move(*attempt));
+  }
+  return attempts;
+}
+
 REXCVAR_DEFINE_STRING(session_directory_url, "", "Network",
                       "HTTPS Harmony session-directory URL (empty disables directory access)")
     .validator(IsSafeDirectoryUrl)
@@ -404,6 +695,85 @@ DirectoryHeartbeatDisposition ClassifyDirectoryHeartbeatResponse(std::optional<u
   if (*status == 200 && valid_session_id)
     return DirectoryHeartbeatDisposition::kAccepted;
   return DirectoryHeartbeatDisposition::kRetrySameRegistration;
+}
+
+DirectoryHostPollDisposition ClassifyDirectoryHostPollResponse(std::optional<uint32_t> status,
+                                                               bool valid_snapshot) {
+  if (!status)
+    return DirectoryHostPollDisposition::kRetainUntilExpiry;
+  if (*status == 404)
+    return DirectoryHostPollDisposition::kRecoverRegistration;
+  if (*status != 200)
+    return DirectoryHostPollDisposition::kRetainUntilExpiry;
+  return valid_snapshot ? DirectoryHostPollDisposition::kAccepted
+                        : DirectoryHostPollDisposition::kRejectSnapshot;
+}
+
+DirectoryHostPollTransition ApplyDirectoryHostPollResult(
+    DirectoryHostPollDisposition disposition,
+    std::span<const DirectoryTraversalAttempt> attempts,
+    DirectoryHostPollRuntimeState& state,
+    HostAdmissionGrantStore* admission_grants, SessionRecord& hosted,
+    HostAdmissionGrantStore::Clock::time_point poll_started_at) {
+  DirectoryHostPollTransition transition;
+  switch (disposition) {
+    case DirectoryHostPollDisposition::kAccepted: {
+      std::unordered_set<std::string> next_host_attempts;
+      std::unordered_map<std::string, HostAdmissionPollAttempt> next_private_attempts;
+      std::vector<HostAdmissionPollAttempt> grant_snapshot;
+      for (const auto& attempt : attempts) {
+        next_host_attempts.insert(attempt.attempt_id);
+        NatProbeInstallIdentity({attempt.attempt_id, attempt.capability,
+                                 attempt.rendezvous_host, attempt.rendezvous_port, 0});
+        HostAdmissionPollAttempt host_attempt{
+            attempt.attempt_id,     attempt.capability,
+            attempt.purpose,        attempt.admission_generation,
+            attempt.lease_revision, attempt.admission_expires_in_ms,
+            attempt.host_ready};
+        grant_snapshot.push_back(host_attempt);
+        if (attempt.purpose == "invite_code_private_eligible" &&
+            !attempt.admission_generation.empty())
+          next_private_attempts.emplace(attempt.attempt_id, std::move(host_attempt));
+      }
+      for (const auto& attempt : state.host_attempts)
+        if (!next_host_attempts.contains(attempt))
+          NatProbeRetireIdentity(attempt);
+      state.host_attempts = std::move(next_host_attempts);
+      state.private_attempts = std::move(next_private_attempts);
+      if (admission_grants)
+        admission_grants->ApplyAuthenticatedPoll(
+            state.directory_session_id, grant_snapshot, poll_started_at);
+      break;
+    }
+    case DirectoryHostPollDisposition::kRejectSnapshot:
+      if (admission_grants)
+        admission_grants->ApplyAuthenticatedPoll(
+            state.directory_session_id,
+            std::span<const HostAdmissionPollAttempt>{}, poll_started_at);
+      state.private_attempts.clear();
+      break;
+    case DirectoryHostPollDisposition::kRecoverRegistration: {
+      if (auto path = ActiveInviteCodePath())
+        RemoveActiveInviteCodeFile(*path);
+      const auto invalidated_session = state.directory_session_id;
+      if (admission_grants)
+        admission_grants->InvalidateSession(invalidated_session);
+      for (const auto& attempt : state.host_attempts)
+        NatProbeRetireIdentity(attempt);
+      state.host_attempts.clear();
+      state.private_attempts.clear();
+      state.pending_completions.clear();
+      state.directory_session_id.clear();
+      state.registration_token.clear();
+      state.public_invite_code.clear();
+      state.recovering = true;
+      transition.recover_now = true;
+      break;
+    }
+    case DirectoryHostPollDisposition::kRetainUntilExpiry:
+      break;
+  }
+  return transition;
 }
 
 bool WriteActiveInviteCodeFile(const std::filesystem::path& path, std::string_view code) {
@@ -459,7 +829,8 @@ class SessionDirectoryClient::Impl {
   }
 
   void StartHosting(std::shared_ptr<SessionRecord> value, uint32_t value_title_id,
-                    uint16_t value_discovery_port) {
+                    uint16_t value_discovery_port,
+                    std::shared_ptr<HostAdmissionGrantStore> value_admission_grants) {
     StopHosting();
     if (REXCVAR_GET(session_directory_url).empty())
       return;
@@ -476,6 +847,7 @@ class SessionDirectoryClient::Impl {
     return;
 #endif
     hosted = std::move(value);
+    admission_grants = std::move(value_admission_grants);
     title_id = value_title_id;
     discovery_port = value_discovery_port;
     worker = std::jthread([this](std::stop_token stop) { HostLoop(stop); });
@@ -487,7 +859,9 @@ class SessionDirectoryClient::Impl {
       wake.notify_all();
       worker.join();
     }
+    if (admission_grants) admission_grants->Clear();
     hosted.reset();
+    admission_grants.reset();
     if (auto path = ActiveInviteCodePath())
       RemoveActiveInviteCodeFile(*path);
   }
@@ -599,10 +973,14 @@ class SessionDirectoryClient::Impl {
       REXSYS_WARN("Session directory: secure host registration identity unavailable");
       return;
     }
-    std::string session_id;
-    std::string token;
-    std::unordered_set<std::string> host_attempts;
-    bool recovering = false;
+    DirectoryHostPollRuntimeState poll_state;
+    auto& session_id = poll_state.directory_session_id;
+    auto& host_attempts = poll_state.host_attempts;
+    auto& polled_private_attempts = poll_state.private_attempts;
+    auto& pending_completions = poll_state.pending_completions;
+    auto& recovering = poll_state.recovering;
+    auto& token = poll_state.registration_token;
+    auto& public_invite_code = poll_state.public_invite_code;
     auto next_heartbeat = std::chrono::steady_clock::time_point{};
     auto next_registration = std::chrono::steady_clock::time_point{};
     auto retry_delay = kHeartbeatRetryInitial;
@@ -696,9 +1074,13 @@ class SessionDirectoryClient::Impl {
             break;
           case DirectoryHeartbeatDisposition::kRecoverRegistration:
             REXSYS_WARN("Session directory: heartbeat returned 404; recovering logical lobby");
+            if (admission_grants)
+              admission_grants->InvalidateSession(session_id);
             for (const auto& attempt : host_attempts)
               NatProbeRetireIdentity(attempt);
             host_attempts.clear();
+            polled_private_attempts.clear();
+            pending_completions.clear();
             recovering = true;
             next_registration = std::chrono::steady_clock::now();
             retry_delay = kHeartbeatRetryInitial;
@@ -710,26 +1092,56 @@ class SessionDirectoryClient::Impl {
         }
       }
       if (!session_id.empty() && !recovering) {
-        auto pending = Request(REXCVAR_GET(session_directory_url), L"GET",
-                               "/sessions/" + session_id + "/join-attempts", "", token);
-        if (pending && pending->status == 200) {
-          auto document = nlohmann::json::parse(pending->body, nullptr, false);
-          if (document.is_object() && document.contains("attempts") &&
-              document["attempts"].is_array()) {
-            std::unordered_set<std::string> pending_attempts;
-            for (const auto& item : document["attempts"]) {
-              auto attempt = ParseTraversalAttempt(item, session_id, 0);
-              if (attempt) {
-                pending_attempts.insert(attempt->attempt_id);
-                NatProbeInstallIdentity({attempt->attempt_id, attempt->capability,
-                                         attempt->rendezvous_host, attempt->rendezvous_port, 0});
-              }
-            }
-            for (const auto& attempt : host_attempts)
-              if (!pending_attempts.contains(attempt))
-                NatProbeRetireIdentity(attempt);
-            host_attempts = std::move(pending_attempts);
-          }
+        if (admission_grants) {
+          auto completed = admission_grants->TakeCompletions();
+          pending_completions.insert(pending_completions.end(),
+                                     std::make_move_iterator(completed.begin()),
+                                     std::make_move_iterator(completed.end()));
+          std::erase_if(pending_completions, [&](const auto& completion) {
+            if (completion.directory_session_id != session_id)
+              return true;
+            auto response = Request(
+                REXCVAR_GET(session_directory_url), L"DELETE",
+                "/sessions/" + session_id + "/join-attempts/" +
+                    completion.attempt_id,
+                "", completion.capability);
+            return response &&
+                   (response->status == 204 || response->status == 404);
+          });
+        }
+        nlohmann::json acknowledgements = nlohmann::json::array();
+        std::unordered_set<std::string> acknowledged_ids;
+        for (const auto& acknowledged : NatProbeAcknowledgedDiscoveryAttempts()) {
+          auto found = polled_private_attempts.find(acknowledged.attempt_id);
+          if (found == polled_private_attempts.end() ||
+              !acknowledged_ids.insert(acknowledged.attempt_id).second)
+            continue;
+          const auto& attempt = found->second;
+          acknowledgements.push_back({{"attempt_id", attempt.attempt_id},
+                                      {"admission_generation", attempt.admission_generation},
+                                      {"lease_revision", attempt.lease_revision}});
+        }
+        const auto poll_started_at = std::chrono::steady_clock::now();
+        auto pending =
+            Request(REXCVAR_GET(session_directory_url), L"POST",
+                    "/sessions/" + session_id + "/join-attempts/poll",
+                    nlohmann::json{{"acknowledged", std::move(acknowledgements)}}.dump(), token);
+        auto snapshot = pending && pending->status == 200
+                            ? ParseDirectoryHostPollSnapshot(pending->body, session_id)
+                            : std::nullopt;
+        const auto disposition = ClassifyDirectoryHostPollResponse(
+            pending ? std::optional<uint32_t>(pending->status) : std::nullopt,
+            snapshot.has_value());
+        const auto attempts = snapshot
+                                  ? std::span<const DirectoryTraversalAttempt>(*snapshot)
+                                  : std::span<const DirectoryTraversalAttempt>{};
+        auto transition = ApplyDirectoryHostPollResult(
+            disposition, attempts, poll_state, admission_grants.get(), *hosted,
+            poll_started_at);
+        if (transition.recover_now) {
+          REXSYS_WARN("Session directory: host poll returned 404; recovering logical lobby");
+          next_registration = std::chrono::steady_clock::now();
+          retry_delay = kHeartbeatRetryInitial;
         }
       }
       std::unique_lock lock(wait_mutex);
@@ -737,6 +1149,8 @@ class SessionDirectoryClient::Impl {
     }
     for (const auto& attempt : host_attempts)
       NatProbeRetireIdentity(attempt);
+    if (admission_grants)
+      admission_grants->InvalidateSession(session_id);
     if (!session_id.empty())
       Request(REXCVAR_GET(session_directory_url), L"DELETE", "/sessions/" + session_id, "", token);
     if (auto path = ActiveInviteCodePath())
@@ -744,6 +1158,7 @@ class SessionDirectoryClient::Impl {
   }
 
   std::shared_ptr<SessionRecord> hosted;
+  std::shared_ptr<HostAdmissionGrantStore> admission_grants;
   uint32_t title_id = 0;
   uint16_t discovery_port = 0;
   std::jthread worker;
@@ -760,8 +1175,9 @@ class SessionDirectoryClient::Impl {
 SessionDirectoryClient::SessionDirectoryClient() : impl_(std::make_unique<Impl>()) {}
 SessionDirectoryClient::~SessionDirectoryClient() = default;
 void SessionDirectoryClient::StartHosting(const std::shared_ptr<SessionRecord>& session,
-                                          uint32_t title_id, uint16_t discovery_port) {
-  impl_->StartHosting(session, title_id, discovery_port);
+                                          uint32_t title_id, uint16_t discovery_port,
+                                          std::shared_ptr<HostAdmissionGrantStore> admission_grants) {
+  impl_->StartHosting(session, title_id, discovery_port, std::move(admission_grants));
 }
 void SessionDirectoryClient::StopHosting() {
   impl_->StopHosting();

@@ -10,6 +10,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <rex/cvar.h>
@@ -86,7 +87,10 @@ struct AttemptState {
   uint8_t stability_checkpoints = 0;
   std::chrono::steady_clock::time_point last_registration{};
   std::chrono::steady_clock::time_point last_punch{};
-  bool terminal = false;
+  // Stops the short rendezvous transmission phase without discarding an
+  // already authenticated and acknowledged discovery correlation. Private
+  // authority still requires a separately live host admission grant.
+  bool rendezvous_expired = false;
   uint32_t registrations_sent = 0;
 };
 
@@ -104,10 +108,17 @@ std::condition_variable state_cv;
 std::unordered_map<uint64_t, State> states;
 std::unordered_map<std::string, Identity> automatic_identities;
 std::unordered_map<std::string, LanAddress> automatic_logical_gameplay_peers;
+std::unordered_set<std::string> expired_discovery_attempts;
+std::unordered_set<std::string> expired_gameplay_attempts;
 std::mutex gameplay_pump_mutex;
 std::condition_variable gameplay_pump_cv;
 bool gameplay_pump_running = false;
 std::jthread gameplay_pump_thread;
+
+std::unordered_set<std::string>& ExpiredAttempts(NatProbeRole role) {
+  return role == NatProbeRole::kDiscovery ? expired_discovery_attempts
+                                          : expired_gameplay_attempts;
+}
 
 bool ParseHex(std::string_view text, uint8_t* output) {
   if (text.size() != 32)
@@ -228,7 +239,7 @@ bool GameplayAttemptPendingLocked(const State& state,
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                              now - attempt.attached_at)
                              .count();
-    if (attempt.identity.automatic && !attempt.terminal &&
+    if (attempt.identity.automatic && !attempt.rendezvous_expired &&
         NatProbeAutomaticAttemptActive(uint32_t(std::max<int64_t>(0, elapsed)),
                                        attempt.endpoint.acknowledged()))
       return true;
@@ -352,6 +363,8 @@ bool NatProbeInstallIdentity(const NatProbeIdentity& value) {
     if (automatic_identities.contains(identity->key)) return true;
     automatic_identities.insert_or_assign(identity->key, *identity);
     for (auto& [socket, state] : states) {
+      if (ExpiredAttempts(state.role).contains(identity->key))
+        continue;
       AttemptState attempt{};
       attempt.identity = *identity;
       if (auto logical = automatic_logical_gameplay_peers.find(identity->key);
@@ -381,9 +394,12 @@ void NatProbeSetLogicalGameplayPeer(std::string_view attempt_id, LanAddress logi
 
 void NatProbeRetireIdentity(std::string_view attempt_id) {
   std::lock_guard lock(state_mutex);
-  automatic_identities.erase(std::string(attempt_id));
-  automatic_logical_gameplay_peers.erase(std::string(attempt_id));
-  for (auto& [socket, state] : states) state.attempts.erase(std::string(attempt_id));
+  const std::string key(attempt_id);
+  automatic_identities.erase(key);
+  automatic_logical_gameplay_peers.erase(key);
+  expired_discovery_attempts.erase(key);
+  expired_gameplay_attempts.erase(key);
+  for (auto& [socket, state] : states) state.attempts.erase(key);
   gameplay_pump_cv.notify_all();
 }
 
@@ -394,6 +410,8 @@ void NatProbeRetireParticipant(uint8_t participant) {
     if (identity.participant == participant) retired.push_back(key);
   for (const auto& key : retired) automatic_identities.erase(key);
   for (const auto& key : retired) automatic_logical_gameplay_peers.erase(key);
+  for (const auto& key : retired) expired_discovery_attempts.erase(key);
+  for (const auto& key : retired) expired_gameplay_attempts.erase(key);
   for (auto& [socket, state] : states)
       for (const auto& key : retired) state.attempts.erase(key);
   gameplay_pump_cv.notify_all();
@@ -429,7 +447,8 @@ void NatProbeAttach(uint64_t socket, NatProbeRole role, LanAddress local,
       state.attempts.emplace(identity.key, std::move(attempt));
     };
     if (auto manual = ManualIdentity()) add(*manual);
-    for (const auto& [key, identity] : automatic_identities) add(identity);
+    for (const auto& [key, identity] : automatic_identities)
+      if (!ExpiredAttempts(role).contains(key)) add(identity);
     start_gameplay_pump = role == NatProbeRole::kGameplay &&
                           GameplayAttemptPendingLocked(state, std::chrono::steady_clock::now());
     states.insert_or_assign(socket, state);
@@ -459,66 +478,89 @@ void NatProbeTickLocked(uint64_t socket, State& state,
                         std::chrono::steady_clock::time_point now) {
   constexpr std::array checkpoints{std::chrono::seconds(5), std::chrono::seconds(15),
                                    std::chrono::seconds(30)};
-  for (auto& [key, attempt] : state.attempts) {
-  if (attempt.terminal) continue;
-  if (attempt.identity.automatic &&
-      now - attempt.attached_at >= std::chrono::seconds(20)) {
-    attempt.terminal = true;
-    REXSYS_WARN("NAT traversal: automatic attempt expired locally role={}", uint8_t(state.role));
-    continue;
-  }
-  for (size_t i = 0; i < checkpoints.size(); ++i) {
-    const uint8_t bit = uint8_t(1u << i);
-    if (attempt.observed.port && !(attempt.stability_checkpoints & bit) &&
-        now - attempt.attached_at >= checkpoints[i]) {
-      attempt.stability_checkpoints |= bit;
-      REXSYS_INFO("NAT traversal: role={} mapping stable at {}s public={:08X}:{}",
-                  uint8_t(state.role), checkpoints[i].count(), attempt.observed.ipv4,
-                  attempt.observed.port);
+  for (auto iterator = state.attempts.begin(); iterator != state.attempts.end();) {
+    auto& attempt = iterator->second;
+    if (attempt.rendezvous_expired) {
+      ++iterator;
+      continue;
     }
-  }
-  // A host may already have its gameplay socket registered when the joining
-  // client's gameplay socket appears. Poll quickly until the rendezvous server
-  // supplies that peer so the title's bounded membership exchange is not spent
-  // waiting for the normal mapping keepalive interval.
-  const auto registration_interval = std::chrono::milliseconds(
-      NatProbeRegistrationIntervalMs(attempt.endpoint.peer().port != 0));
-  if (now - attempt.last_registration >= registration_interval) {
-    Packet packet{};
-    FillIdentity(packet, attempt.identity);
-    packet.type = kRegister;
-    packet.role = uint8_t(state.role);
-    Send(socket, packet, attempt.identity.server);
-    attempt.last_registration = now;
-    ++attempt.registrations_sent;
-    REXSYS_INFO(
-        "NAT traversal: registration sent socket={} role={} attempt={} participant={} count={}",
-        socket, uint8_t(state.role), attempt.identity.key, attempt.identity.participant,
-        attempt.registrations_sent);
-  }
-  const auto peer = attempt.endpoint.peer();
-  if (peer.port && !attempt.endpoint.acknowledged() &&
-      now - attempt.last_punch >= std::chrono::milliseconds(100)) {
-    Packet packet{};
-    FillIdentity(packet, attempt.identity);
-    packet.type = kPunch;
-    packet.role = uint8_t(state.role);
-    std::memset(packet.credential, 0, sizeof(packet.credential));
-    Send(socket, packet, peer);
-    attempt.last_punch = now;
-    REXSYS_INFO("NAT traversal: {} punch sent socket={} peer={:08X}:{}",
-                state.role == NatProbeRole::kDiscovery ? "discovery" : "gameplay", socket,
-                peer.ipv4, peer.port);
-  }
+    if (attempt.identity.automatic &&
+        now - attempt.attached_at >= std::chrono::seconds(20)) {
+      if (!attempt.endpoint.acknowledged()) {
+        REXSYS_INFO(
+            "NAT traversal: unacknowledged automatic rendezvous attempt retired role={}",
+            uint8_t(state.role));
+        const auto expired_key = attempt.identity.key;
+        ExpiredAttempts(state.role).insert(expired_key);
+        for (auto& [other_socket, other_state] : states)
+          if (other_socket != socket && other_state.role == state.role)
+            other_state.attempts.erase(expired_key);
+        iterator = state.attempts.erase(iterator);
+        continue;
+      }
+      attempt.rendezvous_expired = true;
+      REXSYS_INFO("NAT traversal: automatic rendezvous transmissions ended role={}",
+                  uint8_t(state.role));
+      ++iterator;
+      continue;
+    }
+    for (size_t i = 0; i < checkpoints.size(); ++i) {
+      const uint8_t bit = uint8_t(1u << i);
+      if (attempt.observed.port && !(attempt.stability_checkpoints & bit) &&
+          now - attempt.attached_at >= checkpoints[i]) {
+        attempt.stability_checkpoints |= bit;
+        REXSYS_INFO("NAT traversal: role={} mapping stable at {}s public={:08X}:{}",
+                    uint8_t(state.role), checkpoints[i].count(), attempt.observed.ipv4,
+                    attempt.observed.port);
+      }
+    }
+    // A host may already have its gameplay socket registered when the joining
+    // client's gameplay socket appears. Poll quickly until the rendezvous server
+    // supplies that peer so the title's bounded membership exchange is not spent
+    // waiting for the normal mapping keepalive interval.
+    const auto registration_interval = std::chrono::milliseconds(
+        NatProbeRegistrationIntervalMs(attempt.endpoint.peer().port != 0));
+    if (now - attempt.last_registration >= registration_interval) {
+      Packet packet{};
+      FillIdentity(packet, attempt.identity);
+      packet.type = kRegister;
+      packet.role = uint8_t(state.role);
+      Send(socket, packet, attempt.identity.server);
+      attempt.last_registration = now;
+      ++attempt.registrations_sent;
+      REXSYS_INFO(
+          "NAT traversal: registration sent socket={} role={} attempt={} participant={} count={}",
+          socket, uint8_t(state.role), attempt.identity.key, attempt.identity.participant,
+          attempt.registrations_sent);
+    }
+    const auto peer = attempt.endpoint.peer();
+    if (peer.port && !attempt.endpoint.acknowledged() &&
+        now - attempt.last_punch >= std::chrono::milliseconds(100)) {
+      Packet packet{};
+      FillIdentity(packet, attempt.identity);
+      packet.type = kPunch;
+      packet.role = uint8_t(state.role);
+      std::memset(packet.credential, 0, sizeof(packet.credential));
+      Send(socket, packet, peer);
+      attempt.last_punch = now;
+      REXSYS_INFO("NAT traversal: {} punch sent socket={} peer={:08X}:{}",
+                  state.role == NatProbeRole::kDiscovery ? "discovery" : "gameplay", socket,
+                  peer.ipv4, peer.port);
+    }
+    ++iterator;
   }
 }
 }  // namespace
 
 void NatProbeTick(uint64_t socket) {
+  NatProbeTickAt(socket, std::chrono::steady_clock::now());
+}
+
+void NatProbeTickAt(uint64_t socket, std::chrono::steady_clock::time_point now) {
   std::lock_guard lock(state_mutex);
   auto found = states.find(socket);
   if (found == states.end()) return;
-  NatProbeTickLocked(socket, found->second, std::chrono::steady_clock::now());
+  NatProbeTickLocked(socket, found->second, now);
 }
 
 bool NatProbeIsControlPacket(uint64_t socket, const uint8_t* data, size_t size,
@@ -671,6 +713,45 @@ std::vector<NatProbePeerAttempt> NatProbePeerAttempts(uint64_t socket, bool requ
       result.push_back({key, attempt.endpoint.peer()});
   }
   return result;
+}
+
+std::vector<std::string> NatProbeMatchAcknowledgedDiscoveryAttempts(
+    uint64_t socket, LanAddress source) {
+  std::lock_guard lock(state_mutex);
+  std::vector<std::string> result;
+  auto found = states.find(socket);
+  if (found == states.end() || found->second.role != NatProbeRole::kDiscovery)
+    return result;
+  for (const auto& [key, attempt] : found->second.attempts) {
+    if (attempt.endpoint.acknowledged_peer() == source &&
+        attempt.endpoint.peer() == source)
+      result.push_back(key);
+  }
+  return result;
+}
+
+std::vector<NatProbePeerAttempt> NatProbeAcknowledgedDiscoveryAttempts() {
+  std::lock_guard lock(state_mutex);
+  std::vector<NatProbePeerAttempt> result;
+  for (const auto& [_, state] : states) {
+    if (state.role != NatProbeRole::kDiscovery)
+      continue;
+    for (const auto& [key, attempt] : state.attempts) {
+      if (attempt.endpoint.acknowledged())
+        result.push_back({key, attempt.endpoint.peer()});
+    }
+  }
+  return result;
+}
+
+bool NatProbeRendezvousAttemptActive(uint64_t socket,
+                                     std::string_view attempt_id) {
+  std::lock_guard lock(state_mutex);
+  auto found = states.find(socket);
+  if (found == states.end()) return false;
+  auto attempt = found->second.attempts.find(std::string(attempt_id));
+  return attempt != found->second.attempts.end() &&
+         !attempt->second.rendezvous_expired;
 }
 
 std::optional<LanAddress> NatProbeNormalizeGameplaySource(uint64_t socket,

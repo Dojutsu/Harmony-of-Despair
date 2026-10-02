@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <unordered_set>
 
 #include <rex/kernel/xam/apps/xgi_app.h>
 #include <rex/logging.h>
@@ -37,20 +38,20 @@ namespace {
 constexpr uint32_t kSessionCreateHost = 1;
 constexpr uint32_t kInvalidUserIndex = 0xFFFFFFFFu;
 
-// Validate the complete array before a join can mutate membership. Use widened
-// arithmetic and the heap's page-access check before translating guest memory.
 bool ReadableJoinArray(memory::Memory* memory, uint32_t address, uint32_t count,
                        uint32_t width) {
   const uint64_t size = uint64_t{count} * width;
-  if (!size || size > UINT32_MAX || uint64_t{address} + size > (uint64_t{1} << 32))
+  if (!size || size > UINT32_MAX ||
+      uint64_t{address} + size > (uint64_t{1} << 32))
     return false;
   auto* heap = memory->LookupHeap(address);
-  if (!heap || heap->QueryRangeAccess(address, uint32_t(uint64_t{address} + size - 1)) ==
-                   memory::PageAccess::kNoAccess)
+  if (!heap ||
+      heap->QueryRangeAccess(address,
+                             uint32_t(uint64_t{address} + size - 1)) ==
+          memory::PageAccess::kNoAccess)
     return false;
-  // Decommitted pages can retain protection metadata. Check commitment too,
-  // advancing by whole regions from a page-aligned address.
-  uint64_t cursor = address - (address - heap->heap_base()) % heap->page_size();
+  uint64_t cursor =
+      address - (address - heap->heap_base()) % heap->page_size();
   const uint64_t end = uint64_t{address} + size;
   while (cursor < end) {
     memory::HeapAllocationInfo info{};
@@ -61,7 +62,6 @@ bool ReadableJoinArray(memory::Memory* memory, uint32_t address, uint32_t count,
   }
   return true;
 }
-
 
 #pragma pack(push, 1)
 struct GuestSessionInfo {
@@ -407,8 +407,10 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       if (!object || !object->record() || !user_count)
         return X_E_INVALIDARG;
       if (user_count > UINT32_MAX / 4 ||
-          (private_slots_array && !ReadableJoinArray(memory_, private_slots_array, user_count, 4)) ||
-          (!is_local && !ReadableJoinArray(memory_, xuid_array_ptr, user_count, 8)) ||
+          (private_slots_array &&
+           !ReadableJoinArray(memory_, private_slots_array, user_count, 4)) ||
+          (!is_local &&
+           !ReadableJoinArray(memory_, xuid_array_ptr, user_count, 8)) ||
           (is_local && user_index_array &&
            !ReadableJoinArray(memory_, user_index_array, user_count, 4)))
         return X_E_INVALIDARG;
@@ -423,9 +425,9 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                                   ? memory::load_and_swap<uint32_t>(
                                         memory_->TranslateVirtual(user_index_array + i * 4))
                                   : kInvalidUserIndex;
-        bool private_slot =
-            private_slots_array && memory::load_and_swap<uint32_t>(
-                                       memory_->TranslateVirtual(private_slots_array + 4 * i)) != 0;
+        bool private_slot = private_slots_array &&
+                            memory::load_and_swap<uint32_t>(memory_->TranslateVirtual(
+                                private_slots_array + 4 * i)) != 0;
         SessionMember member{
             xuid,         is_local ? kernel_state_->user_profile()->name() : std::string{},
             user_index,   is_local,
@@ -434,20 +436,24 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
           return X_E_INVALIDARG;
         members.push_back(std::move(member));
       }
-      if (!is_local || session->host_xuid == kernel_state_->user_profile()->xuid())
-        return kernel_state_->session_manager()->registry().JoinBatch(session, members)
-                   ? X_E_SUCCESS : X_E_FAIL;
-      // Current local-profile mapping produces one unique local XUID. A
-      // multi-user network transaction requires a protocol extension; never
-      // send a partial sequence of host admissions.
+      if (!is_local ||
+          session->host_xuid == kernel_state_->user_profile()->xuid())
+        return kernel_state_->session_manager()->registry().JoinBatch(session,
+                                                                       members)
+                   ? X_E_SUCCESS
+                   : X_E_FAIL;
+      // One local profile maps to one XUID. Never turn a multi-user network
+      // request into a partial sequence of host admissions.
       if (members.size() != 1)
         return X_E_INVALIDARG;
       const auto& member = members.front();
       const auto xuid = member.xuid;
       const auto user_index = member.user_index;
-      REXKRNL_INFO("XGISessionJoinLocal: requesting LAN join xuid={:016X} host={:016X}", xuid,
-                   session->host_xuid);
-      auto updated = kernel_state_->session_manager()->discovery().Join(*session, member, 500);
+      REXKRNL_INFO(
+          "XGISessionJoinLocal: requesting LAN join xuid={:016X} host={:016X}",
+          xuid, session->host_xuid);
+      auto updated = kernel_state_->session_manager()->discovery().Join(
+          *session, member, 500);
       if (!updated)
         return X_E_FAIL;
       for (auto& updated_member : updated->members) {
@@ -457,7 +463,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
           updated_member.name = kernel_state_->user_profile()->name();
         }
       }
-      kernel_state_->session_manager()->registry().UpsertDiscovered(std::move(*updated));
+      kernel_state_->session_manager()->registry().UpsertDiscovered(
+          std::move(*updated));
       session = kernel_state_->session_manager()->registry().Find(session->info.id);
       object->set_record(session);
       REXKRNL_INFO("XGISessionJoinLocal: joined session with {} members",

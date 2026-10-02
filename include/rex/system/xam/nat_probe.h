@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -63,6 +64,7 @@ void NatProbeAttach(uint64_t socket, NatProbeRole role, LanAddress local,
                     XSocket* socket_object = nullptr);
 void NatProbeDetach(uint64_t socket);
 void NatProbeTick(uint64_t socket);
+void NatProbeTickAt(uint64_t socket, std::chrono::steady_clock::time_point now);
 bool NatProbeIsControlPacket(uint64_t socket, const uint8_t* data, size_t size,
                              uint32_t source_ipv4, uint16_t source_port);
 bool NatProbeConsume(uint64_t socket, const uint8_t* data, size_t size, uint32_t source_ipv4,
@@ -71,6 +73,11 @@ std::optional<LanAddress> NatProbePeer(uint64_t socket, bool require_ack = true)
 std::vector<LanAddress> NatProbePeers(uint64_t socket, bool require_ack = true);
 std::vector<NatProbePeerAttempt> NatProbePeerAttempts(uint64_t socket,
                                                        bool require_ack = true);
+std::vector<std::string> NatProbeMatchAcknowledgedDiscoveryAttempts(
+    uint64_t socket, LanAddress source);
+std::vector<NatProbePeerAttempt> NatProbeAcknowledgedDiscoveryAttempts();
+bool NatProbeRendezvousAttemptActive(uint64_t socket,
+                                     std::string_view attempt_id);
 std::optional<LanAddress> NatProbeNormalizeGameplaySource(uint64_t socket,
                                                           LanAddress source);
 
