@@ -23,7 +23,10 @@ OWNER = "Harmony graphical-session harness"
 ENV_KEYS = {"XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY",
             "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_ID", "XDG_SESSION_TYPE",
             "XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP"}
+GAMESCOPE_EXPORT_KEYS = ENV_KEYS | {"GAMESCOPE_WAYLAND_DISPLAY"}
 PROCESS_NAMES = {"steam", "gamescope", "kwin_wayland", "kwin_x11", "plasmashell"}
+GAMESCOPE_UNIT = "gamescope-session.service"
+GAMESCOPE_UNIT_PROPERTIES = ("MainPID", "ControlGroup", "ActiveState", "SubState", "FragmentPath", "ExecStartPath")
 
 
 def sha256(path):
@@ -52,7 +55,9 @@ def validate_environment(environment, uid):
     session_type = environment.get("XDG_SESSION_TYPE")
     if session_type not in {"wayland", "x11"}:
         raise ValueError("unsupported graphical session type")
-    if session_type == "wayland":
+    # Steam is an Xwayland client in Gaming Mode, but may also supply the
+    # independently verified native Wayland endpoint from Gamescope's export.
+    if session_type == "wayland" or "WAYLAND_DISPLAY" in environment:
         display = environment.get("WAYLAND_DISPLAY", "")
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", display):
             raise ValueError("Wayland display must name a local runtime socket")
@@ -74,16 +79,138 @@ def validate_environment(environment, uid):
     return environment
 
 
-def select_session(sessions, processes, uid, mode, validator=validate_environment):
+def active_session(sessions, uid):
     active = [s for s in sessions if s.get("User") == str(uid) and s.get("Remote") == "no"
               and s.get("Active") == "yes" and s.get("State") == "active"
               and s.get("Type") in {"wayland", "x11"} and s.get("Seat")]
     if len(active) != 1:
         raise ValueError("exactly one active local graphical session is required")
-    session = active[0]
+    return active[0]
+
+
+def validate_gamescope_proof(session, steam, unit, compositor, exported, uid, validator=validate_environment):
+    """Admit only the observed SteamOS protected-compositor unit/export contract."""
+    active_session([session], uid)
+    expected_group = f"/user.slice/user-{uid}.slice/user@{uid}.service/session.slice/{GAMESCOPE_UNIT}"
+    if (session.get("Desktop") != "gamescope" or session.get("Type") != "wayland"
+            or session.get("User") != str(uid) or steam.get("uid") != uid
+            or steam.get("comm") != "steam" or steam.get("session") != session["Id"]
+            or Path(steam.get("executable", "")).name != "steam"):
+        raise ValueError("Gamescope proof requires the current Wayland gamescope session and verified Steam client")
+    if (unit.get("ActiveState") != "active" or unit.get("SubState") != "running"
+            or unit.get("FragmentPath") != "/usr/lib/systemd/user/gamescope-session.service"
+            or unit.get("ExecStartPath") != "/usr/lib/steamos/gamescope-session"
+            or unit.get("ControlGroup") != expected_group or not unit.get("MainPID", "").isdigit()
+            or int(unit["MainPID"]) <= 1):
+        raise ValueError("known Gamescope user unit is not active with its expected identity")
+    if (compositor.get("pid") != int(unit["MainPID"]) or compositor.get("uid") != uid
+            or compositor.get("comm") != "gamescope-wl" or compositor.get("cgroup") != expected_group):
+        raise ValueError("Gamescope user-unit MainPID/UID/comm/cgroup proof disagrees")
+    source = {k: v for k, v in steam["environment"].items() if k in ENV_KEYS}
+    for key in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "XDG_SESSION_ID",
+                "XDG_SESSION_TYPE", "XDG_SESSION_DESKTOP", "XDG_CURRENT_DESKTOP"):
+        if not source.get(key) or exported.get(key) != source[key]:
+            raise ValueError("Gamescope export and current Steam environment disagree: " + key)
+    if (source["XDG_SESSION_ID"] != session["Id"] or source["XDG_SESSION_TYPE"] != "x11"
+            or source["XDG_SESSION_DESKTOP"] != "gamescope" or source["XDG_CURRENT_DESKTOP"] != "gamescope"):
+        raise ValueError("Gamescope export/client does not describe the observed active session")
+    display = exported.get("GAMESCOPE_WAYLAND_DISPLAY", "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", display):
+        raise ValueError("Gamescope export lacks a local native Wayland endpoint")
+    for environment in (source, exported):
+        if "WAYLAND_DISPLAY" in environment and environment["WAYLAND_DISPLAY"] != display:
+            raise ValueError("Gamescope native Wayland endpoint conflicts with the client/export")
+    source["WAYLAND_DISPLAY"] = display
+    return {"session_id": session["Id"], "uid": uid, "source_pid": steam["pid"],
+            "unit": {k: unit[k] for k in GAMESCOPE_UNIT_PROPERTIES}, "compositor": compositor,
+            "client_session_type": "x11", "session_type": "wayland",
+            "native_wayland_export": {"key": "GAMESCOPE_WAYLAND_DISPLAY", "value": display},
+            "environment": validator(source, uid)}
+
+
+def read_gamescope_export(path, uid):
+    path = owned_path(path, uid, "file", True)
+    values = {}
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor) as stream:
+        before = os.fstat(stream.fileno())
+        if (before.st_uid != uid or before.st_size > 65536 or not stat.S_ISREG(before.st_mode)
+                or before.st_mode & 0o022):
+            raise ValueError("invalid Gamescope environment export")
+        for line in stream:
+            match = re.fullmatch(r"(?:export\s+)?([A-Z_][A-Z0-9_]*)=(.*)", line.strip())
+            if not match or match[1] not in GAMESCOPE_EXPORT_KEYS:
+                continue
+            if match[1] in values:
+                raise ValueError("duplicate selected key in Gamescope environment export")
+            value = shlex.split(match[2], comments=True, posix=True)
+            if len(value) != 1:
+                raise ValueError("invalid selected value in Gamescope environment export")
+            values[match[1]] = value[0]
+        after = os.fstat(stream.fileno())
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            raise ValueError("Gamescope environment export changed during discovery")
+    return values
+
+
+def read_gamescope_metadata(pid):
+    directory = Path("/proc") / str(pid)
+    uid_line = next(line for line in (directory / "status").read_text().splitlines() if line.startswith("Uid:"))
+    uids = [int(value) for value in uid_line.split()[1:]]
+    if len(set(uids)) != 1 or directory.stat().st_uid != uids[0]:
+        raise ValueError("Gamescope compositor has inconsistent process ownership")
+    groups = [line.split("::", 1)[1] for line in (directory / "cgroup").read_text().splitlines()
+              if line.startswith("0::")]
+    if len(groups) != 1:
+        raise ValueError("Gamescope compositor requires the observed unified user-unit cgroup")
+    tail = (directory / "stat").read_text().rsplit(")", 1)[1].split()
+    return {"pid": pid, "uid": uids[0], "comm": (directory / "comm").read_text().strip(),
+            "cgroup": groups[0], "start_ticks": int(tail[19])}
+
+
+def read_gamescope_unit(environment):
+    query = ["systemctl", "--user", "show", GAMESCOPE_UNIT, "--no-pager",
+             "--property=" + ",".join(k for k in GAMESCOPE_UNIT_PROPERTIES if k != "ExecStartPath") + ",ExecStart"]
+    output = subprocess.check_output(query, text=True, timeout=10,
+                                    env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+                                         "XDG_RUNTIME_DIR": environment["XDG_RUNTIME_DIR"],
+                                         "DBUS_SESSION_BUS_ADDRESS": environment["DBUS_SESSION_BUS_ADDRESS"]})
+    values = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+    command = re.search(r"(?:^|\s)path=([^ ;]+)", values.pop("ExecStart", ""))
+    values["ExecStartPath"] = command[1] if command else ""
+    return values
+
+
+def discover_gamescope_proof(session, processes, uid):
+    clients = [p for p in processes if p.get("uid") == uid and p.get("session") == session["Id"]
+               and p.get("comm") == "steam"]
+    if len(clients) != 1:
+        raise ValueError("protected Gamescope discovery requires exactly one verified current-session Steam client")
+    steam = clients[0]
+    environment = validate_environment(steam["environment"], uid)
+    unit = read_gamescope_unit(environment)
+    if not unit.get("MainPID", "").isdigit() or int(unit["MainPID"]) <= 1:
+        raise ValueError("known Gamescope unit has no live MainPID")
+    compositor = read_gamescope_metadata(int(unit["MainPID"]))
+    export_path = Path(environment["XDG_RUNTIME_DIR"]) / "gamescope-environment"
+    exported = read_gamescope_export(export_path, uid)
+    proof = validate_gamescope_proof(session, steam, unit, compositor, exported, uid)
+    if read_gamescope_unit(environment) != unit or read_gamescope_metadata(compositor["pid"]) != compositor:
+        raise ValueError("Gamescope unit/compositor identity changed during discovery")
+    proof["environment_source"] = str(export_path)
+    return proof
+
+
+def select_session(sessions, processes, uid, mode, validator=validate_environment, gaming_proof=None):
+    session = active_session(sessions, uid)
     candidates = [p for p in processes if p.get("uid") == uid and p.get("session") == session["Id"]
                   and p.get("comm") in PROCESS_NAMES]
-    gaming = any(p["comm"] == "gamescope" for p in candidates)
+    if gaming_proof and (gaming_proof["session_id"] != session["Id"] or gaming_proof["uid"] != uid
+                         or session.get("Desktop") != "gamescope"):
+        raise ValueError("Gamescope proof belongs to a different session or user")
+    gaming = session.get("Desktop") == "gamescope" and (
+        gaming_proof is not None or any(p["comm"] == "gamescope" for p in candidates))
     if mode == "gaming" and not gaming:
         raise ValueError("current graphical session has no live Gamescope; Gaming Mode is not active")
     if mode == "desktop" and gaming:
@@ -93,10 +220,15 @@ def select_session(sessions, processes, uid, mode, validator=validate_environmen
     rejected = []
     for process in sorted(candidates, key=lambda p: (priority[p["comm"]], p["pid"])):
         try:
-            environment = validator(process["environment"], uid)
+            if gaming_proof:
+                if process["pid"] != gaming_proof["source_pid"]:
+                    continue
+                environment = validator(gaming_proof["environment"], uid)
+            else:
+                environment = validator(process["environment"], uid)
             if environment.get("XDG_SESSION_ID", session["Id"]) != session["Id"]:
                 raise ValueError("process environment names a different logind session")
-            if environment["XDG_SESSION_TYPE"] != session["Type"]:
+            if environment["XDG_SESSION_TYPE"] != session["Type"] and not gaming_proof:
                 raise ValueError("process environment and logind session type disagree")
         except (OSError, ValueError) as error:
             rejected.append({"pid": process["pid"], "reason": str(error)})
@@ -104,6 +236,7 @@ def select_session(sessions, processes, uid, mode, validator=validate_environmen
         return {"session": session, "source_pid": process["pid"], "source_process": process["comm"],
                 "source_executable": process.get("executable"),
                 "mode": "gaming" if gaming else "desktop", "environment": environment,
+                "client_session_type": environment["XDG_SESSION_TYPE"], "gaming_proof": gaming_proof,
                 "rejected_candidates": rejected}
     raise ValueError("no verified current-session process provides usable graphical endpoints")
 
@@ -117,7 +250,7 @@ def discover_session(mode):
         data = subprocess.check_output(["loginctl", "show-session", session_id, "--no-pager"], text=True)
         values = dict(line.split("=", 1) for line in data.splitlines() if "=" in line)
         sessions.append({k: values.get(k, "") for k in
-                         ("Id", "User", "Name", "Remote", "Active", "State", "Type", "Seat", "Leader", "Service")})
+                         ("Id", "User", "Name", "Remote", "Active", "State", "Type", "Seat", "Leader", "Service", "Desktop")})
     processes = []
     for directory in Path("/proc").iterdir():
         if not directory.name.isdigit():
@@ -145,7 +278,9 @@ def discover_session(mode):
                               "executable": executable, "session": session_id, "environment": environment})
         except (OSError, UnicodeError):
             continue
-    return select_session(sessions, processes, uid, mode)
+    session = active_session(sessions, uid)
+    proof = discover_gamescope_proof(session, processes, uid) if session.get("Desktop") == "gamescope" else None
+    return select_session(sessions, processes, uid, mode, gaming_proof=proof)
 
 
 def verify_build(root, build_id):
