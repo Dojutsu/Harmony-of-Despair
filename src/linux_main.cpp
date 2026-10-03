@@ -3,10 +3,18 @@
 #include <string_view>
 
 #include "generated/default/harmonyrecomp_init.h"
+#include "linux_graphics.h"
 #include "linux_startup.h"
 #include <rex/ui/windowed_app.h>
 
 int main(int argc, char** argv) {
+  if (argc > 1 && std::string_view(argv[1]) == "--graphics-probe") {
+    if (argc != 3) {
+      std::fputs("usage: harmonyrecomp --graphics-probe /absolute/run/runtime.log\n", stderr);
+      return 2;
+    }
+    return harmony::RunLinuxGraphicsProbe(argv[2]);
+  }
   if (argc > 1 && (std::string_view(argv[1]) == "--startup-probe" ||
                    std::string_view(argv[1]) == "--guest-probe")) {
     if (argc != 3) {
