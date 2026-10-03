@@ -11,6 +11,12 @@
 
 namespace rex::platform {
 
+// Convert a registered native module target stem to the platform's shared
+// library path beside the executable on Linux. Explicit paths and filenames
+// with extensions remain literal.
+// Windows keeps the stem unchanged for LoadLibrary's existing .dll resolution.
+std::filesystem::path ResolveModuleLibraryPath(const std::filesystem::path& path);
+
 enum class SymbolResolution {
   // Resolve symbols on first use. Maps to RTLD_LAZY on POSIX; the only mode on
   // Windows.

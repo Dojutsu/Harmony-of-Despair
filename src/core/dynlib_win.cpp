@@ -7,6 +7,11 @@ static_assert(REX_PLATFORM_WIN32, "This file is Windows-only");
 
 namespace rex::platform {
 
+std::filesystem::path ResolveModuleLibraryPath(const std::filesystem::path& path) {
+  // Preserve LoadLibraryW's existing handling of stems, filenames and paths.
+  return path;
+}
+
 DynamicLibrary::~DynamicLibrary() {
   Close();
 }
