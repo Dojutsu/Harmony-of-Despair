@@ -12,6 +12,7 @@
 #include <rex/platform/guest_fault_state.h>
 #include <rex/platform/guest_memory.h>
 #include <rex/system/mmio_handler.h>
+#include <rex/system/thread_state.h>
 #include <rex/types.h>
 
 #include <array>
@@ -22,6 +23,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <sys/wait.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <stdexcept>
 
@@ -676,5 +678,106 @@ TEST_CASE("Linux genuine unrepaired readonly watch still rejects retry progress"
   CHECK(*pointer==0x12345678);
   rex::guest::ExecutionActivation cleanup;
   REQUIRE(heap->Protect(allocation.address,65536,rex::memory::kMemoryProtectRead|rex::memory::kMemoryProtectWrite));
+}
+TEST_CASE("Linux unadmitted cross-page scalar writes remain side-effect free and diagnostic",
+          "[linux][guest-fault][cross-page][negative-control]") {
+  auto* pages=static_cast<unsigned char*>(mmap(nullptr,8192,PROT_READ|PROT_WRITE,
+      MAP_SHARED|MAP_ANONYMOUS,-1,0));
+  REQUIRE(pages!=MAP_FAILED);
+  std::memset(pages,0xA5,8192);
+  int fd[2];REQUIRE(pipe(fd)==0);auto child=fork();REQUIRE(child>=0);
+  if(!child) {
+    close(fd[0]);if(dup2(fd[1],STDERR_FILENO)==-1)_exit(92);close(fd[1]);alarm(5);
+    rex::guest::ExecutionActivation activation;
+    auto result=rex::guest::TryWrite<uint32_t>(pages+4094,0x11223344);
+    (void)result;_exit(94);
+  }
+  close(fd[1]);std::string diagnostic;char bytes[1024];ssize_t size;
+  while((size=read(fd[0],bytes,sizeof(bytes)))>0)diagnostic.append(bytes,size);
+  close(fd[0]);int status=0;REQUIRE(waitpid(child,&status,0)==child);
+  REQUIRE(WIFEXITED(status));CHECK(WEXITSTATUS(status)==rex::guest::kFaultContractFailureExitCode);
+  CHECK(diagnostic.find("unadmitted-cross-page-access")!=std::string::npos);
+  CHECK(diagnostic.find("\"width\":4,\"first_bytes\":2")!=std::string::npos);
+  CHECK(diagnostic.find("\"atomic\":false,\"vector\":false,\"write\":true")!=std::string::npos);
+  CHECK(diagnostic.find("\"native_access_started\":false")!=std::string::npos);
+  CHECK(diagnostic.find("terminate")==std::string::npos);
+  CHECK(pages[4094]==0xA5);CHECK(pages[4095]==0xA5);
+  CHECK(pages[4096]==0xA5);CHECK(pages[4097]==0xA5);
+  CHECK(munmap(pages,8192)==0);
+}
+
+TEST_CASE("Linux scalar16 cross-page virtual RAM reads stage results and retain terminal ownership",
+          "[linux][guest-fault][cross-page][scalar16]") {
+  auto& memory=rex::testing::GetTestMemory();auto* heap=memory.LookupHeapByType(false,65536);
+  REQUIRE(heap!=nullptr);PhysicalAllocation allocation{heap};
+  REQUIRE(heap->Alloc(65536,65536,
+    rex::memory::kMemoryAllocationReserve|rex::memory::kMemoryAllocationCommit,
+    rex::memory::kMemoryProtectRead|rex::memory::kMemoryProtectWrite,false,&allocation.address));
+  auto* pages=memory.TranslateVirtual<unsigned char*>(allocation.address);
+  pages[4095]=0x12;pages[4096]=0x34;
+  struct Binding {
+    rex::runtime::ThreadState* saved=rex::runtime::ThreadState::Get();
+    rex::runtime::ThreadState thread;
+    Binding(rex::memory::Memory& memory):thread(99,0,0,&memory){rex::runtime::ThreadState::Bind(&thread);}
+    ~Binding(){rex::runtime::ThreadState::Bind(saved);}
+  } binding(memory);
+  for(unsigned protected_pages=0;protected_pages<4;++protected_pages) {
+    INFO("protected pages: "<<protected_pages);
+    REQUIRE(mprotect(pages,4096,protected_pages&1?PROT_NONE:PROT_READ|PROT_WRITE)==0);
+    REQUIRE(mprotect(pages+4096,4096,protected_pages&2?PROT_NONE:PROT_READ|PROT_WRITE)==0);
+    rex::guest::ExecutionActivation activation;uint16_t value=0xABCD;
+    auto result=rex::guest::detail::TryReadBytes(pages+4095,&value,2);
+    CHECK(result.IsSuccess()==(protected_pages==0));
+    if(result.Failed()) {
+      CHECK(value==0xABCD);CHECK(activation.HasPendingFault());
+      auto fault=activation.Consume(result.Fault());
+      CHECK(fault.access_intent==0);
+      CHECK(fault.address==reinterpret_cast<uintptr_t>(pages+(protected_pages&1?4095:4096)));
+      CHECK(!activation.HasPendingFault());
+    } else {
+      CHECK(value==0x3412);CHECK(rex::byte_swap(value)==0x1234);
+      CHECK(!activation.HasPendingFault());
+    }
+    REQUIRE(mprotect(pages,8192,PROT_READ|PROT_WRITE)==0);
+    CHECK(pages[4095]==0x12);CHECK(pages[4096]==0x34);
+  }
+}
+
+TEST_CASE("Linux cross-page admission keeps physical watches and non-scalar16 classes excluded",
+          "[linux][guest-fault][cross-page][negative-control]") {
+  auto& memory=rex::testing::GetTestMemory();auto* heap=memory.LookupHeapByType(true,65536);
+  REQUIRE(heap!=nullptr);PhysicalAllocation allocation{heap};
+  REQUIRE(heap->Alloc(65536,65536,
+    rex::memory::kMemoryAllocationReserve|rex::memory::kMemoryAllocationCommit,
+    rex::memory::kMemoryProtectRead|rex::memory::kMemoryProtectWrite,false,&allocation.address));
+  auto* pages=memory.TranslateVirtual<unsigned char*>(allocation.address);
+  pages[4095]=0x12;pages[4096]=0x34;
+  PhysicalWatch watch;watch.expected_physical=memory.GetPhysicalAddress(allocation.address);
+  PhysicalRegistration registration{memory,memory.RegisterPhysicalMemoryInvalidationCallback(InvalidatePhysical,&watch)};
+  memory.EnablePhysicalMemoryAccessCallbacks(watch.expected_physical,8192,true,false);
+  for(unsigned mode=0;mode<5;++mode) {
+    INFO("rejected mode: "<<mode);
+    int fd[2];REQUIRE(pipe(fd)==0);auto child=fork();REQUIRE(child>=0);
+    if(!child) {
+      close(fd[0]);if(dup2(fd[1],STDERR_FILENO)==-1)_exit(92);close(fd[1]);alarm(5);
+      rex::runtime::ThreadState thread(99,0,0,&memory);rex::runtime::ThreadState::Bind(&thread);
+      rex::guest::ExecutionActivation activation;uint64_t output=0;
+      if(mode==0){auto result=rex::guest::TryRead<uint16_t>(pages+4095);(void)result;}
+      if(mode==1){auto result=rex::guest::TryRead<uint32_t>(pages+4095);(void)result;}
+      if(mode==2){auto result=rex::guest::detail::TryCompareExchange32(pages+4095,0,1);(void)result;}
+      if(mode==3){auto result=rex::guest::detail::TryReadBytes(pages+4095,&output,2,false,true);(void)result;}
+      if(mode==4){unsigned char vector[16]{};auto result=rex::guest::detail::TryReadBytes(pages+4095,vector,16,true);(void)result;}
+      _exit(94);
+    }
+    close(fd[1]);std::string diagnostic;char bytes[1024];ssize_t size;
+    while((size=read(fd[0],bytes,sizeof(bytes)))>0)diagnostic.append(bytes,size);
+    close(fd[0]);int status=0;REQUIRE(waitpid(child,&status,0)==child);
+    REQUIRE(WIFEXITED(status));CHECK(WEXITSTATUS(status)==rex::guest::kFaultContractFailureExitCode);
+    CHECK(diagnostic.find("unadmitted-cross-page-access")!=std::string::npos);
+    CHECK(diagnostic.find("terminate")==std::string::npos);
+    CHECK(pages[4095]==0x12);CHECK(pages[4096]==0x34);CHECK(watch.notifications==0);
+    rex::memory::PageAccess access{};size_t length=4096;
+    REQUIRE(rex::memory::QueryProtect(pages,length,access));CHECK(access==rex::memory::PageAccess::kReadOnly);
+  }
 }
 #endif
