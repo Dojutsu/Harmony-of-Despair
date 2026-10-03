@@ -186,6 +186,41 @@
             "displayName": "macOS ARM64 RelWithDebInfo",
             "inherits": "mac-arm64-base",
             "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+        },
+        {
+            "name": "linux-steamos-amd64-l0",
+            "displayName": "Steamrt4 Linux x86-64 portable L0",
+            "inherits": "linux-base",
+            "binaryDir": "$env{REXGLUE_LINUX_BUILD_ROOT}/harmony",
+            "condition": {
+                "type": "allOf",
+                "conditions": [
+                    {
+                        "type": "equals",
+                        "lhs": "${hostSystemName}",
+                        "rhs": "Linux"
+                    },
+                    {
+                        "type": "notEquals",
+                        "lhs": "$env{REXGLUE_LINUX_BUILD_ROOT}",
+                        "rhs": ""
+                    },
+                    {
+                        "type": "notEquals",
+                        "lhs": "$env{HARMONY_LINUX_SDK_SOURCE}",
+                        "rhs": ""
+                    }
+                ]
+            },
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "clang-19",
+                "CMAKE_CXX_COMPILER": "clang++-19",
+                "CMAKE_BUILD_TYPE": "Debug",
+                "REXSDK_DIR": "$env{HARMONY_LINUX_SDK_SOURCE}",
+                "REXGLUE_USE_PREGENERATED": "ON",
+                "REXGLUE_OUTPUT_DIR": "$env{REXGLUE_LINUX_BUILD_ROOT}/harmony/bin",
+                "REXGLUE_ENABLE_TRACY": "OFF"
+            }
         }
     ],
     "buildPresets": [
@@ -206,6 +241,38 @@
         { "name": "mac-amd64-relwithdebinfo", "configurePreset": "mac-amd64-relwithdebinfo" },
         { "name": "mac-arm64-debug", "configurePreset": "mac-arm64-debug" },
         { "name": "mac-arm64-release", "configurePreset": "mac-arm64-release" },
-        { "name": "mac-arm64-relwithdebinfo", "configurePreset": "mac-arm64-relwithdebinfo" }
+        { "name": "mac-arm64-relwithdebinfo", "configurePreset": "mac-arm64-relwithdebinfo" },
+        {
+            "name": "linux-steamos-amd64-l0",
+            "configurePreset": "linux-steamos-amd64-l0",
+            "targets": [
+                "sha256_tests",
+                "game_data_tests",
+                "dlc_header_tests",
+                "harmonyrecomp-import",
+                "harmonyrecomp-dlc-import",
+                "stfs_inspect"
+            ],
+            "jobs": 4
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "linux-steamos-amd64-l0",
+            "configurePreset": "linux-steamos-amd64-l0",
+            "filter": {
+                "include": {
+                    "name": "^(sha256-known-vectors|game-data|dlc-marketplace-header)$"
+                }
+            },
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "noTestsAction": "error",
+                "timeout": 90,
+                "jobs": 1
+            }
+        }
     ]
 }
