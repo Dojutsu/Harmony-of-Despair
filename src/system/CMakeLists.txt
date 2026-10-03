@@ -56,6 +56,12 @@ set(REXSYSTEM_SOURCES
 
 add_library(rexruntime SHARED ${REXSYSTEM_SOURCES})
 add_library(rex::runtime ALIAS rexruntime)
+
+# Signal-path libc calls must not invoke the lazy dynamic linker on first fault.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(rexruntime PRIVATE "-Wl,-z,now")
+endif()
+
 add_library(rex::system ALIAS rexruntime)
 add_library(rex::kernel ALIAS rexruntime)
 

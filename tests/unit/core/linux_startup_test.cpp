@@ -2,6 +2,7 @@
 #include <rex/exception_handler.h>
 #include <rex/memory/utils.h>
 #include <rex/platform/exceptions.h>
+#include <rex/platform/guest_fault_state.h>
 #include <rex/thread.h>
 
 #include <signal.h>
@@ -93,8 +94,12 @@ bool RecoverRead(rex::arch::Exception* ex, void* data) {
       ex->fault_address() != reinterpret_cast<uintptr_t>(recovery->address) ||
       ex->access_violation_operation() !=
           rex::arch::Exception::AccessViolationOperation::kRead) return false;
+  const auto* activation = rex::guest::ExecutionActivation::Current();
+  if (!activation || activation->phase() != rex::guest::ActivationPhase::Adjudicating ||
+      rex::guest::HasArmedAccessFrame()) return false;
   ++recovery->seen;
-  // The fixture's exact instruction is x86-64 MOV AL,[RDI] (two bytes).
+  // The registered byte-read leaf's MOV DL,[RDI] is two bytes. This is a
+  // normal-context synthetic continuation, not a signal-handler PC rewrite.
   ex->set_resume_pc(ex->pc() + 2);
   return true;
 }
@@ -183,20 +188,43 @@ void Signals() {
     using namespace rex::memory;
     const size_t size = page_size();
     void* guard = AllocFixed(nullptr, size, AllocationType::kReserve, PageAccess::kNoAccess);
-    void* code = AllocFixed(nullptr, size, AllocationType::kReserveCommit, PageAccess::kReadWrite);
-    if (!guard || !code) _exit(46);
-    // Read guard page, then return 7; only the MOV fault is intentionally owned.
-    const unsigned char instructions[] = {0x8a, 0x07, 0xb8, 0x07, 0, 0, 0, 0xc3};
-    std::memcpy(code, instructions, sizeof(instructions));
-    if (!Protect(code, size, PageAccess::kExecuteReadOnly)) _exit(46);
+    if (!guard) _exit(46);
     Recovery recovery {guard};
+    rex::guest::ExecutionActivation activation;
     rex::initialize_seh();
     rex::arch::ExceptionHandler::Install(RecoverRead, &recovery);
-    int result = reinterpret_cast<int (*)(void*)>(code)(guard);
+    unsigned char output = 0xA5;
+    rex::guest::RequireAccess();
+    auto captured = rex::guest::CaptureRead(guard, &output, sizeof(output));
+    // Capture must return through the same leaf, without committing a failed
+    // read or invoking a rich callback from signal context.
+    if (captured.success || captured.completed != 0 || output != 0xA5 || recovery.seen != 0 ||
+        captured.fault.signal_number != SIGSEGV || captured.fault.signal_code != SEGV_ACCERR ||
+        captured.fault.access_intent != 0 ||
+        captured.fault.address != reinterpret_cast<uintptr_t>(guard) ||
+        !captured.fault.instruction_pointer || rex::guest::HasArmedAccessFrame()) _exit(47);
+    rex::arch::HostThreadContext context{};
+    context.rip = captured.fault.instruction_pointer;
+    context.eflags = captured.fault.flags;
+    for (unsigned index = 0; index != 16; ++index)
+      context.int_registers[index] = captured.fault.integer_registers[index];
+    std::memcpy(context.xmm_registers, captured.fault.xmm_registers,
+                sizeof(captured.fault.xmm_registers));
+    rex::arch::Exception exception;
+    exception.InitializeAccessViolation(&context, captured.fault.address,
+        rex::arch::Exception::AccessViolationOperation::kRead);
+    bool completed = false;
+    {
+      rex::guest::AdjudicationScope adjudication(captured.fault);
+      completed = rex::arch::ExceptionHandler::DispatchDeferred(&exception);
+    }
     rex::arch::ExceptionHandler::Uninstall(RecoverRead, &recovery);
-    if (result != 7 || recovery.seen != 1) _exit(47);
-    if (!DeallocFixed(code, size, DeallocationType::kRelease) ||
-        !DeallocFixed(guard, size, DeallocationType::kRelease)) _exit(48);
+    if (!completed || recovery.seen != 1 ||
+        context.rip != captured.fault.instruction_pointer + 2 ||
+        exception.modified_int_registers() || exception.modified_xmm_registers() ||
+        activation.phase() != rex::guest::ActivationPhase::Running ||
+        activation.HasPendingFault() || rex::guest::HasArmedAccessFrame()) _exit(47);
+    if (!DeallocFixed(guard, size, DeallocationType::kRelease)) _exit(48);
   });
   Child("execute_without_exec_protection_is_fatal", [] {
     using namespace rex::memory;

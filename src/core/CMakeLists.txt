@@ -76,6 +76,13 @@ elseif(UNIX)
     )
 endif()
 
+# The admitted Linux data-fault backend is x86-64 only. Other OS/architecture
+# backends keep their existing independent source selection.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    enable_language(ASM)
+    target_sources(rexcore PRIVATE guest_access_posix.cpp guest_access_amd64.S guest_fault_state.cpp guest_memory_posix.cpp)
+endif()
+
 # Xenos data-format layer (stateless; headers under include/rex/graphics/).
 # The GPU emulation consuming it lives in the rexgpu-xenos plugin.
 target_sources(rexcore PRIVATE
@@ -134,10 +141,4 @@ if(REXGLUE_ENABLE_PERF_COUNTERS)
     target_sources(rexcore PRIVATE perf/counter.cpp)
     target_compile_definitions(rexcore PUBLIC
         $<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PERF_COUNTERS>)
-endif()
-
-# Registered data-fault leaves are admitted only on Linux x86-64.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
-    enable_language(ASM)
-    target_sources(rexcore PRIVATE guest_access_posix.cpp guest_access_amd64.S guest_fault_state.cpp)
 endif()

@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <utility>
 
 #include <rex/assert.h>
@@ -18,6 +19,9 @@
 #include <rex/logging.h>
 #include <rex/memory.h>
 #include <rex/platform.h>
+#if REX_PLATFORM_LINUX
+#include <rex/platform/guest_fault_state.h>
+#endif
 #include <rex/system/mmio_handler.h>
 #include <rex/types.h>
 
@@ -47,10 +51,13 @@ std::unique_ptr<MMIOHandler> MMIOHandler::Install(uint8_t* virtual_membase,
       virtual_membase, physical_membase, membase_end, host_to_guest_virtual,
       host_to_guest_virtual_context, access_violation_callback, access_violation_callback_context));
 
-  // Install exception handler for memory coherence (SharedMemory write tracking).
-  // Note: MMIO operations are handled at the recompiler level via REX_MM_LOAD/STORE
-  // macros that call CheckLoad/CheckStore directly.
+  // Windows/native exception recovery retains its existing callback ordering.
+  // Linux adjudicates registered leaf failures in normal runtime context; no
+  // complex MMIO/watch callback is installed in the signal-handler chain.
+  // Explicit REX_MM_LOAD/STORE device accesses still use CheckLoad/CheckStore.
+#if !REX_PLATFORM_LINUX
   arch::ExceptionHandler::Install(ExceptionCallbackThunk, handler.get());
+#endif
 
   global_handler_ = handler.get();
   return handler;
@@ -70,7 +77,9 @@ MMIOHandler::MMIOHandler(uint8_t* virtual_membase, uint8_t* physical_membase, ui
       access_violation_callback_context_(access_violation_callback_context) {}
 
 MMIOHandler::~MMIOHandler() {
+#if !REX_PLATFORM_LINUX
   arch::ExceptionHandler::Uninstall(ExceptionCallbackThunk, this);
+#endif
 
   if (global_handler_ == this) {
     global_handler_ = nullptr;
@@ -122,6 +131,206 @@ bool MMIOHandler::CheckStore(uint32_t virtual_address, uint32_t value) {
   }
   return false;
 }
+
+#if REX_PLATFORM_LINUX
+bool MMIOHandler::IsMappedAddress(const void* host_address,
+                                  uint32_t* mapped_guest_address) const noexcept {
+  const auto address = reinterpret_cast<uintptr_t>(host_address);
+  if (address < reinterpret_cast<uintptr_t>(virtual_membase_) ||
+      address >= reinterpret_cast<uintptr_t>(physical_membase_) ||
+      address >= reinterpret_cast<uintptr_t>(memory_end_)) return false;
+  uint32_t guest_address;
+  try {
+    guest_address = host_to_guest_virtual_(host_to_guest_virtual_context_, host_address);
+  } catch (...) {
+    rex::guest::FaultContractFailure("exception-classifying-mmio-address");
+  }
+  for (const auto& range : mapped_ranges_) {
+    if ((guest_address & range.mask) == range.address) {
+      if (mapped_guest_address) *mapped_guest_address = guest_address;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool MMIOHandler::IsMappedRange(const void* host_address, size_t length) const noexcept {
+  if (!length) return false;
+  const auto first = reinterpret_cast<uintptr_t>(host_address);
+  if (length - 1 > std::numeric_limits<uintptr_t>::max() - first)
+    rex::guest::FaultContractFailure("mapped-admission-range-overflow");
+  const auto last = first + length - 1;
+  const auto virtual_begin = reinterpret_cast<uintptr_t>(virtual_membase_);
+  const auto virtual_end = std::min(reinterpret_cast<uintptr_t>(physical_membase_),
+                                  reinterpret_cast<uintptr_t>(memory_end_));
+  if (virtual_end <= virtual_begin || last < virtual_begin || first >= virtual_end) return false;
+  const auto clipped_first = std::max(first, virtual_begin);
+  const auto clipped_last = std::min(last, virtual_end - 1);
+  uint32_t guest_first, guest_last;
+  try {
+    guest_first = host_to_guest_virtual_(host_to_guest_virtual_context_,
+                                         reinterpret_cast<const void*>(clipped_first));
+    guest_last = host_to_guest_virtual_(host_to_guest_virtual_context_,
+                                        reinterpret_cast<const void*>(clipped_last));
+  } catch (...) {
+    rex::guest::FaultContractFailure("exception-classifying-mmio-range");
+  }
+  // This is the admitted runtime metadata translator, not an arbitrary foreign
+  // callback. The current 4KiB Linux Memory mapping is affine; other views must
+  // meet this explicit contiguous translation contract before bulk admission.
+  if (guest_last < guest_first || uint64_t(guest_last) - guest_first != clipped_last - clipped_first)
+    rex::guest::FaultContractFailure("nonlinear-mapped-admission-range");
+
+  for (const auto& range : mapped_ranges_) {
+    // Preserve exact (address & mask) == range.address semantics. size is not a
+    // matching bound in the existing MMIO API. A pattern with bits outside mask
+    // cannot match, even if its declared size overlaps the guest interval.
+    if (range.address & ~range.mask) continue;
+    if ((guest_first & range.mask) == range.address) return true;
+    // Every next matching word differs first from guest_first at one zero bit
+    // becoming one. Keep that higher prefix, choose the required lower fixed
+    // bits and set all free lower bits to zero. At most 32 candidates suffice.
+    for (unsigned bit = 0; bit != 32; ++bit) {
+      const uint64_t pivot = uint64_t(1) << bit;
+      if (uint64_t(guest_first) & pivot) continue;
+      const uint64_t lower_mask = pivot - 1;
+      const uint64_t upper_mask = UINT32_MAX & ~((pivot << 1) - 1);
+      const uint32_t candidate = uint32_t((uint64_t(guest_first) & upper_mask) | pivot |
+                                         (uint64_t(range.address) & lower_mask));
+      if (candidate <= guest_last && (candidate & range.mask) == range.address) return true;
+    }
+  }
+  return false;
+}
+
+MMIOHandler::DeferredTransaction::DeferredTransaction()
+    : owner_id_([] {
+        const auto* owner = rex::guest::ExecutionActivation::Current();
+        if (!owner) rex::guest::FaultContractFailure("mmio-transaction-without-owner");
+        return owner->id();
+      }()) {}
+
+bool MMIOHandler::DeferredTransaction::BeginRetry() {
+  const auto* owner = rex::guest::ExecutionActivation::Current();
+  if (!owner || owner->id() != owner_id_)
+    rex::guest::FaultContractFailure("mmio-transaction-wrong-owner");
+  rex::guest::RequireAccess();
+  if (phase_ != Phase::kRetryReady) return false;
+  phase_ = Phase::kUnstarted;
+  return true;
+}
+
+bool MMIOHandler::DeferredTransaction::CompleteNative() {
+  const auto* owner = rex::guest::ExecutionActivation::Current();
+  if (!owner || owner->id() != owner_id_)
+    rex::guest::FaultContractFailure("mmio-transaction-wrong-owner");
+  rex::guest::RequireAccess();
+  if (phase_ != Phase::kUnstarted) return false;
+  phase_ = Phase::kCompleted;
+  return true;
+}
+
+bool MMIOHandler::DeferredTransaction::CompleteExplicit() {
+  const auto* owner = rex::guest::ExecutionActivation::Current();
+  if (!owner || owner->id() != owner_id_ ||
+      owner->phase() != rex::guest::ActivationPhase::Adjudicating || owner->HasPendingFault())
+    rex::guest::FaultContractFailure("mmio-completion-without-deferred-owner");
+  if (phase_ != Phase::kUnstarted) return false;
+  phase_ = Phase::kCompleted;
+  return true;
+}
+
+MMIOHandler::DeferredRecovery MMIOHandler::ResolveAccessFault(
+    arch::Exception& exception, DeferredAccessKind kind,
+    DeferredTransaction& transaction) {
+  using Phase = DeferredTransaction::Phase;
+  const auto* activation = rex::guest::ExecutionActivation::Current();
+  if (!activation || activation->id() != transaction.owner_id_ ||
+      activation->phase() != rex::guest::ActivationPhase::Adjudicating ||
+      activation->HasPendingFault()) {
+    rex::guest::FaultContractFailure("mmio-without-deferred-owner");
+  }
+  // A transaction is a one-shot callback/completion ledger. In particular,
+  // repeating this method after emulated MMIO completion must not call a device
+  // again. Only a repaired unfinished RAM operation can explicitly BeginRetry.
+  if (transaction.phase_ != Phase::kUnstarted) {
+    return DeferredRecovery::kUnsupported;
+  }
+
+  // The platform caller checks and holds the activation's normal-context
+  // adjudication phase. This method is deliberately not a signal callback.
+  if (exception.code() != arch::Exception::Code::kAccessViolation ||
+      (exception.access_violation_operation() !=
+           arch::Exception::AccessViolationOperation::kRead &&
+       exception.access_violation_operation() !=
+           arch::Exception::AccessViolationOperation::kWrite)) {
+    transaction.phase_ = Phase::kUnsupported;
+    return DeferredRecovery::kUnsupported;
+  }
+  if (exception.fault_address() < reinterpret_cast<uintptr_t>(virtual_membase_) ||
+      exception.fault_address() >= reinterpret_cast<uintptr_t>(memory_end_)) {
+    transaction.phase_ = Phase::kGuestFault;
+    return DeferredRecovery::kGuestFault;
+  }
+
+  const bool is_write = exception.access_violation_operation() ==
+                        arch::Exception::AccessViolationOperation::kWrite;
+  MMIORange* range = nullptr;
+  if (exception.fault_address() < reinterpret_cast<uintptr_t>(physical_membase_)) {
+    uint32_t guest_address = host_to_guest_virtual_(
+        host_to_guest_virtual_context_,
+        reinterpret_cast<void*>(exception.fault_address()));
+    range = LookupRange(guest_address);
+  }
+  if (range) {
+    // The existing decoder/device ABI owns only 32-bit scalar transactions.
+    // Reject unsupported operations before decoding or invoking any callback;
+    // never split a SIMD/atomic/bulk device operation into scalar side effects.
+    DecodedLoadStore decoded{};
+    if (kind != DeferredAccessKind::kScalar32 ||
+        !TryDecodeLoadStore(reinterpret_cast<const uint8_t*>(exception.pc()), decoded) ||
+        decoded.is_load == is_write ||
+        (is_write ? range->write == nullptr : range->read == nullptr)) {
+      transaction.phase_ = Phase::kUnsupported;
+      return DeferredRecovery::kUnsupported;
+    }
+  } else if (!is_write) {
+    // Current physical watches support writes only. A protection race may have
+    // already been repaired; otherwise do not enter the existing write-only
+    // PhysicalHeap callback and manufacture read-watch semantics.
+    auto lock = global_critical_region_.Acquire();
+    memory::PageAccess access = memory::PageAccess::kNoAccess;
+    size_t length = memory::page_size();
+    if (memory::QueryProtect(reinterpret_cast<void*>(exception.fault_address()), length, access) &&
+        access != memory::PageAccess::kNoAccess) {
+      transaction.phase_ = Phase::kRetryReady;
+      return DeferredRecovery::kRetry;
+    }
+    transaction.phase_ = Phase::kGuestFault;
+    return DeferredRecovery::kGuestFault;
+  }
+
+  const uintptr_t original_pc = exception.pc();
+  transaction.phase_ = Phase::kResolving;
+  try {
+    if (!ExceptionCallback(&exception)) {
+      transaction.phase_ = Phase::kGuestFault;
+      return DeferredRecovery::kGuestFault;
+    }
+  } catch (...) {
+    // A callback may already have produced side effects. Its completion is now
+    // indeterminate: never replay it or turn it into a successful guest access.
+    transaction.phase_ = Phase::kPoisoned;
+    return DeferredRecovery::kUnsupported;
+  }
+  if (exception.pc() == original_pc) {
+    transaction.phase_ = Phase::kRetryReady;
+    return DeferredRecovery::kRetry;
+  }
+  transaction.phase_ = Phase::kCompleted;
+  return DeferredRecovery::kCompleted;
+}
+#endif
 
 bool MMIOHandler::TryDecodeLoadStore(const uint8_t* p, DecodedLoadStore& decoded_out) {
   std::memset(&decoded_out, 0, sizeof(decoded_out));

@@ -350,6 +350,12 @@ endif()
 # Catch2 - Test framework (only when tests are enabled, not part of SDK install)
 #=============================================================================
 if(REXGLUE_BUILD_TESTS)
+    # These Linux tests exercise the runtime's real signal ownership across cases.
+    # Unexpected native faults still terminate; Catch must not replace/restore
+    # runtime dispositions between cases or turn owned faults into framework traps.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set(CATCH_CONFIG_NO_POSIX_SIGNALS ON CACHE BOOL "Runtime owns Linux test signal handlers" FORCE)
+    endif()
     add_subdirectory(catch2)
 endif()
 

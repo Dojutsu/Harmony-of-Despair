@@ -66,6 +66,49 @@ class MMIOHandler {
   bool CheckLoad(uint32_t virtual_address, uint32_t* out_value);
   bool CheckStore(uint32_t virtual_address, uint32_t value);
 
+#if REX_PLATFORM_LINUX
+  // Metadata-only, normal-context admission check. This intentionally does not
+  // depend on current host page protection and never invokes a device callback.
+  bool IsMappedAddress(const void* host_address,
+                       uint32_t* mapped_guest_address = nullptr) const noexcept;
+  // Check a contiguous admitted virtual interval before bulk side effects.
+  // The runtime's known host-to-guest translator must be affine on the clipped
+  // interval; overflowing/nonlinear endpoint translations are refused.
+  bool IsMappedRange(const void* host_address, size_t length) const noexcept;
+
+  // Normal-context recovery for registered Linux accesses. The caller must hold
+  // its ExecutionActivation's AdjudicationScope; this API never runs in a signal
+  // handler and never replays a completed callback. Native callback faults are
+  // deliberately outside registered access-leaf ownership.
+  enum class DeferredAccessKind { kScalar32, kScalarRam, kVector128, kAtomic, kForwardBulk };
+  enum class DeferredRecovery { kRetry, kCompleted, kGuestFault, kUnsupported };
+  class DeferredTransaction {
+   public:
+    enum class Phase { kUnstarted, kResolving, kRetryReady, kCompleted, kGuestFault,
+                       kUnsupported, kPoisoned };
+    DeferredTransaction();
+    DeferredTransaction(const DeferredTransaction&) = delete;
+    DeferredTransaction& operator=(const DeferredTransaction&) = delete;
+    Phase phase() const { return phase_; }
+    // A repaired unfinished RAM/watch access may be attempted again. Completed
+    // MMIO suboperations cannot transition back to an unstarted transaction.
+    bool BeginRetry();
+    // Record successful native completion after the registered leaf returns,
+    // or explicit MMIO completion after its guarded callback returns normally.
+    // Neither completion can be repeated or restarted.
+    bool CompleteNative();
+    bool CompleteExplicit();
+
+   private:
+    friend class MMIOHandler;
+    const uint64_t owner_id_;
+    Phase phase_ = Phase::kUnstarted;
+  };
+  DeferredRecovery ResolveAccessFault(arch::Exception& exception,
+                                     DeferredAccessKind kind,
+                                     DeferredTransaction& transaction);
+#endif
+
  protected:
   MMIOHandler(uint8_t* virtual_membase, uint8_t* physical_membase, uint8_t* membase_end,
               HostToGuestVirtual host_to_guest_virtual, const void* host_to_guest_virtual_context,

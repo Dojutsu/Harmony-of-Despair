@@ -142,3 +142,7 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     target_sources(unit_tests PRIVATE core/guest_fault_state_test.cpp)
 endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    target_sources(unit_tests PRIVATE system/mmio_recovery_test.cpp)
+endif()
