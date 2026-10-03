@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstring>
 #include <tuple>
 #include <type_traits>
@@ -124,8 +125,15 @@ struct ImportFunction<R(Args...)> {
   PPCFunc& fn;
 
   R operator()(PPCContext& ctx, uint8_t* base, Args... args) const {
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+    detail::GuestActivationScope activation;
+#endif
     auto tpl = std::make_tuple(args...);
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+    TranslateArgumentsToGuest(ctx, base, tpl);
+#else
     _translate_args_to_guest(ctx, base, tpl);
+#endif
     fn(ctx, base);
     if constexpr (std::is_void_v<R>) {
       return;
@@ -143,6 +151,9 @@ struct ImportFunction<R(Args...)> {
   /// Auto-isolating call: retrieves ctx/base internally, creates isolated
   /// context with 0x70 frame, calls function, returns result.
   R operator()(Args... args) const {
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+    detail::GuestActivationScope activation;
+#endif
     auto* ts = rex::runtime::ThreadState::Get();
     PPCContext* parentCtx = ts->context();
 
@@ -154,12 +165,21 @@ struct ImportFunction<R(Args...)> {
     ctx.r1.u32 -= 0x70;
     ctx.r13 = parentCtx->r13;
     ctx.fpscr = parentCtx->fpscr;
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+    detail::FpscrContextRestore fpscr_restore{*parentCtx, ctx};
+#endif
 
     auto tpl = std::make_tuple(args...);
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+    TranslateArgumentsToGuest(ctx, base, tpl);
+#else
     _translate_args_to_guest(ctx, base, tpl);
+#endif
     fn(ctx, base);
 
+#if !(REX_PLATFORM_LINUX && REX_ARCH_AMD64)
     parentCtx->fpscr = ctx.fpscr;
+#endif
 
     if constexpr (std::is_void_v<R>) {
       return;
@@ -192,19 +212,37 @@ class [[deprecated("Use rex::ppc::stack_push / stack_guard instead")]] StackFram
   u32 addr(u32 offset) const { return ctx_.r1.u32 + offset; }
 
   void write_string(u32 offset, const char* str, u8* base) const {
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+    // The source is host-owned hook text; only the destination is guest memory.
+    rex::guest::CopyToGuest(rex::memory::GuestPtr(base, addr(offset)), str, std::strlen(str) + 1);
+#else
     std::memcpy(rex::memory::GuestPtr(base, addr(offset)), str, std::strlen(str) + 1);
+#endif
   }
 
   void write(u32 offset, const void* data, size_t len, u8* base) const {
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+    rex::guest::CopyToGuest(rex::memory::GuestPtr(base, addr(offset)), data, len);
+#else
     std::memcpy(rex::memory::GuestPtr(base, addr(offset)), data, len);
+#endif
   }
 
   template <typename... A>
   size_t write_fmt(u32 offset, u8* base, fmt::format_string<A...> fmtstr, A&&... args) const {
     char* dst = rex::memory::GuestPtr<char*>(base, addr(offset));
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+    if (offset >= size_) rex::guest::FaultContractFailure("hook-format-stack-bounds");
+    auto output = fmt::format(fmtstr, std::forward<A>(args)...);
+    size_t count = std::min(output.size(), static_cast<size_t>(size_ - offset - 1));
+    rex::guest::CopyToGuest(dst, output.data(), count);
+    rex::guest::Write<uint8_t>(dst + count, 0);
+    return output.size();
+#else
     auto result = fmt::format_to_n(dst, size_ - offset - 1, fmtstr, std::forward<A>(args)...);
     *result.out = '\0';
     return result.size;
+#endif
   }
 
   StackFrame(const StackFrame&) = delete;

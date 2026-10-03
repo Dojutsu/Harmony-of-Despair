@@ -24,6 +24,9 @@
 #include <rex/math.h>
 #include <rex/ppc/context.h>
 #include <rex/platform/exceptions.h>
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+#include <rex/platform/guest_memory.h>
+#endif
 #include <rex/runtime.h>
 #include <rex/stream.h>
 #include <rex/system/kernel_state.h>
@@ -448,7 +451,23 @@ X_STATUS XThread::Create() {
     // Execute user code.
     current_xthread_tls_ = this;
     running_ = true;
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+    try {
+      Execute();
+    } catch (const rex::SehException& fault) {
+      // Includes initial APC/DLL callbacks, not only the direct guest entry.
+      // Contain delivery before the foreign pthread callback can unwind.
+      REXSYS_ERROR("Guest thread callback fault: code={:08X}, address={:X}",
+                   static_cast<uint32_t>(fault.code()), fault.address());
+      try {
+        Exit(static_cast<int>(fault.code()));
+      } catch (const rex::SehException&) {
+        rex::guest::FaultContractFailure("guest-fault-during-thread-exit-cleanup");
+      }
+    }
+#else
     Execute();
+#endif
     running_ = false;
     current_xthread_tls_ = nullptr;
 
@@ -645,9 +664,26 @@ void XThread::Execute() {
 
   // Execute the function
   REXSYS_NOISY_DEBUG("XThread::Execute - Calling function at {:08X}", address);
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  {
+    rex::guest::ExecutionActivation activation;
+    try {
+      func(*ctx, base);
+      exit_code = static_cast<int>(ctx->r3.u32);
+    } catch (const rex::SehException& fault) {
+      // Contain an unhandled guest exception before the pthread/native entry
+      // boundary. A failed guest call has no valid r3 return value.
+      REXSYS_ERROR("Guest thread fault: code={:08X}, address={:X}, entry={:08X}",
+                   static_cast<uint32_t>(fault.code()), fault.address(), address);
+      exit_code = static_cast<int>(fault.code());
+      want_exit_code = true;
+    }
+  }
+#else
   func(*ctx, base);
 
   exit_code = static_cast<int>(ctx->r3.u32);
+#endif
 
   // If we got here it means the execute completed without an exit being called.
   // Treat the return code as an implicit exit code (if desired).

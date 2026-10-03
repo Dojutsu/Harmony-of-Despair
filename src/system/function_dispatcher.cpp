@@ -23,9 +23,53 @@
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/thread_state.h>
 
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+#include <rex/platform/guest_memory.h>
+#endif
+
 namespace rex::runtime {
 
 namespace {
+
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+struct DispatchRestore {
+  ThreadState* previous_thread = ThreadState::Get();
+  PPCContext& context;
+  uint64_t stack;
+  uint64_t link;
+  explicit DispatchRestore(ThreadState* thread)
+      : context(*thread->context()), stack(context.r1.u64), link(context.lr) {
+    ThreadState::Bind(thread);
+    context.r1.u64 -= 64 + 112;
+    context.lr = 0xBCBCBCBC;
+  }
+  ~DispatchRestore() {
+    context.lr = link;
+    context.r1.u64 = stack;
+    ThreadState::Bind(previous_thread);
+  }
+};
+
+struct TrapRestore {
+  PPCContext& context;
+  PPCContext saved;
+  explicit TrapRestore(PPCContext& current) : context(current), saved(current) {}
+  ~TrapRestore() {
+    context = saved;
+    context.fpscr.restoreGuestBits(saved.fpscr.csr);
+  }
+};
+
+struct InterruptTlsRestore {
+  uint8_t* address;
+  uint32_t previous;
+  ~InterruptTlsRestore() {
+    // PCR metadata is runtime-owned and must remain valid during cleanup. It
+    // cannot initiate a new recoverable guest exception from a destructor.
+    memory::store_and_swap<uint32_t>(address, previous);
+  }
+};
+#endif
 
 FunctionDispatcher* GetBoundFunctionDispatcher() {
   Runtime* runtime = Runtime::instance();
@@ -74,6 +118,10 @@ bool FunctionDispatcher::Execute(ThreadState* thread_state, uint32_t address) {
   }
 
   auto* ctx = thread_state->context();
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  DispatchRestore restore(thread_state);
+  fn(*ctx, memory_->virtual_membase());
+#else
   auto* previous_thread_state = ThreadState::Get();
 
   // Rebind the active guest thread for cross-module callbacks.
@@ -90,6 +138,7 @@ bool FunctionDispatcher::Execute(ThreadState* thread_state, uint32_t address) {
   ctx->lr = previous_lr;
   ctx->r1.u64 += 64 + 112;
   ThreadState::Bind(previous_thread_state);
+#endif
 
   return true;
 }
@@ -97,6 +146,9 @@ bool FunctionDispatcher::Execute(ThreadState* thread_state, uint32_t address) {
 uint64_t FunctionDispatcher::Execute(ThreadState* thread_state, uint32_t address, uint64_t args[],
                                      size_t arg_count) {
   SCOPE_profile_cpu_f("cpu");
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  rex::guest::ExecutionActivation activation;
+#endif
 
   auto* ctx = thread_state->context();
 
@@ -122,8 +174,13 @@ uint64_t FunctionDispatcher::Execute(ThreadState* thread_state, uint32_t address
     auto stack_arg_base =
         memory_->TranslateVirtual(static_cast<uint32_t>(ctx->r1.u64) + 0x54 - (64 + 112));
     for (size_t i = 8; i < arg_count; i++) {
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+      rex::guest::Write<uint32_t>(stack_arg_base + ((i - 8) * 8),
+                                  __builtin_bswap32(static_cast<uint32_t>(args[i])));
+#else
       memory::store_and_swap<uint32_t>(stack_arg_base + ((i - 8) * 8),
                                        static_cast<uint32_t>(args[i]));
+#endif
     }
   }
 
@@ -136,6 +193,10 @@ uint64_t FunctionDispatcher::Execute(ThreadState* thread_state, uint32_t address
 uint64_t FunctionDispatcher::ExecuteTrap(ThreadState* thread_state, uint32_t address,
                                          uint64_t args[], size_t arg_count) {
   auto* ctx = thread_state->context();
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  TrapRestore restore(*ctx);
+  return Execute(thread_state, address, args, arg_count);
+#else
   PPCContext saved = *ctx;
 
   uint64_t result = Execute(thread_state, address, args, arg_count);
@@ -143,12 +204,16 @@ uint64_t FunctionDispatcher::ExecuteTrap(ThreadState* thread_state, uint32_t add
   *ctx = saved;
   ctx->fpscr.restoreGuestBits(saved.fpscr.csr);
   return result;
+#endif
 }
 
 uint64_t FunctionDispatcher::ExecuteInterrupt(ThreadState* thread_state, uint32_t address,
                                               uint64_t args[], size_t arg_count) {
   SCOPE_profile_cpu_f("cpu");
   PROFILE_INTERRUPT_DISPATCHED();
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  rex::guest::ExecutionActivation activation;
+#endif
 
   // Hold the global lock during interrupt dispatch.
   auto global_lock = global_critical_region_.Acquire();
@@ -172,13 +237,18 @@ uint64_t FunctionDispatcher::ExecuteInterrupt(ThreadState* thread_state, uint32_
   auto pcr_address = memory_->TranslateVirtual(static_cast<uint32_t>(ctx->r13.u64));
   uint32_t old_tls_ptr = memory::load_and_swap<uint32_t>(pcr_address);
   memory::store_and_swap<uint32_t>(pcr_address, 0);
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  InterruptTlsRestore tls_restore{pcr_address, old_tls_ptr};
+#endif
 
   if (!Execute(thread_state, address)) {
     return 0xDEADBABE;
   }
 
   // Restore TLS ptr.
+#if !(REX_PLATFORM_LINUX && REX_ARCH_AMD64)
   memory::store_and_swap<uint32_t>(pcr_address, old_tls_ptr);
+#endif
 
   return ctx->r3.u64;
 }

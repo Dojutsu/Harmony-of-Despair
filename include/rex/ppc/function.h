@@ -18,6 +18,7 @@
 #include <concepts>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -29,6 +30,10 @@
 #include <rex/system/thread_state.h>
 #include <rex/system/xmemory.h>
 #include <rex/types.h>
+
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+#include <rex/platform/guest_memory.h>
+#endif
 
 namespace rex::ppc {
 
@@ -56,6 +61,25 @@ struct PPCFuncRegistrar {
     GetPPCFuncRegistry().emplace_back(name, func);
   }
 };
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+// Host-initiated calls need an owner; ordinary calls within generated C++ reuse
+// their dispatcher's activation instead of creating an owner for every thunk.
+class GuestActivationScope {
+ public:
+  GuestActivationScope() noexcept {
+    if (!rex::guest::ExecutionActivation::Current()) owner_.emplace();
+  }
+
+ private:
+  std::optional<rex::guest::ExecutionActivation> owner_;
+};
+
+struct FpscrContextRestore {
+  PPCContext& parent;
+  PPCContext& child;
+  ~FpscrContextRestore() { parent.fpscr = child.fpscr; }
+};
+#endif
 }  // namespace detail
 
 //=============================================================================
@@ -101,6 +125,91 @@ struct arg_count_t {
 //=============================================================================
 
 struct ArgTranslator {
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  // These helpers return through the nonthrowing marshaling boundary. A caller
+  // that may unwind consumes a failure only after the helper has returned.
+  static rex::guest::AccessResult<uint64_t> TryGetIntegerArgumentValue(
+      const PPCContext& ctx, uint8_t* base, size_t arg) noexcept {
+    rex::guest::RequireAccess();
+    if (arg <= 7) {
+      return rex::guest::AccessResult<uint64_t>::Success(GetIntegerArgumentValue(ctx, base, arg));
+    }
+    auto value = rex::guest::TryRead<uint32_t>(
+        rex::memory::GuestPtr<uint32_t*>(base, ctx.r1.u32 + 0x54 + ((arg - 8) * 8)));
+    if (!value.IsSuccess()) {
+      return value.template Forward<uint64_t>();
+    }
+    return rex::guest::AccessResult<uint64_t>::Success(__builtin_bswap32(value.Value()));
+  }
+
+  static rex::guest::AccessResult<uint8_t> TrySetIntegerArgumentValue(
+      PPCContext& ctx, uint8_t* base, size_t arg, uint64_t value) noexcept {
+    rex::guest::RequireAccess();
+    if (arg <= 7) {
+      SetIntegerArgumentValue(ctx, base, arg, value);
+      return rex::guest::AccessResult<uint8_t>::Success(0);
+    }
+    auto stored = rex::guest::TryWrite<uint32_t>(
+        rex::memory::GuestPtr<uint32_t*>(base, ctx.r1.u32 + 0x54 + ((arg - 8) * 8)),
+        __builtin_bswap32(static_cast<uint32_t>(value)));
+    if (!stored.IsSuccess()) {
+      return stored.template Forward<uint8_t>();
+    }
+    return rex::guest::AccessResult<uint8_t>::Success(0);
+  }
+
+  template <typename T>
+  static rex::guest::AccessResult<uint8_t> TryGetValue(
+      PPCContext& ctx, uint8_t* base, size_t idx, T& output) noexcept {
+    rex::guest::RequireAccess();
+    static_assert(is_precise_v<T> || BigEndianType<T> || MappedPtrType<T> ||
+                      std::is_pointer_v<T> || std::is_integral_v<T> || std::is_enum_v<T>,
+                  "Checked nonthrowing HLE marshaling requires an admitted primitive/pointer type");
+    if constexpr (is_precise_v<T>) {
+      output = static_cast<T>(GetPrecisionArgumentValue(ctx, base, idx));
+    } else {
+      auto value = TryGetIntegerArgumentValue(ctx, base, idx);
+      if (!value.IsSuccess()) {
+        return value.template Forward<uint8_t>();
+      }
+      auto v = value.Value();
+      if constexpr (BigEndianType<T>) {
+        output.value = static_cast<decltype(output.value)>(v);
+      } else if constexpr (MappedPtrType<T>) {
+        using inner_t = typename mapped_ptr_inner_type<T>::type;
+        uint32_t address = static_cast<uint32_t>(v);
+        output = address ? T(rex::memory::GuestPtr<inner_t*>(base, address), address) : T(nullptr);
+      } else if constexpr (std::is_pointer_v<T>) {
+        output = v ? rex::memory::GuestPtr<T>(base, static_cast<uint32_t>(v)) : nullptr;
+      } else {
+        output = static_cast<T>(v);
+      }
+    }
+    return rex::guest::AccessResult<uint8_t>::Success(0);
+  }
+
+  template <typename T>
+  static rex::guest::AccessResult<uint8_t> TrySetValue(
+      PPCContext& ctx, uint8_t* base, size_t idx, T value) noexcept {
+    rex::guest::RequireAccess();
+    static_assert(is_precise_v<T> || BigEndianType<T> || std::is_pointer_v<T> ||
+                      std::is_null_pointer_v<T> || std::is_integral_v<T> || std::is_enum_v<T>,
+                  "Checked nonthrowing guest marshaling requires an admitted primitive/pointer type");
+    if constexpr (is_precise_v<T>) {
+      SetPrecisionArgumentValue(ctx, base, idx, value);
+      return rex::guest::AccessResult<uint8_t>::Success(0);
+    } else if constexpr (std::is_null_pointer_v<T>) {
+      return TrySetIntegerArgumentValue(ctx, base, idx, 0);
+    } else if constexpr (std::is_pointer_v<T>) {
+      return TrySetIntegerArgumentValue(
+          ctx, base, idx, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(value) -
+                                              reinterpret_cast<uintptr_t>(base)));
+    } else {
+      return TrySetIntegerArgumentValue(ctx, base, idx, value);
+    }
+  }
+#endif
+
   // Get integer argument value from register or stack
   static constexpr uint64_t GetIntegerArgumentValue(const PPCContext& ctx, uint8_t* base,
                                                     size_t arg) noexcept {
@@ -127,6 +236,16 @@ struct ArgTranslator {
       }
     }
     // Stack arguments at r1 + 0x54 + ((arg - 8) * 8)
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+    if (!std::is_constant_evaluated()) {
+      detail::GuestActivationScope activation;
+      auto value = TryGetIntegerArgumentValue(ctx, base, arg);
+      if (!value.IsSuccess()) {
+        rex::guest::FaultContractFailure("unconverted-nonthrowing-stack-argument-read");
+      }
+      return value.Value();
+    }
+#endif
     return __builtin_bswap32(
         *rex::memory::GuestPtr<uint32_t*>(base, ctx.r1.u32 + 0x54 + ((arg - 8) * 8)));
   }
@@ -201,6 +320,16 @@ struct ArgTranslator {
       }
     }
     // Stack-passed arguments (mirrors GetIntegerArgumentValue layout)
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+    if (!std::is_constant_evaluated()) {
+      detail::GuestActivationScope activation;
+      auto stored = TrySetIntegerArgumentValue(ctx, base, arg, value);
+      if (!stored.IsSuccess()) {
+        rex::guest::FaultContractFailure("unconverted-nonthrowing-stack-argument-write");
+      }
+      return;
+    }
+#endif
     *rex::memory::GuestPtr<uint32_t*>(base, ctx.r1.u32 + 0x54 + ((arg - 8) * 8)) =
         __builtin_bswap32(static_cast<uint32_t>(value));
   }
@@ -402,12 +531,64 @@ void _translate_args_to_guest(PPCContext& ctx, uint8_t* base, std::tuple<TArgs..
 //=============================================================================
 // Calls a native C++ function with arguments extracted from PPC context
 
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+template <auto Func, size_t I = 0, typename... TArgs>
+rex::guest::AccessResult<uint8_t> _try_translate_args_to_host(
+    PPCContext& ctx, uint8_t* base, std::tuple<TArgs...>& tpl) noexcept {
+  rex::guest::GatewayScope gateway;
+  if constexpr (I == sizeof...(TArgs)) {
+    return rex::guest::AccessResult<uint8_t>::Success(0);
+  } else {
+    auto translated = ArgTranslator::TryGetValue(ctx, base, arg_ordinal_t<Func, I>::value,
+                                                std::get<I>(tpl));
+    if (!translated.IsSuccess()) {
+      return translated.template Forward<uint8_t>();
+    }
+    return _try_translate_args_to_host<Func, I + 1>(ctx, base, tpl);
+  }
+}
+
+template <size_t I = 0, typename... TArgs>
+rex::guest::AccessResult<uint8_t> _try_translate_args_to_guest(
+    PPCContext& ctx, uint8_t* base, std::tuple<TArgs...>& tpl) noexcept {
+  rex::guest::GatewayScope gateway;
+  if constexpr (I == sizeof...(TArgs)) {
+    return rex::guest::AccessResult<uint8_t>::Success(0);
+  } else {
+    auto translated = ArgTranslator::TrySetValue(
+        ctx, base, GatherFunctionArgumentsFromTypes<TArgs...>()[I].ordinal, std::get<I>(tpl));
+    if (!translated.IsSuccess()) {
+      return translated.template Forward<uint8_t>();
+    }
+    return _try_translate_args_to_guest<I + 1>(ctx, base, tpl);
+  }
+}
+
+template <typename... TArgs>
+void TranslateArgumentsToGuest(PPCContext& ctx, uint8_t* base, std::tuple<TArgs...>& tpl) {
+  auto translated = _try_translate_args_to_guest(ctx, base, tpl);
+  if (!translated.IsSuccess()) {
+    rex::guest::DeliverFault(translated.Fault());
+  }
+}
+#endif
+
 template <auto Func>
 __attribute__((noinline)) void HostToGuestFunction(PPCContext& ctx, uint8_t* base) {
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  detail::GuestActivationScope activation;
+#endif
   using ret_t = decltype(std::apply(Func, function_args(Func)));
 
   auto args = function_args(Func);
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  auto translated = _try_translate_args_to_host<Func>(ctx, base, args);
+  if (!translated.IsSuccess()) {
+    rex::guest::DeliverFault(translated.Fault());
+  }
+#else
   _translate_args_to_host<Func>(ctx, base, args);
+#endif
 
   if constexpr (std::is_same_v<ret_t, void>) {
     std::apply(Func, args);
@@ -439,6 +620,9 @@ __attribute__((noinline)) void HostToGuestFunction(PPCContext& ctx, uint8_t* bas
 
 template <typename T, typename TFunction, typename... TArgs>
 T GuestToHostFunction(const TFunction& func, TArgs&&... argv) {
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  detail::GuestActivationScope activation;
+#endif
   auto args = std::make_tuple(std::forward<TArgs>(argv)...);
 
   auto* ts = rex::runtime::ThreadState::Get();
@@ -466,8 +650,15 @@ T GuestToHostFunction(const TFunction& func, TArgs&&... argv) {
   newCtx.r1.u32 -= 0x70;  // PPC64 minimum frame: linkage + param save
   newCtx.r13 = currentCtx->r13;
   newCtx.fpscr = currentCtx->fpscr;
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  detail::FpscrContextRestore fpscr_restore{*currentCtx, newCtx};
+#endif
 
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  TranslateArgumentsToGuest(newCtx, base, args);
+#else
   _translate_args_to_guest(newCtx, base, args);
+#endif
 
   if constexpr (std::is_function_v<TFunction>) {
     func(newCtx, base);
@@ -477,7 +668,9 @@ T GuestToHostFunction(const TFunction& func, TArgs&&... argv) {
     func(newCtx, base);
   }
 
+#if !(REX_PLATFORM_LINUX && REX_ARCH_AMD64)
   currentCtx->fpscr = newCtx.fpscr;
+#endif
 
   if constexpr (std::is_void_v<T>) {
     return;

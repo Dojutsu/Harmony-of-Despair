@@ -155,3 +155,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
             --compiler "${CMAKE_CXX_COMPILER}")
     set_tests_properties(guest_access_template_compile PROPERTIES LABELS "linux;guest_fault;codegen" TIMEOUT 60)
 endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    target_sources(unit_tests PRIVATE ppc/guest_gateway_fault_test.cpp)
+endif()
