@@ -117,3 +117,22 @@ These checks cover session selection/refusal, socket ownership, injected
 environment exclusion, immutable payload tampering, stale PID refusal,
 timeouts/cleanup, unrelated-process preservation and failure-log capture. They
 complement the unchanged L1/L2 deployment tests.
+
+## Persistent Linux configuration for development
+
+Linux normal application startup resolves configuration under
+`$XDG_CONFIG_HOME/harmonyrecomp/harmonyrecomp.toml`, falling back to
+`$HOME/.config/harmonyrecomp/harmonyrecomp.toml`. Relative XDG roots are ignored;
+invalid explicit roots or missing absolute home fallback fail clearly.
+Windows keeps its independent executable-relative configuration.
+
+The graphical harness intentionally isolates HOME/XDG per run. Select a persistent
+user-owned development configuration explicitly with an application argument:
+
+    --arg=--harmony_config_root=/home/deck/.local/share/harmony-dev/runtime/l4-20261003/config
+
+This selects `harmonyrecomp/harmonyrecomp.toml` beneath that root, independently
+of `--user_data_root` (saves), `--cache_root`, owned game/update data roots and
+`--log_file`. Do not store game data or credentials in the config or package.
+The normal settings overlay saves to the same resolved path. Do not interpret
+a timeout-triggered exit0 as an independently completed interactive title test.
