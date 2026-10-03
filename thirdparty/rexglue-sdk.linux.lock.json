@@ -2,7 +2,7 @@
   "schema": 1,
   "repository": "ssh://git@git.example.invalid:2222/harmony/rexglue-sdk.git",
   "branch": "port/linux-steamos",
-  "commit": "1b2245af796fdc107330bdf5fe9969b30d6f8d59",
+  "commit": "3e7fae1857fd7e079be879477d076d432de29458",
   "integration_base": "7ea08238e41474b4d46f2ed1e4f6177172b86574",
   "windows_lock": "rexglue-sdk.lock.json",
   "environment_lock": "../tools/linux-steamos/steamrt4.lock.json",
