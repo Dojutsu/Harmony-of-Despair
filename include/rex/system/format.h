@@ -27,6 +27,26 @@
 
 namespace rex::system::format {
 
+// Inputs are guest-owned; work buffers and formatting state stay ordinary host
+// C++. A registered read returns before any normal C++ fault delivery occurs.
+template <typename T>
+T ReadFormatInput(const T* address) {
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  return rex::guest::Read<T>(address);
+#else
+  return *address;
+#endif
+}
+
+template <typename T>
+void WriteFormatOutput(T* address, T value) {
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  rex::guest::Write<T>(address, value);
+#else
+  *address = value;
+#endif
+}
+
 enum FormatState {
   FS_Invalid = 0,
   FS_Unknown,
@@ -163,7 +183,7 @@ class StackArgList {
     } else {
       // Stack arguments: 8-byte big-endian values at r1 + 0x54 + ((index - 8) * 8)
       uint32_t stack_addr = ctx_.r1.u32 + 0x54 + ((index_ - 8) * 8);
-      value = static_cast<u64>(*rex::memory::GuestPtr<rex::be<u64>*>(base_, stack_addr));
+      value = rex::byte_swap(ReadFormatInput(rex::memory::GuestPtr<uint64_t*>(base_, stack_addr)));
     }
     ++index_;
     return value;
@@ -188,7 +208,7 @@ class ArrayArgList {
 
   uint64_t get64() {
     uint32_t addr = arg_ptr_ + (8 * index_);
-    uint64_t value = static_cast<u64>(*rex::memory::GuestPtr<rex::be<u64>*>(base_, addr));
+    uint64_t value = rex::byte_swap(ReadFormatInput(rex::memory::GuestPtr<uint64_t*>(base_, addr)));
     ++index_;
     return value;
   }
@@ -207,14 +227,14 @@ class StringFormatData {
   explicit StringFormatData(const uint8_t* input) : input_(input) {}
 
   uint16_t get() {
-    uint16_t result = *input_;
+    uint16_t result = ReadFormatInput(input_);
     if (result) {
       input_++;
     }
     return result;
   }
 
-  uint16_t peek(int32_t offset) { return input_[offset]; }
+  uint16_t peek(int32_t offset) { return ReadFormatInput(input_ + offset); }
 
   void skip(int32_t count) {
     while (count-- > 0) {
@@ -247,14 +267,14 @@ class WideStringFormatData {
   explicit WideStringFormatData(const uint16_t* input) : input_(input) {}
 
   uint16_t get() {
-    uint16_t result = *input_;
+    uint16_t result = ReadFormatInput(input_);
     if (result) {
       input_++;
     }
     return rex::byte_swap(result);
   }
 
-  uint16_t peek(int32_t offset) { return rex::byte_swap(input_[offset]); }
+  uint16_t peek(int32_t offset) { return rex::byte_swap(ReadFormatInput(input_ + offset)); }
 
   void skip(int32_t count) {
     while (count-- > 0) {
@@ -284,14 +304,14 @@ class WideCountFormatData {
   explicit WideCountFormatData(const uint16_t* input) : input_(input), count_(0) {}
 
   uint16_t get() {
-    uint16_t result = *input_;
+    uint16_t result = ReadFormatInput(input_);
     if (result) {
       input_++;
     }
     return rex::byte_swap(result);
   }
 
-  uint16_t peek(int32_t offset) { return rex::byte_swap(input_[offset]); }
+  uint16_t peek(int32_t offset) { return rex::byte_swap(ReadFormatInput(input_ + offset)); }
 
   void skip(int32_t count) {
     while (count-- > 0) {
@@ -329,6 +349,7 @@ int32_t format_core(uint8_t* base, Data& data, Args& args, const bool wide) {
     int32_t length;
     bool is_wide;
     bool swap_wide;
+    bool guest_buffer;
   } text;
 
   struct {
@@ -347,6 +368,7 @@ int32_t format_core(uint8_t* base, Data& data, Args& args, const bool wide) {
   text.buffer = nullptr;
   text.is_wide = false;
   text.swap_wide = true;
+  text.guest_buffer = false;
   text.length = 0;
   prefix.buffer[0] = '\0';
   prefix.length = 0;
@@ -402,6 +424,7 @@ int32_t format_core(uint8_t* base, Data& data, Args& args, const bool wide) {
         text.buffer = nullptr;
         text.is_wide = false;
         text.swap_wide = true;
+        text.guest_buffer = false;
         text.length = 0;
         prefix.buffer[0] = '\0';
         prefix.length = 0;
@@ -678,9 +701,11 @@ int32_t format_core(uint8_t* base, Data& data, Args& args, const bool wide) {
           case 'n': {
             auto pointer = (uint32_t)args.get32();
             if (flags & FF_IsShort) {
-              *rex::memory::GuestPtr<rex::be<u16>*>(base, pointer) = (u16)count;
+              WriteFormatOutput(rex::memory::GuestPtr<uint16_t*>(base, pointer),
+                                rex::byte_swap(static_cast<uint16_t>(count)));
             } else {
-              *rex::memory::GuestPtr<rex::be<u32>*>(base, pointer) = (u32)count;
+              WriteFormatOutput(rex::memory::GuestPtr<uint32_t*>(base, pointer),
+                                rex::byte_swap(static_cast<uint32_t>(count)));
             }
             continue;
           }
@@ -722,17 +747,18 @@ int32_t format_core(uint8_t* base, Data& data, Args& args, const bool wide) {
 
               if (!is_wide) {
                 length = 0;
-                for (auto s = (const uint8_t*)str; cap > 0 && *s; ++s, cap--) {
+                for (auto s = (const uint8_t*)str; cap > 0 && ReadFormatInput(s); ++s, cap--) {
                   length++;
                 }
               } else {
                 length = 0;
-                for (auto s = (const uint16_t*)str; cap > 0 && *s; ++s, cap--) {
+                for (auto s = (const uint16_t*)str; cap > 0 && ReadFormatInput(s); ++s, cap--) {
                   length++;
                 }
               }
 
               text.buffer = str;
+              text.guest_buffer = true;
               text.length = length;
               text.is_wide = is_wide;
             }
@@ -800,7 +826,9 @@ int32_t format_core(uint8_t* base, Data& data, Args& args, const bool wide) {
     if (!text.is_wide) {
       auto b = (const uint8_t*)text.buffer;
       while (remaining-- > 0) {
-        if (!data.put(*b++)) {
+        uint8_t value = text.guest_buffer ? ReadFormatInput(b) : *b;
+        ++b;
+        if (!data.put(value)) {
           return -1;
         }
       }
@@ -808,7 +836,9 @@ int32_t format_core(uint8_t* base, Data& data, Args& args, const bool wide) {
       auto b = (const uint16_t*)text.buffer;
       if (text.swap_wide) {
         while (remaining-- > 0) {
-          if (!data.put(rex::byte_swap(*b++))) {
+          uint16_t value = text.guest_buffer ? ReadFormatInput(b) : *b;
+          ++b;
+          if (!data.put(rex::byte_swap(value))) {
             return -1;
           }
         }

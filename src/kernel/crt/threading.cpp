@@ -73,6 +73,11 @@ struct FiberEntryArgs {
 };
 
 static void FiberEntryPoint(void* raw_arg) {
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  // makecontext is not an admitted C++ exception boundary. Until a separately
+  // proven fiber-owned activation exists, reject before native/guest effects.
+  rex::guest::FaultContractFailure("unsupported-guest-fiber-gateway");
+#endif
   auto args = std::unique_ptr<FiberEntryArgs>(static_cast<FiberEntryArgs*>(raw_arg));
   auto* thread = XThread::GetCurrentThread();
   auto* mem = args->kernel_state->memory();
@@ -180,6 +185,9 @@ u32 ConvertFiberToThread_entry() {
 }
 
 u32 CreateFiber_entry(u32 dwStackSize, u32 lpStartAddress, mapped_void lpParameter) {
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  rex::guest::FaultContractFailure("unsupported-guest-fiber-gateway");
+#endif
   auto* thread = XThread::GetCurrentThread();
   auto* ks = thread->kernel_state();
   auto* mem = ks->memory();

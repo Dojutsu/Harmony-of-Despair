@@ -25,6 +25,33 @@
 using namespace rex::system::format;
 using rex::memory::GuestPtr;
 
+namespace {
+
+void CopyNarrowOutput(uint8_t* destination, const char* source, size_t length) {
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  rex::guest::CopyToGuest(destination, source, length);
+#else
+  std::memcpy(destination, source, length);
+#endif
+}
+
+void CopyWideOutput(uint16_t* destination, const uint16_t* source, size_t length) {
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+  for (size_t i = 0; i < length; ++i) {
+    rex::guest::Write<uint16_t>(destination + i, rex::byte_swap(source[i]));
+  }
+#else
+  rex::memory::copy_and_swap(destination, source, length);
+#endif
+}
+
+template <typename T>
+void TerminateOutput(T* destination, size_t offset) {
+  WriteFormatOutput(destination + offset, static_cast<T>(0));
+}
+
+}  // namespace
+
 //=============================================================================
 // DbgPrint / XamDbgPrint
 //=============================================================================
@@ -97,10 +124,10 @@ REX_HOOK_RAW(__imp__sprintf) {
 
   int32_t count = format_core(base, data, args, false);
   if (count <= 0) {
-    buffer[0] = '\0';
+    TerminateOutput(buffer, 0);
   } else {
-    std::memcpy(buffer, data.str().c_str(), count);
-    buffer[count] = '\0';
+    CopyNarrowOutput(buffer, data.str().c_str(), count);
+    TerminateOutput(buffer, count);
   }
   ctx.r3.u64 = count;
 }
@@ -124,15 +151,15 @@ REX_HOOK_RAW(__imp___snprintf) {
   int32_t count = format_core(base, data, args, false);
   if (count < 0) {
     if (buffer_count > 0) {
-      buffer[0] = '\0';
+      TerminateOutput(buffer, 0);
     }
   } else if (count <= buffer_count) {
-    std::memcpy(buffer, data.str().c_str(), count);
+    CopyNarrowOutput(buffer, data.str().c_str(), count);
     if (count < buffer_count) {
-      buffer[count] = '\0';
+      TerminateOutput(buffer, count);
     }
   } else {
-    std::memcpy(buffer, data.str().c_str(), buffer_count);
+    CopyNarrowOutput(buffer, data.str().c_str(), buffer_count);
     count = -1;
   }
   ctx.r3.u64 = count;
@@ -159,11 +186,11 @@ REX_HOOK_RAW(__imp__swprintf) {
 
   int32_t count = format_core(base, data, args, true);
   if (count <= 0) {
-    buffer[0] = '\0';
+    TerminateOutput(buffer, 0);
   } else {
-    rex::memory::copy_and_swap(buffer, reinterpret_cast<const uint16_t*>(data.wstr().c_str()),
+    CopyWideOutput(buffer, reinterpret_cast<const uint16_t*>(data.wstr().c_str()),
                                count);
-    buffer[count] = '\0';
+    TerminateOutput(buffer, count);
   }
   ctx.r3.u64 = count;
 }
@@ -187,16 +214,16 @@ REX_HOOK_RAW(__imp___snwprintf) {
   int32_t count = format_core(base, data, args, true);
   if (count < 0) {
     if (buffer_count > 0) {
-      buffer[0] = '\0';
+      TerminateOutput(buffer, 0);
     }
   } else if (count <= buffer_count) {
-    rex::memory::copy_and_swap(buffer, reinterpret_cast<const uint16_t*>(data.wstr().c_str()),
+    CopyWideOutput(buffer, reinterpret_cast<const uint16_t*>(data.wstr().c_str()),
                                count);
     if (count < buffer_count) {
-      buffer[count] = '\0';
+      TerminateOutput(buffer, count);
     }
   } else {
-    rex::memory::copy_and_swap(buffer, reinterpret_cast<const uint16_t*>(data.wstr().c_str()),
+    CopyWideOutput(buffer, reinterpret_cast<const uint16_t*>(data.wstr().c_str()),
                                buffer_count);
     count = -1;
   }
@@ -225,10 +252,10 @@ REX_HOOK_RAW(__imp__vsprintf) {
 
   int32_t count = format_core(base, data, args, false);
   if (count <= 0) {
-    buffer[0] = '\0';
+    TerminateOutput(buffer, 0);
   } else {
-    std::memcpy(buffer, data.str().c_str(), count);
-    buffer[count] = '\0';
+    CopyNarrowOutput(buffer, data.str().c_str(), count);
+    TerminateOutput(buffer, count);
   }
   ctx.r3.u64 = count;
 }
@@ -253,15 +280,15 @@ REX_HOOK_RAW(__imp___vsnprintf) {
   int32_t count = format_core(base, data, args, false);
   if (count < 0) {
     if (buffer_count > 0) {
-      buffer[0] = '\0';
+      TerminateOutput(buffer, 0);
     }
   } else if (count <= buffer_count) {
-    std::memcpy(buffer, data.str().c_str(), count);
+    CopyNarrowOutput(buffer, data.str().c_str(), count);
     if (count < buffer_count) {
-      buffer[count] = '\0';
+      TerminateOutput(buffer, count);
     }
   } else {
-    std::memcpy(buffer, data.str().c_str(), buffer_count);
+    CopyNarrowOutput(buffer, data.str().c_str(), buffer_count);
   }
   ctx.r3.u64 = count;
 }
@@ -288,11 +315,11 @@ REX_HOOK_RAW(__imp__vswprintf) {
 
   int32_t count = format_core(base, data, args, true);
   if (count <= 0) {
-    buffer[0] = '\0';
+    TerminateOutput(buffer, 0);
   } else {
-    rex::memory::copy_and_swap(buffer, reinterpret_cast<const uint16_t*>(data.wstr().c_str()),
+    CopyWideOutput(buffer, reinterpret_cast<const uint16_t*>(data.wstr().c_str()),
                                count);
-    buffer[count] = '\0';
+    TerminateOutput(buffer, count);
   }
   ctx.r3.u64 = count;
 }
@@ -317,16 +344,16 @@ REX_HOOK_RAW(__imp___vsnwprintf) {
   int32_t count = format_core(base, data, args, true);
   if (count < 0) {
     if (buffer_count > 0) {
-      buffer[0] = '\0';
+      TerminateOutput(buffer, 0);
     }
   } else if (count <= buffer_count) {
-    rex::memory::copy_and_swap(buffer, reinterpret_cast<const uint16_t*>(data.wstr().c_str()),
+    CopyWideOutput(buffer, reinterpret_cast<const uint16_t*>(data.wstr().c_str()),
                                count);
     if (count < buffer_count) {
-      buffer[count] = '\0';
+      TerminateOutput(buffer, count);
     }
   } else {
-    rex::memory::copy_and_swap(buffer, reinterpret_cast<const uint16_t*>(data.wstr().c_str()),
+    CopyWideOutput(buffer, reinterpret_cast<const uint16_t*>(data.wstr().c_str()),
                                buffer_count);
   }
   ctx.r3.u64 = count;

@@ -125,6 +125,21 @@ TEST_CASE("Linux HLE body fault preserves normal C++ cleanup and return register
   CHECK_FALSE(activation.HasPendingFault());
 }
 
+TEST_CASE("Linux raw format input faults before output or argument continuation",
+          "[linux][guest_fault][gateway]") {
+  GuardedArguments memory;
+  PPCContext context{};
+  rex::system::format::StackArgList args(context, memory.base, 0);
+  rex::system::format::StringFormatData data(memory.base + memory.page);
+  rex::guest::ExecutionActivation activation;
+  CHECK_THROWS_AS(rex::system::format::format_core(memory.base, data, args, false),
+                  rex::SehException);
+  CHECK(data.str().empty());
+  CHECK(activation.published_faults() == 1);
+  CHECK(activation.consumed_faults() == 1);
+  CHECK_FALSE(activation.HasPendingFault());
+}
+
 TEST_CASE("Linux checked stack marshaling preserves slot spacing and endian values",
           "[linux][guest_fault][gateway]") {
   GuardedArguments memory;
@@ -201,6 +216,61 @@ TEST_CASE("Linux trap dispatcher restores the interrupted context on fault deliv
   CHECK(rex::runtime::ThreadState::Get() == previous);
   CHECK(rex::guest::ExecutionActivation::Current() == nullptr);
 }
+
+TEST_CASE("Linux refuses unadmitted guest fiber before allocation or foreign entry",
+          "[linux][guest_fault][gateway][fiber-admission]") {
+  int diagnostic[2];
+  REQUIRE(pipe(diagnostic) == 0);
+  const auto child = fork();
+  REQUIRE(child >= 0);
+  if (!child) {
+    close(diagnostic[0]);
+    if (dup2(diagnostic[1], STDERR_FILENO) < 0) _exit(92);
+    close(diagnostic[1]);
+    alarm(3);
+    // There is no XThread here: the supported rejection must happen before
+    // looking up native/guest state, allocating or entering makecontext.
+    rex::kernel::crt::CreateFiber_entry(0, 0, ::mapped_void{});
+    _exit(93);
+  }
+  close(diagnostic[1]);
+  int status = 0;
+  pid_t waited;
+  do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+  char message[2048]{};
+  auto length = read(diagnostic[0], message, sizeof(message)-1);
+  close(diagnostic[0]);
+  REQUIRE(waited == child);
+  REQUIRE(WIFEXITED(status));
+  CHECK(WEXITSTATUS(status) == rex::guest::kFaultContractFailureExitCode);
+  REQUIRE(length > 0);
+  CHECK(std::strstr(message, "unsupported-guest-fiber-gateway") != nullptr);
+}
+
+namespace {
+
+struct SharedTranslatorObservation {
+  PPCContext context{};
+  double output = 9.25;
+};
+
+struct SharedTranslatorFixture {
+  void* mapping = mmap(nullptr, sizeof(SharedTranslatorObservation), PROT_READ | PROT_WRITE,
+                       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  SharedTranslatorObservation* state = nullptr;
+  SharedTranslatorFixture() {
+    REQUIRE(mapping != MAP_FAILED);
+    state = ::new (mapping) SharedTranslatorObservation{};
+    state->context.r3.u64 = 0x12345678;
+    state->context.f1.f64 = 4.5;
+  }
+  ~SharedTranslatorFixture() {
+    if (state) state->~SharedTranslatorObservation();
+    if (mapping != MAP_FAILED) munmap(mapping, sizeof(SharedTranslatorObservation));
+  }
+};
+
+}  // namespace
 
 TEST_CASE("Linux checked register and precision translators reject missing or pending owner",
           "[linux][guest_fault][gateway][translator-admission]") {
