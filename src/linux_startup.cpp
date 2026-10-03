@@ -1,5 +1,6 @@
 // Opt-in native Linux runtime diagnostic. No XEX/assets, guest execution,
 // presentation, controller, audio or network service is started here.
+// --guest-probe additionally runs two source-audited generated title functions.
 #include "linux_startup.h"
 
 #include <array>
@@ -22,6 +23,9 @@
 #include <rex/logging.h>
 #include <rex/memory.h>
 #include <rex/platform/dynlib.h>
+#include <rex/platform/exceptions.h>
+#include <rex/platform/guest_access.h>
+#include <rex/platform/guest_fault_state.h>
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/gpu_plugin.h>
@@ -165,9 +169,77 @@ void ProbeNativeModule(rex::Runtime& runtime) {
           "actual Alucard registration did not populate its first guest function");
 }
 
+void ProbeGuestExecution(rex::Runtime& runtime, StartupTrace& trace) {
+  auto* memory = runtime.memory();
+  auto* dispatcher = runtime.function_dispatcher();
+  // Actual recompiled Harmony code, not replacement functions:
+  // 82220020: li r3,1; blr.
+  // 82220040: constructor writes 821E041C to r3; r4=0 excludes destructor call.
+  Require(dispatcher->GetFunction(0x82220020) && dispatcher->GetFunction(0x82220040),
+          "source-audited real guest functions are absent from dispatch");
+  const uint32_t object = memory->SystemHeapAlloc(4096, 4096);
+  const uint32_t stack = memory->SystemHeapAlloc(4096, 4096);
+  Require(object && stack, "bounded guest fixture allocation failed");
+  auto* target = memory->TranslateVirtual(object);
+  struct Release {
+    rex::memory::Memory* memory;
+    uint32_t object, stack;
+    uint8_t* target;
+    ~Release() {
+      rex::memory::Protect(target, 4096, rex::memory::PageAccess::kReadWrite);
+      memory->SystemHeapFree(stack);
+      memory->SystemHeapFree(object);
+    }
+  } release{memory, object, stack, target};
+  rex::runtime::ThreadState state(3, stack + 2048, 0, memory);
+  auto* context = state.context();
+  context->fpscr.InitHost();
+  context->r31.u64 = 0x123456789abcdef0;
+  const auto original_stack = context->r1.u64;
+  const auto original_lr = context->lr;
+  target[0] = target[1] = target[2] = target[3] = 0;
+  uint64_t args[] = {object, 0};
+  trace.Event("guest-fault-recovery", "begin", "actual sub_82220040; protected object store; ExecuteTrap");
+  Require(rex::memory::Protect(target, 4096, rex::memory::PageAccess::kNoAccess),
+          "bounded object protection failed");
+  bool caught = false;
+  try {
+    dispatcher->ExecuteTrap(&state, 0x82220040, args, 2);
+  } catch (const rex::SehException& fault) {
+    const auto& saved = rex::platform::seh_thread_state();
+    caught = fault.code() == rex::SehException::ACCESS_VIOLATION &&
+             fault.address() == reinterpret_cast<uintptr_t>(target) &&
+             saved.code == rex::SehException::ACCESS_VIOLATION &&
+             saved.info[0] == 1 && saved.info[1] == reinterpret_cast<uintptr_t>(target);
+  }
+  Require(caught, "real generated guest write did not deliver the expected AV");
+  Require(!rex::guest::ExecutionActivation::Current() && !rex::guest::HasArmedAccessFrame() &&
+              rex::runtime::ThreadState::Get() == nullptr &&
+              context->r1.u64 == original_stack && context->lr == original_lr &&
+              context->r31.u64 == 0x123456789abcdef0,
+          "faulted guest trap did not restore owned context and TLS");
+  Require(rex::memory::Protect(target, 4096, rex::memory::PageAccess::kReadWrite),
+          "bounded object protection restore failed");
+  Require(target[0] == 0 && target[1] == 0 && target[2] == 0 && target[3] == 0,
+          "faulted store committed output");
+  trace.Event("guest-fault-recovery", "pass", "real generated store; AV C0000005/write; normal unwind; trap/TLS cleanup; no committed output");
+  trace.Event("guest-execution", "begin", "actual sub_82220020 and sub_82220040 on valid fixture memory");
+  Require(dispatcher->Execute(&state, 0x82220020, nullptr, 0) == 1,
+          "real constant guest leaf returned an unexpected value");
+  Require(dispatcher->Execute(&state, 0x82220040, args, 2) == object,
+          "real guest constructor returned an unexpected object");
+  Require(target[0] == 0x82 && target[1] == 0x1e && target[2] == 0x04 && target[3] == 0x1c,
+          "real guest constructor did not write its original big-endian vtable value");
+  Require(context->r1.u64 == original_stack && context->lr == original_lr &&
+              context->r31.u64 == 0x123456789abcdef0 &&
+              rex::runtime::ThreadState::Get() == nullptr && !rex::guest::ExecutionActivation::Current(),
+          "successful real guest calls did not preserve call state");
+  trace.Event("guest-execution", "pass", "real registered title code returned 1/object; BE 821E041C; stack/LR/r31 preserved; no XEX/title boot claim");
+}
+
 }  // namespace
 
-int RunLinuxStartupProbe(const rex::PPCImageInfo& image, const std::filesystem::path& log_path) {
+static int RunLinuxProbe(const rex::PPCImageInfo& image, const std::filesystem::path& log_path, bool guest_execution) {
   if (!log_path.is_absolute()) {
     std::fputs("startup probe requires an absolute runtime log path\n", stderr);
     return 2;
@@ -228,6 +300,11 @@ int RunLinuxStartupProbe(const rex::PPCImageInfo& image, const std::filesystem::
       ProbeNativeModule(runtime);
       trace->Event(stage, "pass", "actual Alucard ELF exports/metadata/dispatch registration/unregistration; no guest execution");
 
+      if (guest_execution) {
+        stage = "guest-execution";
+        ProbeGuestExecution(runtime, *trace);
+      }
+
       stage = "platform-boundary";
       trace->Event(stage, "begin");
       auto graphics = rex::system::LoadGpuPlugin("xenos", "vulkan");
@@ -260,4 +337,11 @@ int RunLinuxStartupProbe(const rex::PPCImageInfo& image, const std::filesystem::
   }
   return result;
 }
+int RunLinuxStartupProbe(const rex::PPCImageInfo& image, const std::filesystem::path& path) {
+  return RunLinuxProbe(image, path, false);
+}
+int RunLinuxGuestProbe(const rex::PPCImageInfo& image, const std::filesystem::path& path) {
+  return RunLinuxProbe(image, path, true);
+}
+
 }  // namespace harmony
