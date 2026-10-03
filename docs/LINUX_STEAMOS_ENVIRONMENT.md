@@ -49,6 +49,47 @@ regular file is hash/size/mode checked, along with symlinks and hardlinks, befor
 provenance is recorded. Extra disposable files outside archived paths may remain.
 No author-owned files are removed.
 
+## Private Linux SDK integration
+
+`thirdparty/rexglue-sdk.linux.lock.json` pins the private Linux SDK series separately
+from the unchanged Windows production lock. Its base is the current integration
+commit `7ea08238e41474b4d46f2ed1e4f6177172b86574`, including the existing WAN
+worker fix. Linux additions currently contain presets and regression tooling;
+no networking/runtime source behavior is changed. The durable Windows overlay
+still describes its own integration base and is not a representation of these
+additional Linux files. Do not apply it over the locked Linux SDK.
+
+For a fresh Linux checkout, clone the private `port/linux-steamos` branch with
+remote name `private`, choose a separate SDK source directory, and read the pin
+from the lock before build:
+
+```sh
+git clone --origin private --branch port/linux-steamos \
+  ssh://git@git.example.invalid:2222/harmony/HarmonyRecomp.git HarmonyRecomp-linux
+cd HarmonyRecomp-linux
+git config remote.pushDefault private
+export HARMONY_LINUX_SDK_SOURCE=/path/to/rexglue-sdk-linux
+git clone --origin private --branch port/linux-steamos \
+  ssh://git@git.example.invalid:2222/harmony/rexglue-sdk.git "$HARMONY_LINUX_SDK_SOURCE"
+python3 - <<'PIN'
+import json, os, subprocess
+with open("thirdparty/rexglue-sdk.linux.lock.json") as file:
+    locked = json.load(file)["commit"]
+sdk = os.environ["HARMONY_LINUX_SDK_SOURCE"]
+subprocess.run(["git", "-C", sdk, "checkout", "--detach", locked], check=True)
+subprocess.run(["git", "-C", sdk, "submodule", "update", "--init", "--recursive"], check=True)
+subprocess.run(["git", "-C", sdk, "config", "remote.pushDefault", "private"], check=True)
+assert subprocess.check_output(["git", "-C", sdk, "rev-parse", "HEAD"], text=True).strip() == locked
+PIN
+```
+
+Export `HARMONY_LINUX_SDK_SOURCE` before the Python pin command. Detached SDK
+checkout is a reproducible build snapshot; SDK development belongs on its private
+feature branch and requires a deliberate Harmony Linux lock update. Retain
+existing remotes in an existing checkout; no command here pushes to GitHub.
+Initialize dependencies at their recorded commits rather than fetching newer
+versions. The runner remains offline during configure/build/test.
+
 ## Dedicated Docker runner
 
 The runner requires a working local Docker daemon and the exact Alpine 3.20
