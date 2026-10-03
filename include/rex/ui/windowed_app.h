@@ -182,6 +182,10 @@ std::unique_ptr<WindowedApp> (*GetWindowedAppCreator())(WindowedAppContext& app_
   }
 #endif  // XE_UI_WINDOWED_APPS_IN_LIBRARY
 
+// Run the existing SDL application path. A consumer-owned entry point may
+// perform an explicitly requested diagnostic before entering this normal flow.
+int RunWindowedApp(int argc, char** argv);
+
 // Deprecated: use REX_DEFINE_APP
 #define XE_DEFINE_WINDOWED_APP(identifier, creator) REX_DEFINE_APP(identifier, creator)
 

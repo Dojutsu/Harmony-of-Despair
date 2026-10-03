@@ -75,11 +75,16 @@ endfunction()
 #     so this single copy handles them transitively.
 #==========================================================
 function(rexglue_configure_target target_name)
-    cmake_parse_arguments(ARG "" "" "GPU_PLUGINS" ${ARGN})
+    cmake_parse_arguments(ARG "" "ENTRYPOINT" "GPU_PLUGINS" ${ARGN})
 
     target_sources(${target_name} PRIVATE
         ${REXGLUE_SHARE_DIR}/windowed_app_main_sdl.cpp
         ${REXGLUE_SHARE_DIR}/rex_app.cpp)
+
+    if(ARG_ENTRYPOINT)
+        target_sources(${target_name} PRIVATE "${ARG_ENTRYPOINT}")
+        target_compile_definitions(${target_name} PRIVATE REXGLUE_CUSTOM_ENTRYPOINT=1)
+    endif()
 
     target_compile_definitions(${target_name} PRIVATE
         REXGLUE_BUILD_CONFIG="$<CONFIG>")
@@ -109,22 +114,7 @@ function(rexglue_configure_target target_name)
             COMMAND_EXPAND_LISTS
             VERBATIM
         )
-    elseif(APPLE)
-        # macOS: $<TARGET_RUNTIME_DLLS> does not resolve imported dylibs, so
-        # stage the shared runtime libraries explicitly next to the executable
-        # (paired with the @executable_path rpath above). Everything else the
-        # runtime links (fmt, spdlog, SDL3, ...) is static. Target names
-        # differ between an in-tree build and an installed SDK import.
-        foreach(_rexglue_runtime_lib rex::runtime rexruntime rex::TracyClient TracyClient)
-            if(TARGET ${_rexglue_runtime_lib})
-                add_custom_command(TARGET ${target_name} POST_BUILD
-                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                        $<TARGET_FILE:${_rexglue_runtime_lib}>
-                        $<TARGET_FILE_DIR:${target_name}>
-                    VERBATIM
-                )
-            endif()
-        endforeach()
+
     endif()
 
     if(WIN32)

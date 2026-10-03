@@ -34,7 +34,7 @@
 #include <shellapi.h>
 #endif
 
-namespace {
+namespace rex::ui {
 
 int RunWindowedApp(int argc, char** argv) {
   auto remaining = rex::cvar::Init(argc, argv);
@@ -78,6 +78,10 @@ int RunWindowedApp(int argc, char** argv) {
   return result;
 }
 
+}  // namespace rex::ui
+
+namespace {
+
 #if REX_PLATFORM_WIN32
 // Convert wide argv from CommandLineToArgvW to UTF-8 for cvar::Init.
 std::vector<std::string> WideArgsToUtf8(int argc, wchar_t** wargv) {
@@ -102,7 +106,7 @@ std::vector<std::string> WideArgsToUtf8(int argc, wchar_t** wargv) {
 
 }  // namespace
 
-#if REX_PLATFORM_WIN32
+#if REX_PLATFORM_WIN32 && !defined(REXGLUE_CUSTOM_ENTRYPOINT)
 
 int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hinstance_prev, LPWSTR command_line,
                     int show_cmd) {
@@ -121,13 +125,13 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hinstance_prev, LPWSTR comman
   for (auto& s : utf8_args) {
     argv_ptrs.push_back(s.data());
   }
-  return RunWindowedApp(static_cast<int>(argv_ptrs.size()), argv_ptrs.data());
+  return rex::ui::RunWindowedApp(static_cast<int>(argv_ptrs.size()), argv_ptrs.data());
 }
 
-#else
+#elif !REX_PLATFORM_WIN32 && !defined(REXGLUE_CUSTOM_ENTRYPOINT)
 
 int main(int argc, char* argv[]) {
-  return RunWindowedApp(argc, argv);
+  return rex::ui::RunWindowedApp(argc, argv);
 }
 
 #endif
