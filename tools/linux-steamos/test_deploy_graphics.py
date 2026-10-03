@@ -15,6 +15,30 @@ from unittest.mock import patch
 import deploy_graphics as graphics
 
 
+class GraphicalEnvironmentTests(unittest.TestCase):
+    def test_default_environment_keeps_virtual_gamepad_admission_absent(self):
+        session = {"mode": "gaming", "gaming_proof": {"verified": True},
+                   "environment": {"WAYLAND_DISPLAY": "dynamic"}}
+        result = graphics.graphical_environment(Path("/owned/run"), session)
+        self.assertNotIn("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD", result)
+        self.assertEqual(result["HOME"], "/owned/run/home")
+        self.assertEqual(result["WAYLAND_DISPLAY"], "dynamic")
+
+    def test_explicit_virtual_gamepad_admission_is_process_only(self):
+        session = {"mode": "gaming", "gaming_proof": {"verified": True}, "environment": {}}
+        result = graphics.graphical_environment(Path("/owned/run"), session, "wayland", True)
+        self.assertEqual(result["SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD"], "1")
+        self.assertEqual(result["SDL_VIDEODRIVER"], "wayland")
+        self.assertEqual(session["environment"], {})
+        self.assertNotIn("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD", os.environ)
+
+    def test_virtual_gamepad_admission_refuses_desktop_or_unproved_gaming(self):
+        for session in [{"mode": "desktop", "gaming_proof": None, "environment": {}},
+                        {"mode": "gaming", "gaming_proof": None, "environment": {}}]:
+            with self.subTest(session=session), self.assertRaisesRegex(ValueError, "verified SteamOS"):
+                graphics.graphical_environment(Path("/owned/run"), session, allow_steam_virtual_gamepad=True)
+
+
 class GraphicalSessionTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

@@ -438,6 +438,21 @@ def cleanup_stale_runs(root):
     return cleaned
 
 
+def graphical_environment(run, session, video_driver=None, allow_steam_virtual_gamepad=False):
+    """Keep session inheritance narrow; SDL virtual-device admission is opt-in."""
+    environment = {"PATH": "/usr/bin:/bin", "HOME": str(run / "home"), "TMPDIR": str(run / "tmp"),
+                   "XDG_CACHE_HOME": str(run / "cache"), "XDG_CONFIG_HOME": str(run / "config"),
+                   "XDG_DATA_HOME": str(run / "data"), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+                   **session["environment"]}
+    if video_driver:
+        environment["SDL_VIDEODRIVER"] = video_driver
+    if allow_steam_virtual_gamepad:
+        if session["mode"] != "gaming" or not session.get("gaming_proof"):
+            raise ValueError("Steam virtual gamepad admission requires verified SteamOS Gaming Mode")
+        environment["SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD"] = "1"
+    return environment
+
+
 def remote_run(args):
     build, manifest = verify_build(Path(args.root), args.build_id)
     root = Path(args.root)
@@ -462,12 +477,8 @@ def remote_run(args):
             shutil.copytree(build, payload)
             for name in ("home", "tmp", "cache", "config", "data"):
                 (run / name).mkdir()
-            environment = {"PATH": "/usr/bin:/bin", "HOME": str(run / "home"), "TMPDIR": str(run / "tmp"),
-                           "XDG_CACHE_HOME": str(run / "cache"), "XDG_CONFIG_HOME": str(run / "config"),
-                           "XDG_DATA_HOME": str(run / "data"), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
-                           **session["environment"]}
-            if args.video_driver:
-                environment["SDL_VIDEODRIVER"] = args.video_driver
+            environment = graphical_environment(run, session, args.video_driver,
+                getattr(args, "allow_steam_virtual_gamepad", False))
             relative = "bin/" + args.executable
             if relative not in manifest["files"] or not manifest["files"][relative]["mode"] & 0o111:
                 raise ValueError("executable must be a declared executable in the immutable build")
@@ -498,6 +509,8 @@ def main():
     parser.add_argument("--executable", default="harmonyrecomp")
     parser.add_argument("--arg", action="append", default=[], help="argument; {run} expands to this run's log directory")
     parser.add_argument("--video-driver", choices=("wayland", "x11"))
+    parser.add_argument("--allow-steam-virtual-gamepad", action="store_true",
+                        help="opt into SDL's existing Steam virtual gamepad backend in verified Gaming Mode")
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--output-directory", type=Path)
     parser.add_argument("--remote", action="store_true", help=argparse.SUPPRESS)
@@ -505,6 +518,8 @@ def main():
     for name in ("ssh-config", "identity", "known-hosts"):
         parser.add_argument("--" + name, type=Path)
     args = parser.parse_args()
+    if args.allow_steam_virtual_gamepad and args.mode != "gaming":
+        parser.error("Steam virtual gamepad admission requires --mode gaming")
     if (not re.fullmatch(SAFE_ID, args.build_id) or not re.fullmatch(r"[A-Za-z0-9_.+-]+", args.executable)
             or not re.fullmatch(r"[A-Za-z0-9_.-]+", args.target) or not re.fullmatch(r"/[A-Za-z0-9_./-]+", args.root)
             or not 1 <= args.timeout <= 120):
@@ -533,6 +548,8 @@ def main():
                         "--mode", args.mode, "--executable", args.executable, "--timeout", str(args.timeout)]
     if args.video_driver:
         remote_arguments += ["--video-driver", args.video_driver]
+    if args.allow_steam_virtual_gamepad:
+        remote_arguments.append("--allow-steam-virtual-gamepad")
     remote_arguments += ["--arg=" + argument for argument in args.arg]
     transport = {"schema": 1, "run_id": run_id, "target": args.target, "status": "failure"}
     try:

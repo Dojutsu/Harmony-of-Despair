@@ -78,6 +78,15 @@ graphics trace must report the backend, extensions, device, surface and
 presentation outcome; a loader/driver mismatch is a diagnostic failure, not a
 reason to silently swap arbitrary libraries.
 
+For an explicitly qualified SteamOS Gaming Mode controller run, add
+`--allow-steam-virtual-gamepad`. SDL normally excludes Steam's virtual gamepad;
+this opt-in sets `SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=1` only for the
+new process, after verified Gamescope admission. The setting is recorded in the
+receipt. It changes no Steam Input configuration, mappings, device permissions
+or Steam library entry and is refused in Desktop Mode or without the protected
+Gaming proof. Default graphics launches remain unchanged. Enumeration alone does
+not prove physical button/axis delivery or title interaction.
+
 The bounded probe creates the real Harmony SDL window and uses the existing
 Xenos/Vulkan presentation path. Its clear/present frame proves presentation; it
 does not establish title boot, gameplay, networking, controller mapping or audio
