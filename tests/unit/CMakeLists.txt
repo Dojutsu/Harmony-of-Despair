@@ -138,3 +138,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
     add_test(NAME guest_access_capture COMMAND guest_access_capture_test)
     set_tests_properties(guest_access_capture PROPERTIES LABELS "linux;guest_fault" TIMEOUT 60)
 endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    target_sources(unit_tests PRIVATE core/guest_fault_state_test.cpp)
+endif()
