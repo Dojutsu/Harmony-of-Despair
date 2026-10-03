@@ -27,7 +27,9 @@ def main():
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--build-id', required=True)
     parser.add_argument('--l2', action='store_true', help='include production guest-fault acceptance fixtures')
+    parser.add_argument('--l3', action='store_true', help='package bounded native graphics with L1/L2 regression fixtures')
     args = parser.parse_args()
+    args.l2 = args.l2 or args.l3
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,79}', args.build_id):
         parser.error('build-id must be a simple directory name')
     build = Path(os.environ['HARMONY_BUILD_ROOT']).resolve()
@@ -87,8 +89,10 @@ def main():
         raise RuntimeError('pinned ELF interpreter was not found')
     binaries[loader_name] = dependencies.pop(loader_name)
     manifest = {'schema': 1, 'build_id': args.build_id, 'created_utc': datetime.now(timezone.utc).isoformat(),
-                'architecture': 'linux/x86-64', 'scope': 'L2 checked guest recovery and bounded real guest execution' if args.l2 else 'L1 asset-free native Harmony startup',
-                'l2': args.l2,
+                'architecture': 'linux/x86-64', 'scope': ('L3 bounded native SDL/Vulkan presentation' if args.l3 else
+                          'L2 checked guest recovery and bounded real guest execution' if args.l2 else
+                          'L1 asset-free native Harmony startup'),
+                'l2': args.l2, 'l3': args.l3,
                 'runtime': 'Steamrt4 4.0.20260805.254769', 'compiler': 'Clang 19.1.7',
                 'carrier_image_id': 'sha256:bf8527eb54c3680e728d5b4b383a8ba730d72dae7236fbc8dff97ed6b224a731',
                 'source': {}, 'files': {}}
