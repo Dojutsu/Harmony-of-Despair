@@ -42,6 +42,13 @@ REXCVAR_DEFINE_BOOL(protect_on_release, false, "Memory",
 REXCVAR_DEFINE_BOOL(scribble_heap, false, "Memory", "Scribble 0xCD into all allocated heap memory");
 
 namespace rex::memory {
+#if REX_PLATFORM_GNU_LINUX
+namespace {
+thread_local bool diagnostic_locked_known=false;
+thread_local rex::memory::PageAccess diagnostic_locked_access=rex::memory::PageAccess::kNoAccess;
+thread_local uint32_t diagnostic_locked_guest=0;
+}
+#endif
 
 uint32_t get_page_count(uint32_t value, uint32_t page_size, uint32_t page_size_shift) {
   return rex::round_up(value, page_size) >> page_size_shift;
@@ -557,6 +564,7 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
   // the length - guranteed not to cross page boundaries also.
   auto physical_heap = static_cast<PhysicalHeap*>(heap);
 #if REX_PLATFORM_GNU_LINUX
+  diagnostic_locked_known=false;
   uint32_t diagnostic_guest_protect=0;
   heap->QueryProtect(virtual_address,&diagnostic_guest_protect);
 #endif
@@ -568,8 +576,8 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
     const bool after_known=rex::memory::QueryProtect(host_address,after_length,after_access);
     if(!after_known || after_access!=rex::memory::PageAccess::kReadWrite) {
       HeapAllocationInfo info{};const bool info_known=heap->QueryRegionInfo(virtual_address,&info);
-      REXSYS_ERROR("Watch retry diagnostics: guest={:08X} host={:016X} heap_base={:08X} heap_type={} physical={:08X} guest_protect_before={:08X} info_known={} allocation_base={:08X} allocation_size={:08X} allocation_protect={:08X} state={:08X} protect_after={:08X} host_after_known={} host_after={}",
-        virtual_address,reinterpret_cast<uintptr_t>(host_address),heap->heap_base(),static_cast<unsigned>(heap->heap_type()),GetPhysicalAddress(virtual_address),diagnostic_guest_protect,info_known,info.allocation_base,info.allocation_size,info.allocation_protect,info.state,info.protect,after_known,static_cast<unsigned>(after_access));
+      REXSYS_ERROR("Watch retry diagnostics: guest={:08X} host={:016X} heap_base={:08X} heap_type={} physical={:08X} guest_protect_before={:08X} info_known={} allocation_base={:08X} allocation_size={:08X} allocation_protect={:08X} state={:08X} protect_after={:08X} host_after_known={} host_after={} locked_known={} locked_access={} locked_guest={:08X}",
+        virtual_address,reinterpret_cast<uintptr_t>(host_address),heap->heap_base(),static_cast<unsigned>(heap->heap_type()),GetPhysicalAddress(virtual_address),diagnostic_guest_protect,info_known,info.allocation_base,info.allocation_size,info.allocation_protect,info.state,info.protect,after_known,static_cast<unsigned>(after_access),diagnostic_locked_known,static_cast<unsigned>(diagnostic_locked_access),diagnostic_locked_guest);
     }
 #endif
     return true;
@@ -2337,8 +2345,9 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
     auto* diagnostic_host=membase_+virtual_address;
     rex::memory::PageAccess access=rex::memory::PageAccess::kNoAccess;
     size_t region_length=system_page_size_;
-    if(!rex::memory::QueryProtect(diagnostic_host,region_length,access) ||
-       access!=rex::memory::PageAccess::kReadWrite) {
+    diagnostic_locked_known=rex::memory::QueryProtect(diagnostic_host,region_length,access);
+    diagnostic_locked_access=access;diagnostic_locked_guest=virtual_address;
+    if(!diagnostic_locked_known || access!=rex::memory::PageAccess::kReadWrite) {
       const auto guest_page=rex::sat_sub(diagnostic_fault_page*system_page_size_,host_address_offset())>>page_size_shift_;
       REXSYS_ERROR("Watch repair under-lock: guest={:08X} system_page={} guest_page={} page_size={} host_offset={} watch_bit={} guest_protect={:08X} requested_first={} requested_last={} host_access={}",virtual_address,diagnostic_fault_page,guest_page,page_size_,host_address_offset(),bool(system_page_flags_[diagnostic_fault_page>>6].notify_on_invalidation&(uint64_t(1)<<(diagnostic_fault_page&63))),static_cast<uint32_t>(page_table_[guest_page].current_protect),system_page_first,system_page_last,static_cast<unsigned>(access));
     }
