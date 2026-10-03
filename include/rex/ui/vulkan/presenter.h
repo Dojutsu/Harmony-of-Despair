@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -123,6 +124,30 @@ class VulkanPresenter final : public Presenter {
   ~VulkanPresenter();
 
   const VulkanDevice* vulkan_device() const { return vulkan_device_; }
+
+#if REX_PLATFORM_GNU_LINUX
+  // Opt-in observation for bounded Linux startup probes. These counters do not
+  // submit work or change presentation decisions. Enable before attaching a
+  // surface. last_vk_result is the last observed surface/submit/present result,
+  // not a substitute for errors from other renderer initialization stages.
+  struct StartupDiagnostics {
+    uint64_t surface_creations;
+    uint64_t swapchain_creations;
+    uint64_t queue_submissions;
+    uint64_t presentations;
+    int32_t last_vk_result;
+  };
+  void EnableStartupDiagnostics() noexcept {
+    startup_diagnostics_enabled_.store(true, std::memory_order_relaxed);
+  }
+  StartupDiagnostics GetStartupDiagnostics() const noexcept {
+    return {startup_surface_creations_.load(std::memory_order_relaxed),
+            startup_swapchain_creations_.load(std::memory_order_relaxed),
+            startup_queue_submissions_.load(std::memory_order_relaxed),
+            startup_presentations_.load(std::memory_order_relaxed),
+            startup_last_vk_result_.load(std::memory_order_relaxed)};
+  }
+#endif
 
   static Surface::TypeFlags GetSurfaceTypesSupportedByInstance(
       const VulkanInstance::Extensions& instance_extensions);
@@ -447,6 +472,15 @@ class VulkanPresenter final : public Presenter {
 
   const VulkanDevice* vulkan_device_;
   const UISamplers* ui_samplers_;
+
+#if REX_PLATFORM_GNU_LINUX
+  std::atomic<bool> startup_diagnostics_enabled_{false};
+  std::atomic<uint64_t> startup_surface_creations_{0};
+  std::atomic<uint64_t> startup_swapchain_creations_{0};
+  std::atomic<uint64_t> startup_queue_submissions_{0};
+  std::atomic<uint64_t> startup_presentations_{0};
+  std::atomic<int32_t> startup_last_vk_result_{VK_SUCCESS};
+#endif
 
   // Static objects for guest output presentation, used only when painting the
   // main target (can be destroyed only after awaiting main target usage

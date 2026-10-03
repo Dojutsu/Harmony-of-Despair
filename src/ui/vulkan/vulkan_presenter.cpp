@@ -865,6 +865,14 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
             "unknown Xenia surface type");
         return SurfacePaintConnectResult::kFailureSurfaceUnusable;
     }
+#if REX_PLATFORM_GNU_LINUX
+    if (startup_diagnostics_enabled_.load(std::memory_order_relaxed)) {
+      startup_last_vk_result_.store(vulkan_surface_create_result, std::memory_order_relaxed);
+      if (vulkan_surface_create_result == VK_SUCCESS) {
+        startup_surface_creations_.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+#endif
     if (vulkan_surface_create_result != VK_SUCCESS) {
       REXLOG_ERROR("VulkanPresenter: Failed to create a Vulkan surface");
       return SurfacePaintConnectResult::kFailure;
@@ -884,6 +892,12 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
     }
     // Successfully attached (at least for now).
   }
+
+#if REX_PLATFORM_GNU_LINUX
+  if (startup_diagnostics_enabled_.load(std::memory_order_relaxed)) {
+    startup_swapchain_creations_.fetch_add(1, std::memory_order_relaxed);
+  }
+#endif
 
   // From now on, in case of failure,
   // paint_context_.DestroySwapchainAndVulkanSurface must be called before
@@ -2207,6 +2221,14 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
         }
       }
     }
+#if REX_PLATFORM_GNU_LINUX
+    if (startup_diagnostics_enabled_.load(std::memory_order_relaxed)) {
+      startup_last_vk_result_.store(submit_result, std::memory_order_relaxed);
+      if (submit_result == VK_SUCCESS) {
+        startup_queue_submissions_.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+#endif
     if (submit_result != VK_SUCCESS) {
       REXLOG_ERROR("VulkanPresenter: Failed to submit command buffers");
       fence_acqusition.SubmissionFailedOrDropped();
@@ -2242,6 +2264,14 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
         vulkan_device_->AcquireQueue(paint_context_.present_queue_family, 0);
     present_result = dfn.vkQueuePresentKHR(queue_acquisition.queue(), &present_info);
   }
+#if REX_PLATFORM_GNU_LINUX
+  if (startup_diagnostics_enabled_.load(std::memory_order_relaxed)) {
+    startup_last_vk_result_.store(present_result, std::memory_order_relaxed);
+    if (present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR) {
+      startup_presentations_.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+#endif
   switch (present_result) {
     case VK_SUCCESS:
       return PaintResult::kPresented;
