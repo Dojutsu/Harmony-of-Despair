@@ -164,8 +164,8 @@ AccessAttempt CaptureCompareExchange64(void* address, uint64_t expected, uint64_
   return Finish(frame, status, status ? 0 : 8);
 }
 AccessAttempt CaptureCopy(void* destination, const void* source, size_t length, CopyEndpoints endpoints) noexcept {
-  if (!length) return {true, 0, {}};
   AdmitCapture();
+  if (!length) return {true, 0, {}};
   platform::seh_initialize();
   auto frame = MakeFrame(&rex_guest_copy_site, &rex_guest_copy_fail, destination, length, -1);
   frame.low[1] = reinterpret_cast<uintptr_t>(source);

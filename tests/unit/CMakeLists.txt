@@ -138,14 +138,19 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
         INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
     add_test(NAME guest_access_capture COMMAND guest_access_capture_test)
     set_tests_properties(guest_access_capture PROPERTIES LABELS "linux;guest_fault" TIMEOUT 60)
+    target_sources(unit_tests PRIVATE core/guest_fault_state_test.cpp system/mmio_recovery_test.cpp ppc/guest_gateway_fault_test.cpp)
 endif()
 
+# Production hardware-fault contract, isolated from test framework handlers.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
-    target_sources(unit_tests PRIVATE core/guest_fault_state_test.cpp)
-endif()
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
-    target_sources(unit_tests PRIVATE system/mmio_recovery_test.cpp)
+    add_executable(linux_guest_fault_test core/linux_guest_fault_test.cpp)
+    target_link_libraries(linux_guest_fault_test PRIVATE rexruntime)
+    target_link_options(linux_guest_fault_test PRIVATE "-Wl,-z,now")
+    set_target_properties(linux_guest_fault_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>
+        INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
+    add_test(NAME linux_guest_fault COMMAND linux_guest_fault_test)
+    set_tests_properties(linux_guest_fault PROPERTIES LABELS "linux;guest_fault" TIMEOUT 60)
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
@@ -155,8 +160,4 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
             "${PROJECT_SOURCE_DIR}/tests/compile/guest_access_template_compile.py"
             --compiler "${CMAKE_CXX_COMPILER}")
     set_tests_properties(guest_access_template_compile PROPERTIES LABELS "linux;guest_fault;codegen" TIMEOUT 60)
-endif()
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
-    target_sources(unit_tests PRIVATE ppc/guest_gateway_fault_test.cpp)
 endif()
