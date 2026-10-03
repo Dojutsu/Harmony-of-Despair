@@ -5,6 +5,9 @@
 #include <rex/types.h>
 
 #include <cstring>
+#include <cstdio>
+#include <execinfo.h>
+#include <unistd.h>
 #include <limits>
 
 namespace rex::guest {
@@ -65,9 +68,13 @@ bool CompleteMappedWrite(void* address, const void* input, size_t width, bool un
   return true;
 }
 struct DeferredResult { MMIO::DeferredRecovery outcome; uint32_t value=0; };
+thread_local memory::PageAccess repair_before = memory::PageAccess::kNoAccess;
+thread_local bool repair_before_known = false;
 DeferredResult Resolve(const CapturedFault& fault,MMIO::DeferredAccessKind kind,
                        MMIO::DeferredTransaction& transaction) noexcept {
   auto* handler=MMIO::global_handler();
+  size_t before_length=memory::page_size();
+  repair_before_known=memory::QueryProtect(reinterpret_cast<void*>(fault.address),before_length,repair_before);
   if(!handler)return {MMIO::DeferredRecovery::kGuestFault};
   AdjudicationScope adjudication(fault);
   arch::HostThreadContext context{};
@@ -86,10 +93,28 @@ DeferredResult Resolve(const CapturedFault& fault,MMIO::DeferredAccessKind kind,
 }
 void PrepareRetry(const CapturedFault& fault,MMIO::DeferredTransaction& transaction) noexcept {
   memory::PageAccess access;size_t length=memory::page_size();
-  if(!memory::QueryProtect(reinterpret_cast<void*>(fault.address),length,access) ||
-     access==memory::PageAccess::kNoAccess ||
-     (fault.access_intent && access!=memory::PageAccess::kReadWrite && access!=memory::PageAccess::kExecuteReadWrite))
+  const bool after_known=memory::QueryProtect(reinterpret_cast<void*>(fault.address),length,access);
+  if(!after_known || access==memory::PageAccess::kNoAccess ||
+     (fault.access_intent && access!=memory::PageAccess::kReadWrite && access!=memory::PageAccess::kExecuteReadWrite)) {
+    // Bounded terminal diagnostics run after signal return, never in a handler.
+    std::fprintf(stderr,"{\"event\":\"deferred-repair-failure-context\",\"tid\":%ld,\"address\":\"0x%llx\",\"page\":\"0x%llx\",\"host_pc\":\"0x%llx\",\"reg_err\":%llu,\"intent\":%u,\"before_known\":%s,\"before\":%u,\"after_known\":%s,\"after\":%u}\n",
+      static_cast<long>(gettid()),static_cast<unsigned long long>(fault.address),
+      static_cast<unsigned long long>(fault.address&~(memory::page_size()-1)),
+      static_cast<unsigned long long>(fault.instruction_pointer),
+      static_cast<unsigned long long>(fault.page_fault_error),fault.access_intent,
+      repair_before_known?"true":"false",static_cast<unsigned>(repair_before),
+      after_known?"true":"false",static_cast<unsigned>(access));
+    if(auto* maps=std::fopen("/proc/self/maps","r")) {
+      char line[512];unsigned long long low=0,high=0;
+      while(std::fgets(line,sizeof(line),maps)) {
+        if(std::sscanf(line,"%llx-%llx",&low,&high)==2 && fault.address>=low && fault.address<high)
+          std::fprintf(stderr,"fault-host-map: %s",line);
+      }
+      std::fclose(maps);
+    }
+    void* frames[24];int count=backtrace(frames,24);backtrace_symbols_fd(frames,count,2);
     FaultContractFailure("deferred-repair-made-no-protection-progress");
+  }
   if(!transaction.BeginRetry())FaultContractFailure("invalid-deferred-retry-state");
 }
 template<class T> AccessResult<T> Terminal(const CapturedFault& fault) noexcept {

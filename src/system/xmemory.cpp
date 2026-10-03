@@ -556,8 +556,22 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
   // Will be rounded to physical page boundaries internally, so just pass 1 as
   // the length - guranteed not to cross page boundaries also.
   auto physical_heap = static_cast<PhysicalHeap*>(heap);
+#if REX_PLATFORM_GNU_LINUX
+  uint32_t diagnostic_guest_protect=0;
+  heap->QueryProtect(virtual_address,&diagnostic_guest_protect);
+#endif
   if (physical_heap->TriggerCallbacks(std::move(global_lock_locked_once), virtual_address, 1,
                                       is_write, false)) {
+#if REX_PLATFORM_GNU_LINUX
+    rex::memory::PageAccess after_access=rex::memory::PageAccess::kNoAccess;
+    size_t after_length=rex::memory::page_size();
+    const bool after_known=rex::memory::QueryProtect(host_address,after_length,after_access);
+    if(!after_known || after_access!=rex::memory::PageAccess::kReadWrite) {
+      HeapAllocationInfo info{};const bool info_known=heap->QueryRegionInfo(virtual_address,&info);
+      REXSYS_ERROR("Watch retry diagnostics: guest={:08X} host={:016X} heap_base={:08X} heap_type={} physical={:08X} guest_protect_before={:08X} info_known={} allocation_base={:08X} allocation_size={:08X} allocation_protect={:08X} state={:08X} protect_after={:08X} host_after_known={} host_after={}",
+        virtual_address,reinterpret_cast<uintptr_t>(host_address),heap->heap_base(),static_cast<unsigned>(heap->heap_type()),GetPhysicalAddress(virtual_address),diagnostic_guest_protect,info_known,info.allocation_base,info.allocation_size,info.allocation_protect,info.state,info.protect,after_known,static_cast<unsigned>(after_access));
+    }
+#endif
     return true;
   }
 
