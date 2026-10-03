@@ -312,8 +312,8 @@ int RunLinuxGraphicsProbe(const std::filesystem::path& log_path) {
       trace->Event(stage, "pass", "presenter detached; native window closed/destroyed; graphics provider/device released normally");
     }
     trace->Event("sdl-teardown", "pass", "actual SDL context destroyed after native window/provider");
-    result = 0;
     trace->Event("process", "exit", "exit_code=0; bounded actual presentation complete; no title/gameplay claim");
+    result = 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "Harmony graphics failure at %s: %s\n", stage.c_str(), error.what());
     if (trace) {
