@@ -34,7 +34,13 @@ else()
     add_executable(harmonyrecomp ${HARMONYRECOMP_SOURCES})
 endif()
 
-rexglue_setup_target(harmonyrecomp GPU_PLUGINS xenos)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    rexglue_setup_target(harmonyrecomp GPU_PLUGINS xenos
+        ENTRYPOINT "${CMAKE_CURRENT_SOURCE_DIR}/src/linux_main.cpp")
+    target_sources(harmonyrecomp PRIVATE src/linux_startup.cpp)
+else()
+    rexglue_setup_target(harmonyrecomp GPU_PLUGINS xenos)
+endif()
 
 add_executable(harmonyrecomp-import
     tools/import_main.cpp
@@ -101,4 +107,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/crypto/sha256.cpp")
     add_test(NAME dlc-marketplace-header COMMAND dlc_header_tests)
 else()
     message(WARNING "SHA-256 test source not found")
+endif()
+
+# Explicit, asset-free runtime initialization; normal title startup is unchanged.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME linux-startup COMMAND harmonyrecomp --startup-probe
+        "${CMAKE_CURRENT_BINARY_DIR}/startup-smoke.log")
+    set_tests_properties(linux-startup PROPERTIES TIMEOUT 60)
 endif()
