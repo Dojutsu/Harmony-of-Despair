@@ -15,6 +15,10 @@
 #include <string>
 
 #include "game_data.h"
+#if defined(__linux__)
+#include "linux_user_paths.h"
+REXCVAR_DECLARE(std::string, harmony_config_root);
+#endif
 
 class HarmonyrecompApp : public rex::ReXApp {
  public:
@@ -27,6 +31,13 @@ class HarmonyrecompApp : public rex::ReXApp {
   }
 
   void OnConfigurePaths(rex::PathConfig& paths) override {
+#if defined(__linux__)
+    const char* xdg = std::getenv("XDG_CONFIG_HOME");
+    const char* home = std::getenv("HOME");
+    paths.config_path = harmony::LinuxConfigPath(REXCVAR_GET(harmony_config_root),
+        xdg ? xdg : "", home ? home : "");
+    std::filesystem::create_directories(paths.config_path.parent_path());
+#endif
     // An explicit --game_data_root remains authoritative for developers and
     // advanced users. Normal launches use the private per-user import.
     using_imported_game_data_ = paths.game_data_root.empty();

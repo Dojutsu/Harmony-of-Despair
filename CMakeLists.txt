@@ -71,6 +71,11 @@ target_link_libraries(stfs_inspect PRIVATE rex::runtime)
 
 include(CTest)
 enable_testing()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(linux_user_paths_tests tests/linux_user_paths_test.cpp)
+    target_include_directories(linux_user_paths_tests PRIVATE src)
+    add_test(NAME linux-user-paths COMMAND linux_user_paths_tests)
+endif()
 add_executable(game_data_tests
     tests/game_data_tests.cpp
     src/game_data.cpp
