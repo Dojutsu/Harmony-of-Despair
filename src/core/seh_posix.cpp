@@ -13,13 +13,21 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 
 #include <signal.h>
 #include <cstdlib>  // std::abort()
+#include <initializer_list>
 
 #include <rex/platform/exceptions.h>
+
+#if REX_PLATFORM_LINUX
+#include "signal_posix.h"
+#endif
 
 namespace rex::platform {
 
 static thread_local SehThreadState tls_seh_state;
 static thread_local bool tls_seh_active = false;
+#if REX_PLATFORM_LINUX
+static struct sigaction previous_handlers[NSIG] {};
+#endif
 
 SehThreadState& seh_thread_state() {
   return tls_seh_state;
@@ -31,12 +39,15 @@ int seh_filter(uint32_t /*code*/, void* /*ep*/) {
 }
 
 /// Signal handler for SIGSEGV/SIGBUS/SIGFPE/SIGILL
-static void signal_handler(int sig, siginfo_t* info, void* /*ucontext*/) {
+static void signal_handler(int sig, siginfo_t* info, void* ucontext) {
   // Only handle if we're in SEH-protected code
   if (!tls_seh_active) {
-    // Not in SEH region - restore default handler and re-raise
+#if REX_PLATFORM_LINUX
+    ForwardSignal(sig, info, ucontext, previous_handlers[sig]);
+#else
     signal(sig, SIG_DFL);
     raise(sig);
+#endif
     return;
   }
 
@@ -68,8 +79,9 @@ static void signal_handler(int sig, siginfo_t* info, void* /*ucontext*/) {
   tls_seh_state.info[0] = 0;
   tls_seh_state.info[1] = address;
 
-  // Use libunwind to throw from signal context
-  // This works because libunwind can unwind through signal frames
+  // Existing guest SEH translation requires compiler support for unwinding
+  // from the faulting instruction, not merely signal-frame unwind metadata.
+  // Native startup probes must not assume this is a safe general fault escape.
   throw SehException(code, address);
 }
 
@@ -105,15 +117,23 @@ void seh_initialize() {
     return;  // Already initialized
   }
 
-  struct sigaction sa;
+  struct sigaction sa {};
   sa.sa_sigaction = signal_handler;
   sigemptyset(&sa.sa_mask);
-  sa.sa_flags = SA_SIGINFO | SA_NODEFER;  // SA_NODEFER allows re-entry for nested exceptions
-
+#if REX_PLATFORM_LINUX
+  sa.sa_flags = SA_SIGINFO;
+  for (int sig : {SIGSEGV, SIGBUS, SIGFPE, SIGILL}) {
+    if (sigaction(sig, &sa, &previous_handlers[sig]) != 0) {
+      std::abort();
+    }
+  }
+#else
+  sa.sa_flags = SA_SIGINFO | SA_NODEFER;
   sigaction(SIGSEGV, &sa, nullptr);
   sigaction(SIGBUS, &sa, nullptr);
   sigaction(SIGFPE, &sa, nullptr);
   sigaction(SIGILL, &sa, nullptr);
+#endif
 }
 
 bool& seh_active() {

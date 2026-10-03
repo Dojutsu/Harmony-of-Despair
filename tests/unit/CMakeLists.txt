@@ -115,3 +115,16 @@ target_link_libraries(accepted_invite_kernel_test PRIVATE rexruntime)
 set_target_properties(accepted_invite_kernel_test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
 add_test(NAME accepted_invite_kernel COMMAND accepted_invite_kernel_test)
+
+# Fatal native faults are isolated in bounded child processes. This fixture
+# targets the current Linux x86-64 startup ABI, not guest SEH unwind parity.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    add_executable(linux_startup_test core/linux_startup_test.cpp)
+    target_link_libraries(linux_startup_test PRIVATE rexruntime)
+    set_target_properties(linux_startup_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>
+        INSTALL_RPATH "$ORIGIN"
+        BUILD_WITH_INSTALL_RPATH ON)
+    add_test(NAME linux_startup COMMAND linux_startup_test)
+    set_tests_properties(linux_startup PROPERTIES LABELS "linux;startup" TIMEOUT 60)
+endif()

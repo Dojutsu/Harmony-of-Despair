@@ -31,6 +31,10 @@
 
 #include <ucontext.h>
 
+#if REX_PLATFORM_LINUX
+#include "signal_posix.h"
+#endif
+
 namespace rex::arch {
 
 bool signal_handlers_installed_ = false;
@@ -417,6 +421,13 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       return;
     }
   }
+#if REX_PLATFORM_LINUX
+  // MMIO/runtime handlers declined ownership. Preserve SEH/host handlers and
+  // the original crash signal rather than returning to the same fault forever.
+  auto& previous = signal_number == SIGILL ? original_sigill_handler_
+                                         : original_sigsegv_handler_;
+  platform::ForwardSignal(signal_number, signal_info, signal_context, previous);
+#endif
 }
 
 void ExceptionHandler::Install(Handler fn, void* data) {
