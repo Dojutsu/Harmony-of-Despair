@@ -139,6 +139,39 @@
             "displayName": "macOS ARM64",
             "description": "Multi-config build for macOS ARM64 using Clang",
             "inherits": "mac-arm64-base"
+        },
+        {
+            "name": "linux-steamos-amd64-l0",
+            "displayName": "SteamOS Linux AMD64 L0",
+            "description": "Native x86-64 SDK preparation with Clang 19 in the pinned Steam Linux Runtime 4 SDK",
+            "inherits": "linux-base",
+            "binaryDir": "$env{REXGLUE_LINUX_BUILD_ROOT}/sdk",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "clang-19",
+                "CMAKE_CXX_COMPILER": "clang++-19",
+                "CMAKE_INSTALL_PREFIX": "$env{REXGLUE_LINUX_BUILD_ROOT}/sdk/install",
+                "REXGLUE_OUTPUT_DIR": "$env{REXGLUE_LINUX_BUILD_ROOT}/sdk/bin",
+                "REXGLUE_BUILD_TESTS": "ON",
+                "REXGLUE_USE_VULKAN": "ON",
+                "REXGLUE_ENABLE_FIDELITYFX": "OFF",
+                "REXGLUE_ENABLE_TRACY": "OFF",
+                "REXGLUE_ENABLE_PERF_COUNTERS": "OFF"
+            },
+            "condition": {
+                "type": "allOf",
+                "conditions": [
+                    {
+                        "type": "equals",
+                        "lhs": "${hostSystemName}",
+                        "rhs": "Linux"
+                    },
+                    {
+                        "type": "notEquals",
+                        "lhs": "$env{REXGLUE_LINUX_BUILD_ROOT}",
+                        "rhs": ""
+                    }
+                ]
+            }
         }
     ],
     "buildPresets": [
@@ -231,6 +264,57 @@
             "name": "mac-arm64-relwithdebinfo",
             "configurePreset": "mac-arm64",
             "configuration": "RelWithDebInfo"
+        },
+        {
+            "name": "linux-steamos-amd64-l0-sdk",
+            "displayName": "Linux L0 SDK/code generator and Vulkan plugin",
+            "configurePreset": "linux-steamos-amd64-l0",
+            "configuration": "Debug",
+            "targets": [
+                "rexglue",
+                "rexgpu-xenos"
+            ],
+            "condition": {
+                "type": "allOf",
+                "conditions": [
+                    {
+                        "type": "equals",
+                        "lhs": "${hostSystemName}",
+                        "rhs": "Linux"
+                    },
+                    {
+                        "type": "notEquals",
+                        "lhs": "$env{REXGLUE_LINUX_BUILD_ROOT}",
+                        "rhs": ""
+                    }
+                ]
+            }
+        },
+        {
+            "name": "linux-steamos-amd64-l0-unit",
+            "displayName": "Linux L0 complete native unit-test build",
+            "configurePreset": "linux-steamos-amd64-l0",
+            "configuration": "Debug",
+            "targets": [
+                "unit_tests",
+                "xgi_slot_array_test",
+                "accepted_invite_kernel_test"
+            ],
+            "condition": {
+                "type": "allOf",
+                "conditions": [
+                    {
+                        "type": "equals",
+                        "lhs": "${hostSystemName}",
+                        "rhs": "Linux"
+                    },
+                    {
+                        "type": "notEquals",
+                        "lhs": "$env{REXGLUE_LINUX_BUILD_ROOT}",
+                        "rhs": ""
+                    }
+                ]
+            }
         }
     ],
     "testPresets": [
@@ -323,6 +407,79 @@
             "name": "mac-arm64-relwithdebinfo",
             "configurePreset": "mac-arm64",
             "configuration": "RelWithDebInfo"
+        },
+        {
+            "name": "linux-steamos-amd64-l0-local",
+            "displayName": "Linux L0 native unit tests without broadcast fixtures",
+            "description": "Runs ordinary native unit/kernel tests; excludes the nine reviewed broadcast cases and two hidden gameplay fixtures.",
+            "configurePreset": "linux-steamos-amd64-l0",
+            "configuration": "Debug",
+            "output": {
+                "outputOnFailure": true
+            },
+            "filter": {
+                "include": {
+                    "name": "^(unit\\.|xgi_slot_array$|accepted_invite_kernel$)"
+                },
+                "exclude": {
+                    "name": "^unit\\.(LAN discovery advertises and returns a created session|unreachable session directory preserves LAN discovery|pending NAT traversal preserves LAN broadcast discovery|stopping a LAN advertisement removes the hosted session|production public Search leaves invite admission isolated|configured invite claim is one-flight and isolated from public Search|configured invite cancellation gates every discovery send boundary|configured invite reaches immutable READY result using its own endpoint|lease renewal cancellation rejects the in-flight late callback|gameplay directory worker survives manual admission and joins at shutdown|production admission to independent gameplay sockets fixture)$"
+                }
+            },
+            "execution": {
+                "jobs": 1,
+                "timeout": 60,
+                "noTestsAction": "error"
+            },
+            "condition": {
+                "type": "allOf",
+                "conditions": [
+                    {
+                        "type": "equals",
+                        "lhs": "${hostSystemName}",
+                        "rhs": "Linux"
+                    },
+                    {
+                        "type": "notEquals",
+                        "lhs": "$env{REXGLUE_LINUX_BUILD_ROOT}",
+                        "rhs": ""
+                    }
+                ]
+            }
+        },
+        {
+            "name": "linux-steamos-amd64-l0-broadcast-isolated",
+            "displayName": "Linux L0 nine broadcast tests in an isolated network",
+            "description": "Requires an isolated BuildServer network; do not run this preset on an unisolated playtest device.",
+            "configurePreset": "linux-steamos-amd64-l0",
+            "configuration": "Debug",
+            "output": {
+                "outputOnFailure": true
+            },
+            "filter": {
+                "include": {
+                    "name": "^unit\\.(LAN discovery advertises and returns a created session|unreachable session directory preserves LAN discovery|pending NAT traversal preserves LAN broadcast discovery|stopping a LAN advertisement removes the hosted session|production public Search leaves invite admission isolated|configured invite claim is one-flight and isolated from public Search|configured invite cancellation gates every discovery send boundary|configured invite reaches immutable READY result using its own endpoint|lease renewal cancellation rejects the in-flight late callback)$"
+                }
+            },
+            "execution": {
+                "jobs": 1,
+                "timeout": 60,
+                "noTestsAction": "error"
+            },
+            "condition": {
+                "type": "allOf",
+                "conditions": [
+                    {
+                        "type": "equals",
+                        "lhs": "${hostSystemName}",
+                        "rhs": "Linux"
+                    },
+                    {
+                        "type": "notEquals",
+                        "lhs": "$env{REXGLUE_LINUX_BUILD_ROOT}",
+                        "rhs": ""
+                    }
+                ]
+            }
         }
     ]
 }
