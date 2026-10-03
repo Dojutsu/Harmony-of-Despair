@@ -103,6 +103,10 @@ class MMIOHandler {
     friend class MMIOHandler;
     const uint64_t owner_id_;
     Phase phase_ = Phase::kUnstarted;
+    // Linux registered RAM/watch repair must remain protected from a new GPU
+    // watch until the unfinished native access completes. This is normal
+    // context RAII; no signal handler acquires or releases this mutex.
+    std::unique_lock<std::recursive_mutex> retry_lock_;
   };
   DeferredRecovery ResolveAccessFault(arch::Exception& exception,
                                      DeferredAccessKind kind,

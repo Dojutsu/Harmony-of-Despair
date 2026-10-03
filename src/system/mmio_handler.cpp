@@ -227,6 +227,7 @@ bool MMIOHandler::DeferredTransaction::CompleteNative() {
   rex::guest::RequireAccess();
   if (phase_ != Phase::kUnstarted) return false;
   phase_ = Phase::kCompleted;
+  if (retry_lock_.owns_lock()) retry_lock_.unlock();
   return true;
 }
 
@@ -237,6 +238,7 @@ bool MMIOHandler::DeferredTransaction::CompleteExplicit() {
     rex::guest::FaultContractFailure("mmio-completion-without-deferred-owner");
   if (phase_ != Phase::kUnstarted) return false;
   phase_ = Phase::kCompleted;
+  if (retry_lock_.owns_lock()) retry_lock_.unlock();
   return true;
 }
 
@@ -281,6 +283,14 @@ MMIOHandler::DeferredRecovery MMIOHandler::ResolveAccessFault(
         host_to_guest_virtual_context_,
         reinterpret_cast<void*>(exception.fault_address()));
     range = LookupRange(guest_address);
+  }
+  if (!range && !transaction.retry_lock_.owns_lock()) {
+    // Physical watches use this same lock. Keep the repair-to-native-retry
+    // interval atomic with respect to rewatching; otherwise a valid new watch
+    // can restore read-only protection before PrepareRetry checks progress.
+    // CompleteNative releases it after the single unfinished operation, and
+    // terminal/failure returns release it through transaction destruction.
+    transaction.retry_lock_ = global_critical_region_.Acquire();
   }
   if (range) {
     // The existing decoder/device ABI owns only 32-bit scalar transactions.
