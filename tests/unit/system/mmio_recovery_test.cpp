@@ -582,4 +582,99 @@ TEST_CASE("Linux real PhysicalHeap write watch defers notification and retries o
   REQUIRE(rex::memory::Protect(device_pointer, host_page_size, prior_access));
 
 }
+
+TEST_CASE("Linux physical watch repair excludes a concurrent rewatch until native completion",
+          "[linux][guest-fault][mmio][physical-watch][repair-race]") {
+  auto& memory=rex::testing::GetTestMemory();
+  auto* heap=memory.LookupHeapByType(true,65536);
+  REQUIRE(heap!=nullptr);
+  PhysicalAllocation allocation{heap};
+  REQUIRE(heap->Alloc(0x200000,65536,
+      rex::memory::kMemoryAllocationReserve|rex::memory::kMemoryAllocationCommit,
+      rex::memory::kMemoryProtectRead|rex::memory::kMemoryProtectWrite|
+      rex::memory::kMemoryProtectWriteCombine,false,&allocation.address));
+  auto address=allocation.address+0x41380;
+  auto* pointer=memory.TranslateVirtual<uint32_t*>(address);
+  *pointer=0x11223344;
+  PhysicalWatch watch;watch.expected_physical=memory.GetPhysicalAddress(address);
+  PhysicalRegistration registration{memory,memory.RegisterPhysicalMemoryInvalidationCallback(InvalidatePhysical,&watch)};
+  rex::guest::ExecutionActivation activation;
+  memory.EnablePhysicalMemoryAccessCallbacks(watch.expected_physical&~4095u,4096,true,false);
+  uint32_t value=0x00002609;
+  auto captured=rex::guest::CaptureWrite(pointer,&value,4);
+  REQUIRE_FALSE(captured.success);
+  REQUIRE(captured.fault.access_intent==1);
+  Handler::DeferredTransaction transaction;
+  REQUIRE(ResolveCaptured(captured.fault,Kind::kScalar32,transaction)==Recovery::kRetry);
+  bool rewatch_admitted=false;
+  std::thread gpu([&]{
+    rex::thread::global_critical_region region;
+    auto lock=region.TryAcquire();
+    rewatch_admitted=lock.owns_lock();
+    if(rewatch_admitted)
+      memory.EnablePhysicalMemoryAccessCallbacks(watch.expected_physical&~4095u,4096,true,false);
+  });
+  gpu.join();
+  CHECK_FALSE(rewatch_admitted);
+  rex::memory::PageAccess access=rex::memory::PageAccess::kNoAccess;
+  size_t length=4096;
+  REQUIRE(rex::memory::QueryProtect(pointer,length,access));
+  CHECK(access==rex::memory::PageAccess::kReadWrite);
+  CHECK(watch.notifications==1);
+  REQUIRE(transaction.BeginRetry());
+  auto completion=rex::guest::CaptureWrite(pointer,&value,4);
+  CHECK(completion.success);
+  if(completion.success) {
+    REQUIRE(transaction.CompleteNative());
+    CHECK(*pointer==value);
+  }
+  // Completion must release the watch lock, allowing a new legitimate watch.
+  // Use try-lock to keep a broken implementation bounded rather than hanging.
+  bool rewatch_after_completion=false;
+  std::thread next_gpu([&]{
+    rex::thread::global_critical_region region;
+    auto lock=region.TryAcquire();rewatch_after_completion=lock.owns_lock();
+    if(rewatch_after_completion)
+      memory.EnablePhysicalMemoryAccessCallbacks(watch.expected_physical&~4095u,4096,true,false);
+  });
+  next_gpu.join();
+  CHECK(rewatch_after_completion);
+  if(completion.success&&rewatch_after_completion) {
+    length=4096;REQUIRE(rex::memory::QueryProtect(pointer,length,access));
+    CHECK(access==rex::memory::PageAccess::kReadOnly);
+    auto second=rex::guest::TryWrite<uint32_t>(pointer,0x77889900);
+    REQUIRE(second.IsSuccess());CHECK(second.Value());CHECK(*pointer==0x77889900);
+    CHECK(watch.notifications==2);CHECK(watch.incorrect_phase==0);
+  }
+}
+
+TEST_CASE("Linux genuine unrepaired readonly watch still rejects retry progress",
+          "[linux][guest-fault][mmio][physical-watch][repair-no-progress]") {
+  auto& memory=rex::testing::GetTestMemory();auto* heap=memory.LookupHeapByType(true,65536);
+  REQUIRE(heap!=nullptr);PhysicalAllocation allocation{heap};
+  REQUIRE(heap->Alloc(65536,65536,
+    rex::memory::kMemoryAllocationReserve|rex::memory::kMemoryAllocationCommit,
+    rex::memory::kMemoryProtectRead|rex::memory::kMemoryProtectWrite,false,&allocation.address));
+  auto* pointer=memory.TranslateVirtual<uint32_t*>(allocation.address);*pointer=0x12345678;
+  PhysicalWatch watch;watch.expected_physical=memory.GetPhysicalAddress(allocation.address);
+  PhysicalRegistration registration{memory,memory.RegisterPhysicalMemoryInvalidationCallback(InvalidatePhysical,&watch)};
+  memory.EnablePhysicalMemoryAccessCallbacks(watch.expected_physical,4096,true,false);
+  REQUIRE(heap->Protect(allocation.address,65536,rex::memory::kMemoryProtectRead));
+  int fd[2];REQUIRE(pipe(fd)==0);auto child=fork();REQUIRE(child>=0);
+  if(!child) {
+    close(fd[0]);if(dup2(fd[1],STDERR_FILENO)==-1)_exit(92);close(fd[1]);alarm(5);
+    rex::guest::ExecutionActivation activation;
+    auto result=rex::guest::TryWrite<uint32_t>(pointer,0xDEADBEEF);
+    (void)result;_exit(94);
+  }
+  close(fd[1]);std::string diagnostic;char bytes[1024];ssize_t size;
+  while((size=read(fd[0],bytes,sizeof(bytes)))>0)diagnostic.append(bytes,size);
+  close(fd[0]);int status=0;REQUIRE(waitpid(child,&status,0)==child);
+  REQUIRE(WIFEXITED(status));CHECK(WEXITSTATUS(status)==rex::guest::kFaultContractFailureExitCode);
+  CHECK(diagnostic.find("deferred-repair-made-no-protection-progress")!=std::string::npos);
+  CHECK(diagnostic.find("terminate")==std::string::npos);
+  CHECK(*pointer==0x12345678);
+  rex::guest::ExecutionActivation cleanup;
+  REQUIRE(heap->Protect(allocation.address,65536,rex::memory::kMemoryProtectRead|rex::memory::kMemoryProtectWrite));
+}
 #endif
