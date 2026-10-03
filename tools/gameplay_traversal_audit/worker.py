@@ -1,4 +1,5 @@
 """Bounded loopback regression for the real directory worker and HTTP path."""
+import argparse
 import json
 import os
 from pathlib import Path
@@ -10,7 +11,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = Path(__file__).resolve().parents[2]
 
 def main():
-    output = ROOT / 'out' / ('gameplay-worker-' + time.strftime('%Y%m%d-%H%M%S'))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--unit-tests', type=Path,
+                        default=ROOT / 'out/reconcile-sdk/out/win-amd64/unit_tests.exe',
+                        help='native unit_tests executable; defaults to the Windows build')
+    parser.add_argument('--output-directory', type=Path,
+                        help='new fixture output directory; defaults to out/gameplay-worker-TIMESTAMP')
+    args = parser.parse_args()
+    binary = args.unit_tests.resolve()
+    output = (args.output_directory.resolve() if args.output_directory else
+              ROOT / 'out' / ('gameplay-worker-' + time.strftime('%Y%m%d-%H%M%S')))
     output.mkdir()
     marker = output / 'pending'
     counts = {}
@@ -48,7 +58,7 @@ def main():
     try:
         env = dict(os.environ, HARMONY_GAMEPLAY_WORKER_URL=f'http://127.0.0.1:{server.server_port}',
                    HARMONY_GAMEPLAY_WORKER_PENDING=str(marker), LOCALAPPDATA=str(output/'profile'))
-        result = subprocess.run([str(ROOT/'out/reconcile-sdk/out/win-amd64/unit_tests.exe'),
+        result = subprocess.run([str(binary),
                                  '[.gameplay-worker]', '--reporter', 'compact'],
                                 env=env, cwd=output, capture_output=True, text=True, timeout=20)
         (output/'native.log').write_text(result.stdout + result.stderr)
@@ -56,6 +66,8 @@ def main():
         assert result.returncode == 0, result.returncode
         assert len(counts) == 6 and all(n >= 2 for n in counts.values()), counts
         assert maximum == 1 and active == 0, (maximum, active)
+        print(json.dumps({'requests_per_user': counts, 'maximum_in_flight': maximum,
+                          'active_at_completion': active, 'native_returncode': result.returncode}))
         print('PASS: both driver modes; six queued users each; one worker; in-flight shutdown joined')
         print(output)
     finally:
