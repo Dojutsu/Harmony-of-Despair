@@ -146,3 +146,12 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     target_sources(unit_tests PRIVATE system/mmio_recovery_test.cpp)
 endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME guest_access_template_compile
+        COMMAND "${Python3_EXECUTABLE}" -B
+            "${PROJECT_SOURCE_DIR}/tests/compile/guest_access_template_compile.py"
+            --compiler "${CMAKE_CXX_COMPILER}")
+    set_tests_properties(guest_access_template_compile PROPERTIES LABELS "linux;guest_fault;codegen" TIMEOUT 60)
+endif()

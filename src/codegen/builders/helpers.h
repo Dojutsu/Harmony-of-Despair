@@ -280,8 +280,8 @@ inline void emitAtomicLoadReserve(BuilderContext& ctx, const char* ptr_type, con
   if (ctx.insn.operands[1] != 0)
     ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[1]));
   ctx.println("{}.u32;", ctx.r(ctx.insn.operands[2]));
-  ctx.println("\t{}.{} = *({}*)REX_RAW_ADDR({});", ctx.reserved(), reserved_field, ptr_type,
-              ctx.ea());
+  ctx.println("\t{}.{} = REX_LOAD_RESERVED_{}({});", ctx.reserved(), reserved_field,
+              std::strcmp(ptr_type, "uint32_t") == 0 ? "U32" : "U64", ctx.ea());
   ctx.println("\t{}.u64 = {}({}.{});", ctx.r(ctx.insn.operands[0]), bswap_func, ctx.reserved(),
               reserved_field);
 }
@@ -305,10 +305,9 @@ inline void emitAtomicStoreConditional(BuilderContext& ctx, const char* ptr_type
   ctx.println("\t{}.lt = 0;", ctx.cr(0));
   ctx.println("\t{}.gt = 0;", ctx.cr(0));
   ctx.println(
-      "\t{}.eq = __sync_bool_compare_and_swap(reinterpret_cast<{}*>(REX_RAW_ADDR({})), "
-      "{}.{}, {}({}.{}));",
-      ctx.cr(0), ptr_type, ctx.ea(), ctx.reserved(), field, bswap_func, ctx.r(ctx.insn.operands[0]),
-      field);
+      "\t{}.eq = REX_COMPARE_EXCHANGE_{}({}, {}.{}, {}({}.{}));",
+      ctx.cr(0), std::strcmp(ptr_type, "uint32_t") == 0 ? "U32" : "U64", ctx.ea(),
+      ctx.reserved(), field, bswap_func, ctx.r(ctx.insn.operands[0]), field);
   ctx.println("\t{}.so = {}.so;", ctx.cr(0), ctx.xer());
 }
 

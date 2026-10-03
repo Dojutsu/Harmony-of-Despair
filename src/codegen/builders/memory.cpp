@@ -547,7 +547,7 @@ bool build_lvx(BuilderContext& ctx) {
   emitVectorEA(ctx, "0xF");
   ctx.println(
       "\tsimde_mm_store_si128((simde__m128i*){}.u8, "
-      "simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)REX_RAW_ADDR({})), "
+      "simde_mm_shuffle_epi8(REX_LOAD_VECTOR({}), "
       "simde_mm_load_si128((simde__m128i*)VectorMaskL)));",
       ctx.v(ctx.insn.operands[0]), ctx.ea());
   return true;
@@ -557,7 +557,7 @@ bool build_lvlx(BuilderContext& ctx) {
   emitVectorTempEA(ctx);
   ctx.println(
       "\tsimde_mm_store_si128((simde__m128i*){}.u8, "
-      "simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)REX_RAW_ADDR({}.u32 & ~0xF)), "
+      "simde_mm_shuffle_epi8(REX_LOAD_VECTOR({}.u32 & ~0xF), "
       "simde_mm_load_si128((simde__m128i*)&VectorMaskL[({}.u32 & 0xF) * 16])));",
       ctx.v(ctx.insn.operands[0]), ctx.temp(), ctx.temp());
   return true;
@@ -567,7 +567,7 @@ bool build_lvrx(BuilderContext& ctx) {
   emitVectorTempEA(ctx);
   ctx.println(
       "\tsimde_mm_store_si128((simde__m128i*){}.u8, {}.u32 & 0xF ? "
-      "simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)REX_RAW_ADDR({}.u32 & ~0xF)), "
+      "simde_mm_shuffle_epi8(REX_LOAD_VECTOR({}.u32 & ~0xF), "
       "simde_mm_load_si128((simde__m128i*)&VectorMaskR[({}.u32 & 0xF) * 16])) : "
       "simde_mm_setzero_si128());",
       ctx.v(ctx.insn.operands[0]), ctx.temp(), ctx.temp(), ctx.temp());
@@ -646,7 +646,7 @@ bool build_stvrx(BuilderContext& ctx) {
 bool build_stvx(BuilderContext& ctx) {
   emitVectorEA(ctx, "0xF");
   ctx.println(
-      "\tsimde_mm_store_si128((simde__m128i*)REX_RAW_ADDR({}), "
+      "\tREX_STORE_VECTOR({}, "
       "simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*){}.u8), "
       "simde_mm_load_si128((simde__m128i*)VectorMaskL)));",
       ctx.ea(), ctx.v(ctx.insn.operands[0]));

@@ -133,6 +133,18 @@ extern PPCFuncMapping PPCFuncMappings[];
 
 #define REX_RAW_ADDR(x) (base + (u32)(x) + REX_PHYS_HOST_OFFSET(x))
 
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+#include <rex/platform/guest_memory.h>
+#define REX_LOAD_U8(x) rex::guest::Read<u8>(REX_RAW_ADDR(x))
+#define REX_LOAD_U16(x) __builtin_bswap16(rex::guest::Read<u16>(REX_RAW_ADDR(x)))
+#define REX_LOAD_U32(x) __builtin_bswap32(rex::guest::Read<u32>(REX_RAW_ADDR(x)))
+#define REX_LOAD_U64(x) __builtin_bswap64(rex::guest::Read<u64>(REX_RAW_ADDR(x)))
+#define REX_LOAD_STRING(x, len) rex::guest::ReadString(REX_RAW_ADDR(x), (len))
+#define REX_STORE_U8(x, y) rex::guest::Write<u8>(REX_RAW_ADDR(x), (y))
+#define REX_STORE_U16(x, y) rex::guest::Write<u16>(REX_RAW_ADDR(x), __builtin_bswap16(y))
+#define REX_STORE_U32(x, y) rex::guest::Write<u32>(REX_RAW_ADDR(x), __builtin_bswap32(y))
+#define REX_STORE_U64(x, y) rex::guest::Write<u64>(REX_RAW_ADDR(x), __builtin_bswap64(y))
+#else
 #define REX_LOAD_U8(x) (*(volatile u8*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
 #define REX_LOAD_U16(x) __builtin_bswap16(*(volatile u16*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
 #define REX_LOAD_U32(x) __builtin_bswap32(*(volatile u32*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
@@ -145,6 +157,8 @@ extern PPCFuncMapping PPCFuncMappings[];
 #define REX_STORE_U32(x, y) (*(volatile u32*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap32(y))
 #define REX_STORE_U64(x, y) (*(volatile u64*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)) = __builtin_bswap64(y))
 
+#endif
+
 #define REX_MEMORY_SIZE 0x100000000ull
 
 //=============================================================================
@@ -153,6 +167,48 @@ extern PPCFuncMapping PPCFuncMappings[];
 
 #define REX_IS_MMIO_ADDR(addr) ((addr) >= 0x7F000000u && (addr) < 0x80000000u)
 
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+#define REX_MM_STORE_U8(addr, val) \
+  do { u32 _address = (addr); auto _value = (val); \
+    if (REX_IS_MMIO_ADDR(_address)) { rex::guest::MmioWrite32(base, _address, static_cast<u32>(_value)); } \
+    else { rex::guest::Write<u8>(REX_RAW_ADDR(_address), _value); } \
+  } while (0)
+#define REX_MM_LOAD_U8(addr) \
+  ([&]() -> u8 { u32 _address = (addr); \
+    if (REX_IS_MMIO_ADDR(_address)) return static_cast<u8>(rex::guest::MmioRead32(base, _address)); \
+    return rex::guest::Read<u8>(REX_RAW_ADDR(_address)); \
+  }())
+#define REX_MM_STORE_U16(addr, val) \
+  do { u32 _address = (addr); auto _value = (val); \
+    if (REX_IS_MMIO_ADDR(_address)) { rex::guest::MmioWrite32(base, _address, static_cast<u32>(_value)); } \
+    else { rex::guest::Write<u16>(REX_RAW_ADDR(_address), __builtin_bswap16(_value)); } \
+  } while (0)
+#define REX_MM_LOAD_U16(addr) \
+  ([&]() -> u16 { u32 _address = (addr); \
+    if (REX_IS_MMIO_ADDR(_address)) return static_cast<u16>(rex::guest::MmioRead32(base, _address)); \
+    return __builtin_bswap16(rex::guest::Read<u16>(REX_RAW_ADDR(_address))); \
+  }())
+#define REX_MM_STORE_U32(addr, val) \
+  do { u32 _address = (addr); auto _value = (val); \
+    if (REX_IS_MMIO_ADDR(_address)) { rex::guest::MmioWrite32(base, _address, static_cast<u32>(_value)); } \
+    else { rex::guest::Write<u32>(REX_RAW_ADDR(_address), __builtin_bswap32(_value)); } \
+  } while (0)
+#define REX_MM_LOAD_U32(addr) \
+  ([&]() -> u32 { u32 _address = (addr); \
+    if (REX_IS_MMIO_ADDR(_address)) return static_cast<u32>(rex::guest::MmioRead32(base, _address)); \
+    return __builtin_bswap32(rex::guest::Read<u32>(REX_RAW_ADDR(_address))); \
+  }())
+#define REX_MM_STORE_U64(addr, val) \
+  do { u32 _address = (addr); u64 _value = (val); \
+    if (REX_IS_MMIO_ADDR(_address)) { rex::guest::MmioWrite32(base, _address, static_cast<u32>(_value >> 32)); rex::guest::MmioWrite32(base, _address + 4, static_cast<u32>(_value)); } \
+    else { rex::guest::Write<u64>(REX_RAW_ADDR(_address), __builtin_bswap64(_value)); } \
+  } while (0)
+#define REX_MM_LOAD_U64(addr) \
+  ([&]() -> u64 { u32 _address = (addr); \
+    if (REX_IS_MMIO_ADDR(_address)) return ([&]() { u32 _hi = rex::guest::MmioRead32(base, _address); u32 _lo = rex::guest::MmioRead32(base, _address + 4); return (static_cast<u64>(_hi) << 32) | _lo; }()); \
+    return __builtin_bswap64(rex::guest::Read<u64>(REX_RAW_ADDR(_address))); \
+  }())
+#else
 #define REX_MM_STORE_U8(addr, val)                                                         \
   do {                                                                                     \
     u32 _mmio_addr = (addr);                                                               \
@@ -238,6 +294,32 @@ extern PPCFuncMapping PPCFuncMappings[];
            (static_cast<u64>(_hi) << 32) | _lo;                                      \
          })                                                                          \
        : __builtin_bswap64(*(volatile u64*)(base + (addr) + REX_PHYS_HOST_OFFSET(addr))))
+
+#endif
+
+// The Windows backends preserve the original native expressions. Only Linux
+// guest accesses enter registered leaves; host vector temporaries remain native.
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+#define REX_LOAD_VECTOR(x) rex::guest::ReadVector<simde__m128i>(REX_RAW_ADDR(x))
+#define REX_STORE_VECTOR(x, y) rex::guest::WriteVector(REX_RAW_ADDR(x), (y))
+#define REX_LOAD_RESERVED_U32(x) rex::guest::ReadReserved32(REX_RAW_ADDR(x))
+#define REX_LOAD_RESERVED_U64(x) rex::guest::ReadReserved64(REX_RAW_ADDR(x))
+#define REX_COMPARE_EXCHANGE_U32(x, expected, value) \
+  (rex::guest::CompareExchange32(REX_RAW_ADDR(x), (expected), (value)) == (expected))
+#define REX_COMPARE_EXCHANGE_U64(x, expected, value) \
+  (rex::guest::CompareExchange64(REX_RAW_ADDR(x), (expected), (value)) == (expected))
+#define REX_FILL_BYTES(x, value, count) rex::guest::FillBytes(REX_RAW_ADDR(x), (value), (count))
+#else
+#define REX_LOAD_VECTOR(x) simde_mm_load_si128((simde__m128i*)REX_RAW_ADDR(x))
+#define REX_STORE_VECTOR(x, y) simde_mm_store_si128((simde__m128i*)REX_RAW_ADDR(x), (y))
+#define REX_LOAD_RESERVED_U32(x) (*(uint32_t*)REX_RAW_ADDR(x))
+#define REX_LOAD_RESERVED_U64(x) (*(uint64_t*)REX_RAW_ADDR(x))
+#define REX_COMPARE_EXCHANGE_U32(x, expected, value) \
+  __sync_bool_compare_and_swap(reinterpret_cast<uint32_t*>(REX_RAW_ADDR(x)), (expected), (value))
+#define REX_COMPARE_EXCHANGE_U64(x, expected, value) \
+  __sync_bool_compare_and_swap(reinterpret_cast<uint64_t*>(REX_RAW_ADDR(x)), (expected), (value))
+#define REX_FILL_BYTES(x, value, count) memset((void*)REX_RAW_ADDR(x), (value), (count))
+#endif
 
 //=============================================================================
 // Function Dispatch
