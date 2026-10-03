@@ -29,6 +29,49 @@ def load_lock(path):
     return lock
 
 
+
+def is_within(path, parent):
+    """Include bind-mount aliases by comparing existing ancestor identities."""
+    if path == parent or parent in path.parents:
+        return True
+    for candidate in (path, *path.parents):
+        try:
+            if os.path.samefile(candidate, parent):
+                return True
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+    return False
+
+
+def overlaps(left, right):
+    return is_within(left, right) or is_within(right, left)
+
+
+def repository_locations(repository):
+    """Protect worktree and shared Git storage without requiring Git for bootstrap."""
+    locations = [repository]
+    control = repository / ".git"
+    if control.is_dir():
+        metadata = control.resolve()
+    elif control.is_file():
+        text = control.read_text().strip()
+        if not text.startswith("gitdir: "):
+            raise ValueError("invalid source worktree Git pointer")
+        metadata = Path(text[len("gitdir: "):])
+        if not metadata.is_absolute():
+            metadata = repository / metadata
+        metadata = metadata.resolve()
+    else:
+        return locations
+    locations.append(metadata)
+    common = metadata / "commondir"
+    if common.is_file():
+        directory = Path(common.read_text().strip())
+        if not directory.is_absolute():
+            directory = metadata / directory
+        locations.append(directory.resolve())
+    return locations
+
 def inspect_archive(archive, existing=None):
     counts = {"regular": 0, "directory": 0, "symlink": 0, "hardlink": 0}
     total = 0
@@ -115,8 +158,8 @@ def main():
     lock = load_lock(args.lock)
     root = args.root.expanduser().resolve()
     repository = Path(__file__).resolve().parents[2]
-    if root == repository or repository in root.parents:
-        raise ValueError("environment root must be outside the source repository")
+    if any(overlaps(root, location) for location in repository_locations(repository)):
+        raise ValueError("environment root must be outside the source repository and Git metadata")
     sysroot = root / "sysroot"
     if sysroot.exists() and not (args.verify_existing or args.verify_only):
         raise ValueError("sysroot already exists; use --verify-existing to validate it without overwriting")

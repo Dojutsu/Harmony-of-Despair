@@ -12,11 +12,7 @@ import sys
 
 sys.dont_write_bytecode = True
 
-from bootstrap_steamrt4 import MARKER, check_layout, load_lock
-
-
-def overlaps(left, right):
-    return left == right or left in right.parents or right in left.parents
+from bootstrap_steamrt4 import MARKER, check_layout, load_lock, overlaps
 
 
 def bind_path(value):
