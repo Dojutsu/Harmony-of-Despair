@@ -2,6 +2,8 @@
 #include <rex/exception_handler.h>
 #include <rex/memory/utils.h>
 #include <rex/system/mmio_handler.h>
+#include <rex/system/thread_state.h>
+#include <rex/system/xmemory.h>
 #include <rex/types.h>
 
 #include <cstring>
@@ -14,11 +16,53 @@ namespace rex::guest {
 namespace {
 using MMIO = runtime::MMIOHandler;
 constexpr unsigned kRetryLimit = 8;
-void ValidateRange(const void* pointer,size_t width,bool atomic=false,bool vector=false) noexcept {
+void DiagnoseCrossPage(const void* pointer,size_t width,bool atomic,bool vector,bool write) noexcept {
+  const auto address=reinterpret_cast<uintptr_t>(pointer);
+  const auto page=memory::page_size();
+  auto* thread=runtime::ThreadState::Get();
+  std::fprintf(stderr,"{\"event\":\"rejected-cross-page-access\",\"tid\":%ld,\"guest_thread\":%u,\"address\":\"0x%llx\",\"width\":%zu,\"first_bytes\":%zu,\"alignment\":%zu,\"atomic\":%s,\"vector\":%s,\"write\":%s,\"native_access_started\":false}\n",
+    static_cast<long>(gettid()),thread?thread->thread_id():0,
+    static_cast<unsigned long long>(address),width,page-address%page,address%width,
+    atomic?"true":"false",vector?"true":"false",write?"true":"false");
+  for(auto target : {address,address+width-1}) {
+    memory::PageAccess access{};size_t length=page;
+    bool known=memory::QueryProtect(reinterpret_cast<void*>(target),length,access);
+    std::fprintf(stderr,"{\"event\":\"rejected-access-host-page\",\"page\":\"0x%llx\",\"known\":%s,\"protection\":%u}\n",
+      static_cast<unsigned long long>(target-target%page),known?"true":"false",static_cast<unsigned>(access));
+    if(thread) {
+      auto* memory=thread->memory();auto guest=memory->HostToGuestVirtual(reinterpret_cast<void*>(target));
+      if(auto* heap=memory->LookupHeap(guest)) {
+        memory::HeapAllocationInfo info{};bool allocated=heap->QueryRegionInfo(guest,&info);
+        std::fprintf(stderr,"{\"event\":\"rejected-access-guest-page\",\"guest\":\"0x%x\",\"physical\":\"0x%x\",\"heap\":\"0x%x\",\"heap_type\":%u,\"heap_page_size\":%u,\"allocated\":%s,\"allocation\":\"0x%x\",\"allocation_size\":%u,\"state\":%u,\"protection\":%u}\n",
+          guest,memory->GetPhysicalAddress(guest),heap->heap_base(),static_cast<unsigned>(heap->heap_type()),heap->page_size(),allocated?"true":"false",info.allocation_base,info.allocation_size,info.state,info.protect);
+      }
+    }
+    if(auto* maps=std::fopen("/proc/self/maps","r")) {
+      char line[512];unsigned long long low=0,high=0;
+      while(std::fgets(line,sizeof(line),maps))if(std::sscanf(line,"%llx-%llx",&low,&high)==2&&target>=low&&target<high)std::fprintf(stderr,"cross-page-host-map: %s",line);
+      std::fclose(maps);
+    }
+  }
+  if(thread) {
+    auto* context=thread->context();
+    const PPCRegister* registers[]={&context->r0,&context->r1,&context->r2,&context->r3,
+      &context->r4,&context->r5,&context->r6,&context->r7,&context->r8,&context->r9,
+      &context->r10,&context->r11,&context->r12,&context->r13,&context->r14,&context->r15,
+      &context->r16,&context->r17,&context->r18,&context->r19,&context->r20,&context->r21,
+      &context->r22,&context->r23,&context->r24,&context->r25,&context->r26,&context->r27,
+      &context->r28,&context->r29,&context->r30,&context->r31};
+    for(unsigned i=0;i<32;++i)std::fprintf(stderr,"cross-page-gpr[%u]=0x%llx\n",i,static_cast<unsigned long long>(registers[i]->u64));
+  }
+  void* frames[32];int count=backtrace(frames,32);backtrace_symbols_fd(frames,count,2);
+}
+void ValidateRange(const void* pointer,size_t width,bool atomic=false,bool vector=false,bool write=false) noexcept {
   auto address=reinterpret_cast<uintptr_t>(pointer);
   if(width>std::numeric_limits<uintptr_t>::max()-address) FaultContractFailure("access-range-overflow");
   auto page=memory::page_size();
-  if(width>page || address%page>page-width) FaultContractFailure("unadmitted-cross-page-access");
+  if(width>page || address%page>page-width) {
+    DiagnoseCrossPage(pointer,width,atomic,vector,write);
+    FaultContractFailure("unadmitted-cross-page-access");
+  }
   if((atomic&&address%width)||(vector&&address%16)) FaultContractFailure("unadmitted-access-alignment");
 }
 void RejectMappedAtomic(const void* address,size_t width) noexcept {
@@ -150,7 +194,7 @@ AccessResult<bool> TryReadBytes(const void* address,void* output,size_t width,bo
   FaultContractFailure("read-retry-budget-exhausted");
 }
 AccessResult<bool> TryWriteBytes(void* address,const void* value,size_t width,bool vector) noexcept {
-  RequireAccess();ValidateRange(address,width,false,vector);MMIO::DeferredTransaction transaction;
+  RequireAccess();ValidateRange(address,width,false,vector,true);MMIO::DeferredTransaction transaction;
   if(CompleteMappedWrite(address,value,width,vector,transaction))return AccessResult<bool>::Success(true);
   for(unsigned attempt=0;attempt<kRetryLimit;++attempt){
     auto captured=vector?CaptureVectorWrite(address,value):CaptureWrite(address,value,width);
@@ -165,7 +209,7 @@ AccessResult<bool> TryWriteBytes(void* address,const void* value,size_t width,bo
   FaultContractFailure("write-retry-budget-exhausted");
 }
 template<class T> AccessResult<T> CompareExchange(void* address,T expected,T desired) noexcept {
-  RequireAccess();ValidateRange(address,sizeof(T),true);RejectMappedAtomic(address,sizeof(T));MMIO::DeferredTransaction transaction;
+  RequireAccess();ValidateRange(address,sizeof(T),true,false,true);RejectMappedAtomic(address,sizeof(T));MMIO::DeferredTransaction transaction;
   for(unsigned attempt=0;attempt<kRetryLimit;++attempt){
     T previous{};
     AccessAttempt capture;
