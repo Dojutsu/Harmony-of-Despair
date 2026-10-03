@@ -26,6 +26,7 @@ def main():
     parser.add_argument('--sdk', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--build-id', required=True)
+    parser.add_argument('--l2', action='store_true', help='include production guest-fault acceptance fixtures')
     args = parser.parse_args()
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,79}', args.build_id):
         parser.error('build-id must be a simple directory name')
@@ -53,6 +54,12 @@ def main():
     # The helper must use the SAME packaged runtime ABI as Harmony. Its physical
     # execution is part of acceptance, rather than assuming equivalence from a name.
     native.append(helpers[0])
+    if args.l2:
+        for name in ('linux_guest_fault_test', 'unit_tests'):
+            matches = [p for p in sdk.rglob(name) if p.is_file()]
+            if len(matches) != 1:
+                parser.error('expected exactly one production L2 fixture: ' + name)
+            native.append(matches[0])
     binaries = {p.name: p.resolve() for p in native}
     dependencies = {}
     for original in native:
@@ -80,7 +87,8 @@ def main():
         raise RuntimeError('pinned ELF interpreter was not found')
     binaries[loader_name] = dependencies.pop(loader_name)
     manifest = {'schema': 1, 'build_id': args.build_id, 'created_utc': datetime.now(timezone.utc).isoformat(),
-                'architecture': 'linux/x86-64', 'scope': 'L1 asset-free native Harmony startup',
+                'architecture': 'linux/x86-64', 'scope': 'L2 checked guest recovery and bounded real guest execution' if args.l2 else 'L1 asset-free native Harmony startup',
+                'l2': args.l2,
                 'runtime': 'Steamrt4 4.0.20260805.254769', 'compiler': 'Clang 19.1.7',
                 'carrier_image_id': 'sha256:bf8527eb54c3680e728d5b4b383a8ba730d72dae7236fbc8dff97ed6b224a731',
                 'source': {}, 'files': {}}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy an immutable, verified L1 bundle and collect a bounded headless trace."""
+"""Deploy an immutable verified startup/recovery bundle and collect bounded traces."""
 import argparse
 from datetime import datetime, timezone
 import hashlib
@@ -175,8 +175,20 @@ try:
     loader = [str(build / "bin/ld-linux-x86-64.so.2"), "--library-path",
               str(build / "bin") + ":" + str(build / "lib")]
     results = {}
-    for name, args, timeout in [("harmony", ["harmonyrecomp", "--startup-probe", str(run / "runtime.log")], 60),
-                                ("sdk", ["linux_startup_test"], 20)]:
+    l2 = manifest.get("l2") is True
+    probes = []
+    if l2:
+        environment["HARMONY_TEST_ELF_LOADER"] = loader[0]
+        environment["HARMONY_TEST_LIBRARY_PATH"] = loader[2]
+        if not {"bin/linux_guest_fault_test", "bin/unit_tests"} <= set(manifest["files"]):
+            raise ValueError("L2 bundle is missing production fixtures")
+        probes += [("guest-fault", ["linux_guest_fault_test"], 30),
+                   ("recovery", ["unit_tests", "[guest_fault],[guest-fault]", "--reporter", "junit", "--out", str(run / "recovery.xml")], 60)]
+    probes += [("harmony", ["harmonyrecomp", "--startup-probe", str(run / "runtime.log")], 60),
+                                ("sdk", ["linux_startup_test"], 20)]
+    if l2:
+        probes += [("guest", ["harmonyrecomp", "--guest-probe", str(run / "guest-runtime.log")], 60)]
+    for name, args, timeout in probes:
         receipt["stage"] = name + "-execution"
         command = loader + [str(build / "bin" / args[0]), *args[1:]]
         with (run / (name + ".stdout.log")).open("wb") as stdout, (run / (name + ".stderr.log")).open("wb") as stderr:
@@ -195,9 +207,29 @@ try:
                     code = process.wait()
         results[name] = {"argv": command, "environment": environment, "exit_code": code,
                          "signal": -code if code < 0 else None, "timed_out": timed_out}
+        receipt["executions"] = results
+        if l2 and (code or timed_out or (run / (name + ".stderr.log")).stat().st_size):
+            raise ValueError("L2 prerequisite failed before further execution: " + name)
     receipt["executions"] = results
     receipt["stage"] = "trace-validation"
     receipt["startup_events"] = validate_trace(run / "runtime.log.jsonl")
+    if l2:
+        receipt["guest_events"] = validate_trace(run / "guest-runtime.log.jsonl")
+        events = [json.loads(x) for x in (run / "guest-runtime.log.jsonl").read_text().splitlines()]
+        if not {("guest-fault-recovery", "pass"), ("guest-execution", "pass")} <= {(e["stage"], e["status"]) for e in events}:
+            raise ValueError("bounded real guest execution did not pass")
+        lines = (run / "guest-fault.stdout.log").read_text().splitlines()
+        summary = json.loads(lines[-1])
+        if summary.get("stage") != "linux_guest_fault_summary" or summary.get("failures") != 0 or summary.get("checks", 0) < 236:
+            raise ValueError("production hardware-fault fixture did not qualify")
+        receipt["guest_fault_checks"] = summary["checks"]
+        import xml.etree.ElementTree as ET
+        xml = ET.parse(run / "recovery.xml")
+        if not xml.findall(".//testcase") or xml.findall(".//failure") or xml.findall(".//error"):
+            raise ValueError("production recovery unit tests did not qualify")
+        receipt["recovery_test_sections"] = len(xml.findall(".//testcase"))
+        if any((run / (name + ".stderr.log")).stat().st_size for name in results):
+            raise ValueError("unexpected stderr in qualifying L2 execution")
     if any(r["exit_code"] or r["timed_out"] for r in results.values()):
         raise ValueError("startup or SDK test did not exit successfully")
     temporary = root / (".current-" + run_id)
@@ -210,7 +242,9 @@ finally:
     upload.unlink(missing_ok=True)
     (run / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     names = ["receipt.json", "harmony.stdout.log", "harmony.stderr.log", "sdk.stdout.log",
-             "sdk.stderr.log", "runtime.log", "runtime.log.jsonl"]
+             "sdk.stderr.log", "runtime.log", "runtime.log.jsonl", "guest-fault.stdout.log", "guest-fault.stderr.log",
+             "recovery.stdout.log", "recovery.stderr.log", "recovery.xml", "guest.stdout.log", "guest.stderr.log",
+             "guest-runtime.log", "guest-runtime.log.jsonl"]
     receipt["artifacts"] = [n for n in names if (run / n).is_file() and not (run / n).is_symlink()]
     print(json.dumps(receipt))
 '''
