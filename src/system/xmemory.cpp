@@ -2213,6 +2213,9 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
   uint32_t system_page_first = (heap_relative_address + host_address_offset()) / system_page_size_;
   uint32_t system_page_last =
       (heap_relative_address + length - 1 + host_address_offset()) / system_page_size_;
+#if REX_PLATFORM_GNU_LINUX
+  const auto diagnostic_fault_page=system_page_first;
+#endif
   system_page_last = std::min(system_page_last, system_page_count_ - 1);
   assert_true(system_page_first <= system_page_last);
   uint32_t block_index_first = system_page_first >> 6;
@@ -2326,6 +2329,21 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
                            rex::memory::PageAccess::kReadWrite);
     }
   }
+
+#if REX_PLATFORM_GNU_LINUX
+  // The global watch lock is still held here: distinguish an unrepaired page
+  // from a later rewatch without changing watch/protection ownership.
+  if(unprotect) {
+    auto* diagnostic_host=membase_+virtual_address;
+    rex::memory::PageAccess access=rex::memory::PageAccess::kNoAccess;
+    size_t region_length=system_page_size_;
+    if(!rex::memory::QueryProtect(diagnostic_host,region_length,access) ||
+       access!=rex::memory::PageAccess::kReadWrite) {
+      const auto guest_page=rex::sat_sub(diagnostic_fault_page*system_page_size_,host_address_offset())>>page_size_shift_;
+      REXSYS_ERROR("Watch repair under-lock: guest={:08X} system_page={} guest_page={} page_size={} host_offset={} watch_bit={} guest_protect={:08X} requested_first={} requested_last={} host_access={}",virtual_address,diagnostic_fault_page,guest_page,page_size_,host_address_offset(),bool(system_page_flags_[diagnostic_fault_page>>6].notify_on_invalidation&(uint64_t(1)<<(diagnostic_fault_page&63))),static_cast<uint32_t>(page_table_[guest_page].current_protect),system_page_first,system_page_last,static_cast<unsigned>(access));
+    }
+  }
+#endif
 
   // Mark pages as not write-watched.
   for (uint32_t i = block_index_first; i <= block_index_last; ++i) {
