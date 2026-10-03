@@ -1,5 +1,6 @@
 #include <rex/platform/guest_memory.h>
 #include <rex/exception_handler.h>
+#include <rex/logging.h>
 #include <rex/memory/utils.h>
 #include <rex/system/mmio_handler.h>
 #include <rex/system/thread_state.h>
@@ -16,6 +17,31 @@ namespace rex::guest {
 namespace {
 using MMIO = runtime::MMIOHandler;
 constexpr unsigned kRetryLimit = 8;
+// Only the observed non-atomic scalar16 RAM read is admitted. Stage both
+// bytes before publishing a value: a terminal second-byte fault cannot commit
+// a partial guest register, and the completed first byte is never replayed.
+// Physical aliases/watches, devices, reservations, SIMD and other widths keep
+// their independent admission guards. This is not an atomic snapshot contract.
+bool AdmitCrossPageRamRead16(const void* pointer) noexcept {
+  const auto address=reinterpret_cast<uintptr_t>(pointer);
+  if(address==std::numeric_limits<uintptr_t>::max() ||
+     address%memory::page_size()!=memory::page_size()-1)return false;
+  auto* thread=runtime::ThreadState::Get();
+  if(!thread || !thread->memory())return false;
+  auto* memory=thread->memory();
+  const auto guest=memory->HostToGuestVirtual(pointer);
+  if(guest==UINT32_MAX || memory->TranslateVirtual(guest)!=pointer ||
+     memory->TranslateVirtual(guest+1)!=reinterpret_cast<const uint8_t*>(pointer)+1)return false;
+  auto* first=memory->LookupHeap(guest);auto* second=memory->LookupHeap(guest+1);
+  if(!first || first!=second || first->heap_type()!=memory::HeapType::kGuestVirtual)return false;
+  memory::HeapAllocationInfo a{},b{};
+  if(!first->QueryRegionInfo(guest,&a) || !second->QueryRegionInfo(guest+1,&b) ||
+     !(a.state&memory::kMemoryAllocationCommit) || !(b.state&memory::kMemoryAllocationCommit) ||
+     !(a.protect&memory::kMemoryProtectRead) || !(b.protect&memory::kMemoryProtectRead) ||
+     a.allocation_base!=b.allocation_base || a.allocation_size!=b.allocation_size)return false;
+  auto* handler=MMIO::global_handler();
+  return !handler || !handler->IsMappedRange(pointer,2);
+}
 void DiagnoseCrossPage(const void* pointer,size_t width,bool atomic,bool vector,bool write) noexcept {
   const auto address=reinterpret_cast<uintptr_t>(pointer);
   const auto page=memory::page_size();
@@ -174,7 +200,21 @@ void RequireFillRange(void* destination,size_t length) noexcept {
     FaultContractFailure("unadmitted-mapped-bulk-access");
 }
 AccessResult<bool> TryReadBytes(const void* address,void* output,size_t width,bool vector,bool reservation) noexcept {
-  RequireAccess();ValidateRange(address,width,reservation,vector);
+  RequireAccess();
+  if(width==2 && !vector && !reservation && AdmitCrossPageRamRead16(address)) {
+    unsigned char staged[2]{};
+    for(unsigned i=0;i<2;++i) {
+      auto part=TryReadBytes(static_cast<const unsigned char*>(address)+i,staged+i,1);
+      if(part.Failed())return part.Forward();
+    }
+    std::memcpy(output,staged,2);
+    // Bounded normal-context qualification evidence; never log guest contents.
+    static thread_local unsigned observations=0;
+    if(observations++<2)REXLOG_DEBUG("GUEST_CROSS_PAGE_READ16_COMPLETE address={:016X} width=2 completed=2 thread={}",
+      reinterpret_cast<uintptr_t>(address),gettid());
+    return AccessResult<bool>::Success(true);
+  }
+  ValidateRange(address,width,reservation,vector);
   if(reservation)RejectMappedAtomic(address,width);
   MMIO::DeferredTransaction transaction;
   if(CompleteMappedRead(address,output,width,vector||reservation,transaction))return AccessResult<bool>::Success(true);
