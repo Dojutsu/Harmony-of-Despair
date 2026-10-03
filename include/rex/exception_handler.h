@@ -527,6 +527,12 @@ class ExceptionHandler {
   // Handlers are called in the order they are installed.
   static void Install(Handler fn, void* data);
 
+#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
+  // Call registered callbacks only from normal context. Linux never invokes
+  // these arbitrary runtime callbacks from a signal handler.
+  static bool DispatchDeferred(Exception* exception);
+#endif
+
   // Uninstalls a previously-installed exception handler.
   static void Uninstall(Handler fn, void* data);
 };

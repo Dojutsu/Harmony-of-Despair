@@ -10,11 +10,11 @@
  *
  * @remarks     Provides cross-platform SEH support for recompiled PPC code.
  *              On Windows, uses native __try/__except (works with MSVC and Clang-cl).
- *              On Linux, uses signal handlers for SIGSEGV/SIGBUS.
+ *              On Linux x86-64, registered access leaves capture SIGSEGV data faults.
  *
  * @usage       1. Call rex::initialize_seh() at startup
  *              2. Generated code wraps SEH scopes with try/catch blocks
- *              3. Hardware exceptions (null deref, access violation) throw SehException
+ *              3. Linux owned leaves return before normal runtime code delivers SehException
  *              4. Catch blocks call finally handlers and rethrow
  */
 

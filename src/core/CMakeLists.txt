@@ -135,3 +135,9 @@ if(REXGLUE_ENABLE_PERF_COUNTERS)
     target_compile_definitions(rexcore PUBLIC
         $<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PERF_COUNTERS>)
 endif()
+
+# Registered data-fault leaves are admitted only on Linux x86-64.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    enable_language(ASM)
+    target_sources(rexcore PRIVATE guest_access_posix.cpp guest_access_amd64.S)
+endif()

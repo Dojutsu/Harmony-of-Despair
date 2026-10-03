@@ -128,3 +128,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
     add_test(NAME linux_startup COMMAND linux_startup_test)
     set_tests_properties(linux_startup PROPERTIES LABELS "linux;startup" TIMEOUT 60)
 endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    add_executable(guest_access_capture_test core/guest_access_capture_test.cpp)
+    target_link_libraries(guest_access_capture_test PRIVATE rexruntime)
+    set_target_properties(guest_access_capture_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>
+        INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
+    add_test(NAME guest_access_capture COMMAND guest_access_capture_test)
+    set_tests_properties(guest_access_capture PROPERTIES LABELS "linux;guest_fault" TIMEOUT 60)
+endif()

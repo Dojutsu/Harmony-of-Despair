@@ -33,6 +33,7 @@
 
 #if REX_PLATFORM_LINUX
 #include "signal_posix.h"
+#include <rex/platform/seh.h>
 #endif
 
 namespace rex::arch {
@@ -55,6 +56,15 @@ std::pair<ExceptionHandler::Handler, void*> handlers_[kMaxHandlerCount];
 
 static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
                                      void* signal_context) {
+#if REX_PLATFORM_LINUX
+  // Registered access capture lives in SEH's minimal signal entry. Linux
+  // callbacks are dispatched only from normal runtime context below.
+  auto& previous = signal_number == SIGILL ? original_sigill_handler_
+                                         : original_sigsegv_handler_;
+  platform::ForwardSignal(signal_number, signal_info, signal_context, previous);
+  return;
+#else
+
 #if REX_PLATFORM_MAC
   // Darwin's mcontext_t is already a pointer (__darwin_mcontext64*); copy it.
   mcontext_t mcontext = reinterpret_cast<ucontext_t*>(signal_context)->uc_mcontext;
@@ -428,9 +438,13 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
                                          : original_sigsegv_handler_;
   platform::ForwardSignal(signal_number, signal_info, signal_context, previous);
 #endif
+#endif
 }
 
 void ExceptionHandler::Install(Handler fn, void* data) {
+#if REX_PLATFORM_LINUX
+  platform::seh_initialize();
+#else
   if (!signal_handlers_installed_) {
     struct sigaction signal_handler;
 
@@ -452,6 +466,7 @@ void ExceptionHandler::Install(Handler fn, void* data) {
     signal_handlers_installed_ = true;
   }
 
+#endif
   for (size_t i = 0; i < rex::countof(handlers_); ++i) {
     if (!handlers_[i].first) {
       handlers_[i].first = fn;
@@ -460,6 +475,13 @@ void ExceptionHandler::Install(Handler fn, void* data) {
     }
   }
   assert_always("Too many exception handlers installed");
+}
+
+bool ExceptionHandler::DispatchDeferred(Exception* exception) {
+  for (size_t i = 0; i < rex::countof(handlers_) && handlers_[i].first; ++i) {
+    if (handlers_[i].first(exception, handlers_[i].second)) return true;
+  }
+  return false;
 }
 
 void ExceptionHandler::Uninstall(Handler fn, void* data) {
@@ -481,6 +503,7 @@ void ExceptionHandler::Uninstall(Handler fn, void* data) {
       break;
     }
   }
+#if !REX_PLATFORM_LINUX
   if (!has_any) {
     if (signal_handlers_installed_) {
       if (sigaction(SIGILL, &original_sigill_handler_, NULL) != 0) {
@@ -497,6 +520,7 @@ void ExceptionHandler::Uninstall(Handler fn, void* data) {
       signal_handlers_installed_ = false;
     }
   }
+#endif
 }
 
 }  // namespace rex::arch

@@ -14,11 +14,13 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 #include <signal.h>
 #include <cstdlib>  // std::abort()
 #include <initializer_list>
+#include <mutex>
 
 #include <rex/platform/exceptions.h>
 
 #if REX_PLATFORM_LINUX
 #include "signal_posix.h"
+#include <rex/platform/guest_access.h>
 #endif
 
 namespace rex::platform {
@@ -27,6 +29,7 @@ static thread_local SehThreadState tls_seh_state;
 static thread_local bool tls_seh_active = false;
 #if REX_PLATFORM_LINUX
 static struct sigaction previous_handlers[NSIG] {};
+static std::once_flag linux_signal_initialization;
 #endif
 
 SehThreadState& seh_thread_state() {
@@ -34,20 +37,27 @@ SehThreadState& seh_thread_state() {
 }
 
 int seh_filter(uint32_t /*code*/, void* /*ep*/) {
-  // Not used on POSIX - signal handlers throw directly
+  // Linux guest state is populated by normal-context fault consumption.
   return 0;
 }
 
 /// Signal handler for SIGSEGV/SIGBUS/SIGFPE/SIGILL
 static void signal_handler(int sig, siginfo_t* info, void* ucontext) {
+#if REX_PLATFORM_LINUX
+  guest::EnterSignalContext();
+  if (guest::CaptureOwnedSignal(sig, info, ucontext)) {
+    guest::LeaveSignalContext();
+    return;
+  }
+  // An arbitrary protected C++ instruction is not a recovery boundary. Never
+  // throw or run a runtime callback from this signal context.
+  ForwardSignal(sig, info, ucontext, previous_handlers[sig]);
+  guest::LeaveSignalContext();
+#else
   // Only handle if we're in SEH-protected code
   if (!tls_seh_active) {
-#if REX_PLATFORM_LINUX
-    ForwardSignal(sig, info, ucontext, previous_handlers[sig]);
-#else
     signal(sig, SIG_DFL);
     raise(sig);
-#endif
     return;
   }
 
@@ -83,6 +93,7 @@ static void signal_handler(int sig, siginfo_t* info, void* ucontext) {
   // from the faulting instruction, not merely signal-frame unwind metadata.
   // Native startup probes must not assume this is a safe general fault escape.
   throw SehException(code, address);
+#endif
 }
 
 [[noreturn]] void seh_rethrow() {
@@ -113,10 +124,21 @@ static void signal_handler(int sig, siginfo_t* info, void* ucontext) {
 }
 
 void seh_initialize() {
-  if (g_seh_initialized.exchange(true)) {
-    return;  // Already initialized
-  }
-
+#if REX_PLATFORM_LINUX
+  if (g_seh_initialized.load(std::memory_order_acquire)) return;
+  std::call_once(linux_signal_initialization, [] {
+    struct sigaction sa {};
+    sa.sa_sigaction = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO;
+    for (int sig : {SIGSEGV, SIGBUS, SIGFPE, SIGILL}) {
+      if (sigaction(sig, &sa, &previous_handlers[sig]) != 0) std::abort();
+    }
+    // Other guest threads cannot enter a leaf until all dispositions exist.
+    g_seh_initialized.store(true, std::memory_order_release);
+  });
+#else
+  if (g_seh_initialized.exchange(true)) return;
   struct sigaction sa {};
   sa.sa_sigaction = signal_handler;
   sigemptyset(&sa.sa_mask);
@@ -133,6 +155,7 @@ void seh_initialize() {
   sigaction(SIGBUS, &sa, nullptr);
   sigaction(SIGFPE, &sa, nullptr);
   sigaction(SIGILL, &sa, nullptr);
+#endif
 #endif
 }
 
