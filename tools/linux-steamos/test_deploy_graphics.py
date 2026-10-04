@@ -15,6 +15,26 @@ from unittest.mock import patch
 import deploy_graphics as graphics
 
 
+class QualificationTimeoutTests(unittest.TestCase):
+    def test_five_minute_remote_run_is_admitted(self):
+        argv = ["deploy_graphics", "--build-id", "test-build", "--remote",
+                "--run-id", "test-run", "--timeout", "300"]
+        with patch.object(sys, "argv", argv), patch.object(graphics, "remote_run") as run:
+            self.assertEqual(graphics.main(), 0)
+            self.assertEqual(run.call_args.args[0].timeout, 300)
+
+    def test_unbounded_or_nonpositive_run_is_rejected(self):
+        for timeout in ("0", "301"):
+            argv = ["deploy_graphics", "--build-id", "test-build", "--remote",
+                    "--run-id", "test-run", "--timeout", timeout]
+            with self.subTest(timeout=timeout), patch.object(sys, "argv", argv), \
+                    patch.object(graphics, "remote_run") as run, \
+                    patch.object(sys, "stderr", io.StringIO()), self.assertRaises(SystemExit) as error:
+                graphics.main()
+            self.assertEqual(error.exception.code, 2)
+            run.assert_not_called()
+
+
 class GraphicalEnvironmentTests(unittest.TestCase):
     def test_default_environment_keeps_virtual_gamepad_admission_absent(self):
         session = {"mode": "gaming", "gaming_proof": {"verified": True},

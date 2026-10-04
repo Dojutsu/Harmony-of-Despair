@@ -522,8 +522,8 @@ def main():
         parser.error("Steam virtual gamepad admission requires --mode gaming")
     if (not re.fullmatch(SAFE_ID, args.build_id) or not re.fullmatch(r"[A-Za-z0-9_.+-]+", args.executable)
             or not re.fullmatch(r"[A-Za-z0-9_.-]+", args.target) or not re.fullmatch(r"/[A-Za-z0-9_./-]+", args.root)
-            or not 1 <= args.timeout <= 120):
-        parser.error("invalid identity/path or timeout outside 1..120 seconds")
+            or not 1 <= args.timeout <= 300):
+        parser.error("invalid identity/path or timeout outside 1..300 seconds")
     if args.remote:
         if not args.run_id or not re.fullmatch(SAFE_ID, args.run_id):
             parser.error("invalid remote run identity")
