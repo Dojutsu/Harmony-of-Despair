@@ -1,6 +1,7 @@
 #include <rex/system/xam/session_directory.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -683,19 +684,75 @@ constexpr std::string_view kInviteCodeAlphabet = "ABCDEFGHJKMNPQRSTUVWXYZ2345678
 constexpr size_t kInviteCodeLength = 6;
 
 bool IsSafeDirectoryUrl(std::string_view value) {
-  if (value.empty())
-    return true;
-  if (value.size() > 512)
+  if (value.empty()) return true;
+  if (value.size() > 512 || std::any_of(value.begin(), value.end(), [](unsigned char ch) {
+        return ch <= 0x20 || ch >= 0x7f || ch == '\\' || ch == '#' || ch == '?';
+      })) return false;
+  // Directory base URLs must have an unambiguous authority. In particular,
+  // "localhost:80@remote" is userinfo plus a remote host, not loopback.
+  const bool secure = value.starts_with("https://");
+  if (!secure && !value.starts_with("http://")) return false;
+  const auto after_scheme = value.substr(secure ? 8 : 7);
+  const auto authority = after_scheme.substr(0, after_scheme.find('/'));
+  if (authority.empty() || authority.find('@') != std::string_view::npos ||
+      authority.find('%') != std::string_view::npos) return false;
+  std::string_view host, port;
+  bool explicit_port = false, loopback = false;
+  if (authority.front() == '[') {
+    const auto closing = authority.find(']');
+    if (closing == std::string_view::npos) return false;
+    host = authority.substr(1, closing - 1);
+    const auto suffix = authority.substr(closing + 1);
+    if (!suffix.empty()) {
+      if (suffix.front() != ':') return false;
+      explicit_port = true; port = suffix.substr(1);
+    }
+#if REX_PLATFORM_WIN32 || REX_PLATFORM_GNU_LINUX
+    std::array<uint8_t, 16> address{};
+    const std::string text(host);
+    if (inet_pton(AF_INET6, text.c_str(), address.data()) != 1) return false;
+    loopback = address.back() == 1 && std::all_of(address.begin(), address.end() - 1,
+        [](uint8_t byte) { return byte == 0; });
+#else
     return false;
-  if (value.starts_with("https://"))
-    return true;
-  for (std::string_view prefix : {"http://127.0.0.1", "http://localhost"}) {
-    if (!value.starts_with(prefix))
-      continue;
-    auto suffix = value.substr(prefix.size());
-    return suffix.empty() || suffix.front() == ':' || suffix.front() == '/';
+#endif
+  } else {
+    const auto colon = authority.find(':');
+    host = authority.substr(0, colon);
+    if (colon != std::string_view::npos) {
+      explicit_port = true; port = authority.substr(colon + 1);
+    }
+    if (host.empty() || host.size() > 253) return false;
+    auto remaining = host;
+    if (remaining.ends_with('.')) remaining.remove_suffix(1);
+    if (remaining.empty()) return false;
+    while (!remaining.empty()) {
+      const auto dot = remaining.find('.');
+      const auto label = remaining.substr(0, dot);
+      if (label.empty() || label.size() > 63 || label.front() == '-' || label.back() == '-' ||
+          !std::all_of(label.begin(), label.end(), [](unsigned char ch) {
+            return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                   (ch >= '0' && ch <= '9') || ch == '-';
+          })) return false;
+      if (dot == std::string_view::npos) break;
+      remaining.remove_prefix(dot + 1);
+      if (remaining.empty()) return false;
+    }
+    loopback = host == "127.0.0.1" || (host.size() == 9 &&
+        std::equal(host.begin(), host.end(), "localhost", [](unsigned char a, char b) {
+          return (a >= 'A' && a <= 'Z' ? a + ('a' - 'A') : a) == b;
+        }));
   }
-  return false;
+  if (explicit_port) {
+    if (port.empty()) return false;
+    unsigned number = 0;
+    for (unsigned char ch : port) {
+      if (ch < '0' || ch > '9' || number > (65535u - (ch - '0')) / 10) return false;
+      number = number * 10 + (ch - '0');
+    }
+    if (!number) return false;
+  }
+  return secure || loopback;
 }
 
 bool IsIpv4(std::string_view value) {
@@ -916,6 +973,9 @@ std::wstring WidenAscii(std::string_view value) {
 std::optional<HttpResult> Request(std::string_view base_url, std::wstring_view method,
                                   std::string_view relative_path, std::string_view body,
                                   std::string_view bearer = {}) {
+  // Command-line/environment and typed cvar assignment can bypass validators.
+  // Enforce the transport boundary again before creating a request or headers.
+  if (base_url.empty() || !IsSafeDirectoryUrl(base_url)) return std::nullopt;
   auto full_url = std::string(base_url);
   while (full_url.ends_with('/'))
     full_url.pop_back();
@@ -1009,6 +1069,9 @@ size_t AppendCurlResponse(char* data, size_t size, size_t count, void* context) 
 std::optional<HttpResult> Request(std::string_view base_url, std::wstring_view method,
                                   std::string_view relative_path, std::string_view body,
                                   std::string_view bearer = {}) {
+  // Command-line/environment and typed cvar assignment can bypass validators.
+  // Enforce the transport boundary again before creating a request or headers.
+  if (base_url.empty() || !IsSafeDirectoryUrl(base_url)) return std::nullopt;
   static const CURLcode global_init = curl_global_init(CURL_GLOBAL_DEFAULT);
   if (global_init != CURLE_OK)
     return std::nullopt;
@@ -1066,7 +1129,10 @@ std::optional<HttpResult> Request(std::string_view base_url, std::wstring_view m
   const auto set_option = [request](CURLoption option, auto value) {
     return curl_easy_setopt(request, option, value) == CURLE_OK;
   };
-  if (!set_option(CURLOPT_URL, full_url.c_str()) ||
+  // Loopback HTTP is a local-only testing exception. Never send its admission
+  // material through an inherited proxy when the environment lacks NO_PROXY.
+  if ((base_url.starts_with("http://") && !set_option(CURLOPT_PROXY, "")) ||
+      !set_option(CURLOPT_URL, full_url.c_str()) ||
       !set_option(CURLOPT_USERAGENT, "HarmonyRecomp/1") ||
       !set_option(CURLOPT_HTTPHEADER, headers) ||
       !set_option(CURLOPT_CUSTOMREQUEST, method_ascii.c_str()) ||

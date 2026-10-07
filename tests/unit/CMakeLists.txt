@@ -21,6 +21,7 @@ add_executable(unit_tests
     system/function_dispatcher_test.cpp
     system/gameplay_traversal_test.cpp
     system/session_test.cpp
+    system/session_directory_url_test.cpp
     system/session_arbitration_test.cpp
     system/session_arbitration_crypto_test.cpp
     system/session_arbitration_transport_test.cpp
