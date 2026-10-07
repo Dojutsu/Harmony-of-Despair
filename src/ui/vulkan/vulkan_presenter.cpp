@@ -474,13 +474,25 @@ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
   }
 
   VkExtent2D image_extent = guest_output_image->extent();
+  // Bound diagnostic allocations before creating a buffer or command pool.
+  constexpr uint32_t kMaximumCaptureDimension = 4096;
+  constexpr VkDeviceSize kMaximumCaptureBytes = 16 * 1024 * 1024;
+  if (!image_extent.width || !image_extent.height ||
+      image_extent.width > kMaximumCaptureDimension ||
+      image_extent.height > kMaximumCaptureDimension) {
+    return false;
+  }
   size_t pixel_count = size_t(image_extent.width) * image_extent.height;
   VkDeviceSize buffer_size = VkDeviceSize(sizeof(uint32_t) * pixel_count);
+  if (buffer_size > kMaximumCaptureBytes) {
+    return false;
+  }
   VkBuffer buffer;
   VkDeviceMemory buffer_memory;
+  uint32_t buffer_memory_type;
   if (!util::CreateDedicatedAllocationBuffer(
           vulkan_device_, buffer_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-          util::MemoryPurpose::kReadback, buffer, buffer_memory)) {
+          util::MemoryPurpose::kReadback, buffer, buffer_memory, &buffer_memory_type)) {
     REXLOG_ERROR("VulkanPresenter: Failed to create the guest output capture buffer");
     return false;
   }
@@ -644,6 +656,24 @@ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
     REXLOG_ERROR("VulkanPresenter: Failed to map the guest output capture memory");
     dfn.vkFreeMemory(device, buffer_memory, nullptr);
     return false;
+  }
+
+  // kReadback prefers cached host-visible memory, which may be non-coherent.
+  // The transfer-to-host barrier and fence above make writes available, but
+  // mapping does not invalidate host caches. Invalidate the whole mapped
+  // allocation before reading; offset zero / VK_WHOLE_SIZE satisfy atom bounds.
+  if (!(vulkan_device_->memory_types().host_coherent & (uint32_t(1) << buffer_memory_type))) {
+    VkMappedMemoryRange range = {};
+    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+    range.memory = buffer_memory;
+    range.offset = 0;
+    range.size = VK_WHOLE_SIZE;
+    if (dfn.vkInvalidateMappedMemoryRanges(device, 1, &range) != VK_SUCCESS) {
+      REXLOG_ERROR("VulkanPresenter: Failed to invalidate guest output capture memory");
+      // Freeing mapped memory also unmaps it, as on the normal path below.
+      dfn.vkFreeMemory(device, buffer_memory, nullptr);
+      return false;
+    }
   }
 
   image_out.width = image_extent.width;
