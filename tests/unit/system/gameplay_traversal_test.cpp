@@ -135,6 +135,7 @@ GameplayAuthorization Ticket(const std::shared_ptr<SessionRecord>& session) {
       result.directory_session,std::string(32,char('a'+id)),std::string(32,char('c'+id))});
     session->members.push_back({id,"Peer",0,false,true,false,binding});
     GameplayPeerAuthorization peer;
+    peer.traffic_key.fill(uint8_t(id)); // Public deterministic test material only.
     peer.xuid=id; peer.member_nonce=std::string(32,char('4'+id));
     peer.admission_attempt=binding->attempt_id; peer.admission_generation=binding->admission_generation;
     peer.logical={htonl(0xf0000000+uint32_t(id)),1000};
@@ -142,6 +143,17 @@ GameplayAuthorization Ticket(const std::shared_ptr<SessionRecord>& session) {
     result.peers.push_back(peer);
   }
   return result;
+}
+std::unique_ptr<GameplayDatagramCipher> PeerCipher(const GameplayPeerAuthorization& peer) {
+  GameplayLinkId link{};
+  for(size_t i=0;i<link.size();++i) link[i]=uint8_t(std::stoul(peer.traversal.attempt_id.substr(i*2,2),nullptr,16));
+  auto cipher=GameplayDatagramCipher::Create(peer.traffic_key,link,peer.traversal.participant^1);
+  REQUIRE(cipher);return cipher;
+}
+void SendProtected(Udp& sender, GameplayDatagramCipher& cipher, const sockaddr_in& target, std::string_view payload) {
+  auto wire=cipher.Seal(std::span(reinterpret_cast<const uint8_t*>(payload.data()),payload.size()));REQUIRE(wire);
+  REQUIRE(sendto(sender.socket,reinterpret_cast<const char*>(wire->data()),int(wire->size()),0,
+                 reinterpret_cast<const sockaddr*>(&target),sizeof(target))==int(wire->size()));
 }
 std::array<uint8_t,56> Registered(const GameplayPeerAuthorization& peer, LanAddress endpoint, uint8_t type=2) {
   std::array<uint8_t,56> bytes{}; std::memcpy(bytes.data(),"HNAT",4);
@@ -379,7 +391,7 @@ TEST_CASE("XNet entries round trip admission aliases with exact session and XUID
         mapped_void::from_host(wrong.data()),mapped_void::from_host(&address))!=0);
   }
 }
-TEST_CASE("XSocket sends original bytes to the requested admitted peer and preserves LAN", "[gameplay][network][socket]") {
+TEST_CASE("XSocket protects admitted peer payloads and refuses scoped raw fallback", "[gameplay][network][socket]") {
   Udp a,b,lan;
   XSocket sender(nullptr);
   REQUIRE(sender.Initialize(XSocket::X_AF_INET,XSocket::X_SOCK_DGRAM,XSocket::X_IPPROTO_UDP)==X_STATUS_SUCCESS);
@@ -397,21 +409,39 @@ TEST_CASE("XSocket sends original bytes to the requested admitted peer and prese
     packet=Registered(auth.peers[i],native,4);
     REQUIRE(NatProbeConsume(sender.native_handle(),packet.data(),56,native.ipv4,native.port));
   }
-  for(size_t i=0;i<3;++i) {
+  std::array<std::unique_ptr<GameplayDatagramCipher>,2> decoders{PeerCipher(auth.peers[0]),PeerCipher(auth.peers[1])};
+  for(size_t i=0;i<2;++i) {
     N_XSOCKADDR_IN destination{};destination.sin_family=AF_INET;
     destination.sin_addr=i<2?ntohl(auth.peers[i].logical.ipv4):INADDR_LOOPBACK;
     destination.sin_port=i<2?1000:lan.address.port;
     std::array<uint8_t,3> bytes{uint8_t(i),7,9};
     REQUIRE(sender.SendTo(bytes.data(),int(bytes.size()),0,&destination,sizeof(destination))==3);
     auto& receiver=i==0?a:(i==1?b:lan);
-    std::array<char,8> result{};int received=-1;
+    std::array<uint8_t,128> result{};int received=-1;
     auto deadline=Clock::now()+std::chrono::seconds(1);
     while(Clock::now()<deadline && received<0) {
-      received=recvfrom(receiver.socket,result.data(),int(result.size()),0,nullptr,nullptr);
+      received=recvfrom(receiver.socket,reinterpret_cast<char*>(result.data()),int(result.size()),0,nullptr,nullptr);
       if(received<0)std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    REQUIRE(received==3);CHECK(std::memcmp(bytes.data(),result.data(),3)==0);
+    REQUIRE(received==51);CHECK(std::memcmp(bytes.data(),result.data(),3)!=0);
+    std::vector<uint8_t> plain;REQUIRE(decoders[i]->Open(std::span(result).first(received),plain));
+    CHECK(std::equal(bytes.begin(),bytes.end(),plain.begin(),plain.end()));
   }
+  N_XSOCKADDR_IN raw{};raw.sin_family=AF_INET;raw.sin_addr=INADDR_LOOPBACK;raw.sin_port=lan.address.port;
+  std::array<uint8_t,3> body{4,7,9};CHECK(sender.SendTo(body.data(),3,0,&raw,sizeof(raw))==-1);
+  std::array<uint8_t,128> raw_wire{};CHECK(recvfrom(lan.socket,reinterpret_cast<char*>(raw_wire.data()),int(raw_wire.size()),0,nullptr,nullptr)==-1);
+  N_XSOCKADDR_IN admitted{};admitted.sin_family=AF_INET;admitted.sin_addr=ntohl(auth.peers[0].logical.ipv4);admitted.sin_port=1000;
+  CHECK(sender.SendTo(body.data(),3,0,&admitted,1)==-1);CHECK(errno==EINVAL);
+  CHECK(sender.SendTo(reinterpret_cast<uint8_t*>(1),3,0,&admitted,sizeof(admitted))==-1);CHECK(errno==EFAULT);
+  CHECK(sender.SendTo(reinterpret_cast<uint8_t*>(1),uint32_t(kGameplayMaximumPlaintextBytes+1),0,&admitted,sizeof(admitted))==-1);CHECK(errno==EMSGSIZE);
+  sockaddr_in connected{};connected.sin_family=AF_INET;connected.sin_addr.s_addr=a.address.ipv4;connected.sin_port=htons(a.address.port);
+  REQUIRE(::connect(sender.native_handle(),reinterpret_cast<sockaddr*>(&connected),sizeof(connected))==0);
+  REQUIRE(sender.Send(body.data(),3,0)==3);
+  int wire_count=recvfrom(a.socket,reinterpret_cast<char*>(raw_wire.data()),int(raw_wire.size()),0,nullptr,nullptr);REQUIRE(wire_count==51);
+  std::vector<uint8_t> plain;REQUIRE(decoders[0]->Open(std::span(raw_wire).first(wire_count),plain));CHECK(plain==std::vector<uint8_t>{4,7,9});
+  REQUIRE(sender.SendTo(nullptr,0,0,nullptr,0)==0);
+  wire_count=recvfrom(a.socket,reinterpret_cast<char*>(raw_wire.data()),int(raw_wire.size()),0,nullptr,nullptr);REQUIRE(wire_count==48);
+  REQUIRE(decoders[0]->Open(std::span(raw_wire).first(wire_count),plain));CHECK(plain.empty());
   N_XSOCKADDR_IN unknown{};unknown.sin_family=AF_INET;unknown.sin_addr=0xf0000042;unknown.sin_port=1000;
   std::array<uint8_t,3> bytes{};
   CHECK(sender.SendTo(bytes.data(),3,0,&unknown,sizeof(unknown))==-1);
@@ -463,8 +493,9 @@ TEST_CASE("XSocket drops an early gameplay packet until its own ACK then normali
   REQUIRE(InstallGameplayAuthorization(session,auth));REQUIRE(BindGameplaySocket(session,1,receiver.native_handle(),1000));
   auto packet=Registered(auth.peers[0],peer.address);
   REQUIRE(NatProbeConsume(receiver.native_handle(),packet.data(),56,htonl(INADDR_LOOPBACK),rendezvous.address.port));
+  auto peer_cipher=PeerCipher(auth.peers[0]);
   auto send=[&] {
-    REQUIRE(sendto(peer.socket,"abc",3,0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==3);
+    SendProtected(peer,*peer_cipher,target,"abc");
     REQUIRE(receiver.WaitReadable(500));
   };
   std::array<uint8_t,8> data{};N_XSOCKADDR_IN source{};uint32_t size=sizeof(source);
@@ -520,9 +551,12 @@ TEST_CASE("admitted XSocket refuses unknown and revoked native sources including
     CHECK(receiver.Recv(data.data(),uint32_t(data.size()),flags)==-1);
     CHECK(data==before_data);CHECK_FALSE(receiver.WaitReadable(0));
   }
-  // An allowed empty datagram remains a valid datagram and MSG_PEEK leaves it queued.
+  // Endpoint membership alone may not authorize any raw bytes, even an empty packet.
+  rejected(peer,3,0,true);rejected(peer,0,MSG_PEEK,false);
+  auto peer_cipher=PeerCipher(auth.peers[0]);
+  // An authenticated empty datagram is valid, and MSG_PEEK leaves it queued.
   for(int count:{0,3}) {
-    send(peer,"abc",count);size=sizeof(source);
+    SendProtected(peer,*peer_cipher,target,std::string_view("abc",count));REQUIRE(receiver.WaitReadable(500));size=sizeof(source);
     REQUIRE(receiver.RecvFrom(data.data(),uint32_t(data.size()),MSG_PEEK,&source,&size)==count);
     CHECK(uint32_t(source.sin_addr)==ntohl(auth.peers[0].logical.ipv4));CHECK(uint16_t(source.sin_port)==1000);
     REQUIRE(receiver.WaitReadable(0));
@@ -580,7 +614,7 @@ TEST_CASE("XSocket filtered NAT control and pending payload cannot spin under pe
   REQUIRE(sendto(peer.socket,reinterpret_cast<char*>(packet.data()),int(packet.size()),0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==56);
   REQUIRE(receiver.WaitReadable(500));CHECK(receiver.RecvFrom(data.data(),uint32_t(data.size()),MSG_PEEK,&source,&size)==-1);CHECK_FALSE(receiver.WaitReadable(0));
   CHECK_FALSE(NatProbeIsPendingGameplaySource(receiver.native_handle(),peer.address));
-  REQUIRE(sendto(peer.socket,"abc",3,0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==3);REQUIRE(receiver.WaitReadable(500));
+  auto peer_cipher=PeerCipher(auth.peers[0]);SendProtected(peer,*peer_cipher,target,"abc");REQUIRE(receiver.WaitReadable(500));
   REQUIRE(receiver.RecvFrom(data.data(),uint32_t(data.size()),MSG_PEEK,&source,&size)==3);CHECK(receiver.WaitReadable(0));
   REQUIRE(receiver.RecvFrom(data.data(),uint32_t(data.size()),0,&source,&size)==3);CHECK(std::memcmp(data.data(),"abc",3)==0);
 }
@@ -652,7 +686,7 @@ TEST_CASE("XSocket processes complete NAT control independently of guest receive
   REQUIRE(sendto(peer.socket,reinterpret_cast<char*>(packet.data()),int(packet.size()),0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==56);
   REQUIRE(receiver.WaitReadable(500));CHECK(receiver.RecvFrom(data.data(),capacity,MSG_PEEK,&source,&size)==-1);CHECK_FALSE(receiver.WaitReadable(0));
   CHECK_FALSE(NatProbeIsPendingGameplaySource(receiver.native_handle(),peer.address));
-  REQUIRE(sendto(peer.socket,"abc",3,0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==3);REQUIRE(receiver.WaitReadable(500));
+  auto peer_cipher=PeerCipher(auth.peers[0]);SendProtected(peer,*peer_cipher,target,"abc");REQUIRE(receiver.WaitReadable(500));
   REQUIRE(receiver.RecvFrom(data.data(),uint32_t(data.size()),MSG_PEEK,&source,&size)==3);CHECK(receiver.WaitReadable(0));
   REQUIRE(receiver.RecvFrom(data.data(),uint32_t(data.size()),0,&source,&size)==3);CHECK(std::memcmp(data.data(),"abc",3)==0);
   }
