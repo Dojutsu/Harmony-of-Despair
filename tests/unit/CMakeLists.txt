@@ -2,6 +2,7 @@
 
 add_executable(unit_tests
     test_memory.cpp
+    audio/game_audio_capture_test.cpp
     memory/heap_allocation_test.cpp
     kernel/object_table_test.cpp
     kernel/xgi_app_test.cpp
@@ -129,6 +130,14 @@ add_test(NAME accepted_invite_kernel COMMAND accepted_invite_kernel_test)
 # Fatal native faults are isolated in bounded child processes. This fixture
 # targets the current Linux x86-64 startup ABI, not guest SEH unwind parity.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    add_executable(video_swap_test kernel/video_swap_test.cpp)
+    target_link_libraries(video_swap_test PRIVATE rexruntime)
+    set_target_properties(video_swap_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>
+        INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
+    add_test(NAME video_swap COMMAND video_swap_test)
+    set_tests_properties(video_swap PROPERTIES LABELS "linux;video;guest_fault" TIMEOUT 60)
+
     add_executable(linux_startup_test core/linux_startup_test.cpp)
     target_link_libraries(linux_startup_test PRIVATE rexruntime)
     set_target_properties(linux_startup_test PROPERTIES

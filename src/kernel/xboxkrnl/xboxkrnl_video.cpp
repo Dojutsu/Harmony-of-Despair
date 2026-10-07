@@ -13,7 +13,9 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstring>
 #include <string>
 
 #include <rex/cvar.h>
@@ -32,6 +34,9 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xtypes.h>
 #include <rex/ui/flags.h>
+#if REX_PLATFORM_GNU_LINUX
+#include <rex/platform/guest_memory.h>
+#endif
 
 namespace {
 // Display gamma type: 0 - linear, 1 - sRGB (CRT), 2 - BT.709 (HDTV), 3 - power
@@ -488,14 +493,18 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
   assert_true(*height == 1 + gpu_fetch.size_2d.height);
 
   // The caller seems to reserve 64 words (256b) in the primary ringbuffer
-  // for this method to do what it needs. We just zero them out and send a
-  // token value. It'd be nice to figure out what this is really doing so
+  // for this method to do what it needs. We replace all of them with fetch,
+  // swap and NOP packets. It'd be nice to figure out what this is really doing so
   // that we could simulate it, though due to TCR I bet all games need to
   // use this method.
-  buffer_ptr.Zero(64 * 4);
-
+  // The ring buffer may share a write-watched physical RAM page with GPU
+  // resources. Build the complete big-endian packet in host storage before
+  // publishing it through the admitted guest-copy path. A raw libc memset or
+  // stores into this page bypass Linux's owned access leaves and cannot recover
+  // a legitimate write-watch fault.
+  std::array<rex::be<uint32_t>, 64> dwords{};
+  static_assert(sizeof(dwords) == 64 * 4);
   uint32_t offset = 0;
-  auto dwords = buffer_ptr.as_array<uint32_t>();
 
   // Write in the GPU texture fetch.
   dwords[offset++] =
@@ -518,6 +527,11 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
   for (uint32_t i = offset; i < 64; i++) {
     dwords[i] = xenos::MakePacketType2();
   }
+#if REX_PLATFORM_GNU_LINUX
+  rex::guest::CopyToGuest(buffer_ptr.host_address(), dwords.data(), sizeof(dwords));
+#else
+  std::memcpy(buffer_ptr.host_address(), dwords.data(), sizeof(dwords));
+#endif
 }
 
 void RegisterVideoExports(rex::runtime::ExportResolver* export_resolver,
