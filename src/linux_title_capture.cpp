@@ -24,6 +24,11 @@ REXCVAR_DEFINE_UINT32(harmony_capture_delay_ms, 0, "Debug",
     .range(0, 600000)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_UINT32(harmony_capture_frame_limit, 32, "Debug",
+                     "Maximum bounded offline guest-frame capture attempts")
+    .range(1, 96)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 namespace harmony {
 std::jthread StartLinuxTitleCapture(rex::ui::Presenter* presenter) {
   const auto path = std::filesystem::path(REXCVAR_GET(harmony_capture_dir));
@@ -37,7 +42,8 @@ std::jthread StartLinuxTitleCapture(rex::ui::Presenter* presenter) {
   if (error) return {};
   const auto interval = std::chrono::milliseconds(REXCVAR_GET(harmony_capture_interval_ms));
   const auto delay = std::chrono::milliseconds(REXCVAR_GET(harmony_capture_delay_ms));
-  return std::jthread([presenter, path, interval, delay](std::stop_token stop) {
+  const auto frame_limit = REXCVAR_GET(harmony_capture_frame_limit);
+  return std::jthread([presenter, path, interval, delay, frame_limit](std::stop_token stop) {
     try {
     using namespace std::chrono_literals;
     constexpr size_t kMaximumFrameBytes = 16 * 1024 * 1024;
@@ -53,7 +59,7 @@ std::jthread StartLinuxTitleCapture(rex::ui::Presenter* presenter) {
       changed.wait_for(wait_lock, stop, delay, [] { return false; });
       if (stop.stop_requested()) return;
     }
-    for (unsigned index = 0; index < 32 && !stop.stop_requested(); ++index) {
+    for (unsigned index = 0; index < frame_limit && !stop.stop_requested(); ++index) {
       changed.wait_for(wait_lock, stop, interval, [] { return false; });
       if (stop.stop_requested()) break;
       rex::ui::RawImage image;
