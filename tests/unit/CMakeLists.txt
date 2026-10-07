@@ -88,8 +88,8 @@ if(UNIX AND NOT APPLE)
     )
 endif()
 
-# Capture-only Vulkan resource lifetime policy needs no GPU or Vulkan loader.
-if(REXGLUE_USE_VULKAN)
+# Capture-only Vulkan resource lifetime policy uses Linux process fixtures.
+if(REXGLUE_USE_VULKAN AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(Threads REQUIRED)
     add_executable(vulkan_capture_lifetime_test ui/vulkan_capture_lifetime_test.cpp)
     target_include_directories(vulkan_capture_lifetime_test PRIVATE
