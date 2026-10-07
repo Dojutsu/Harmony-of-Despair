@@ -33,3 +33,23 @@ Clang19/O2 and GCC14/ASan+UBSan, including forced provider failures. Eight codec
 cases are registered in the SDK suite; the two provider-failure cases use a
 standalone linker-interposition fixture with no production seam. Full ticket,
 guest adapter, socket, integration and actual title qualification remain required.
+
+The actual guest send adapters accept up to64 scatter descriptors. They sum
+lengths in64bits before allocation, limit ordinaryUDP to65507bytes and admitted
+UDP to65459bytes, and cap stream staging at16MiB. Guest32-bit ranges must remain
+affine in host memory; descriptor, destination and payload reads are staged under
+a brief mapping lease using own-process Linux kernel copies. IPv4 destinations
+are exactly16bytes/AF_INET or null/length0 for a connected socket. Result and
+OVERLAPPED write permissions are checked before I/O and rechecked before
+publication, without holding a mapping lease across native I/O. Send errors
+survive the existing pending-receive pump.
+
+Qualification: a fresh fullSDK build passes474tests, including real guest memory
+and socket adapters, authenticated peek/empty/truncation/source bounds, blocked
+receive followed by admission, persistent renewal/replay and retired-link refusal.
+A separate release/sanitized provider fixture passes3464assertions in10cases;
+an independent stdlibHKDF/OpenSSL3.0.20 reference matches the actualOpenSSL3.5.6
+wire bytes. The production admission fixture runs three separate native processes
+and all three encrypted peer links through realXSocket APIs with preserved39-byte
+synthetic payloads. It does not launch or qualify title gameplay. DefaultLAN
+without directory admission remains an explicit separate transport limitation.
