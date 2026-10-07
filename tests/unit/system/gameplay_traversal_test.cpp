@@ -15,6 +15,7 @@
 #include <rex/system/xam/gameplay_traversal.h>
 #include <rex/cvar.h>
 #include <rex/system/xsocket.h>
+#include <rex/system/xthread.h>
 #include <algorithm>
 #include <cstring>
 #include <fstream>
@@ -442,6 +443,21 @@ TEST_CASE("production admission to independent gameplay sockets fixture", "[.gam
 } // namespace rex::system::xam
 
 namespace rex::system::xam {
+TEST_CASE("XNet failure diagnostics tolerate an unbound native caller", "[gameplay][network][xnet]") {
+  using namespace rex::kernel::xam;
+  REQUIRE_FALSE(rex::system::XThread::IsInThread());
+  std::array<uint8_t, 36> input{};
+  uint32_t output = 0x7b7c7d7e;
+  const auto address = mapped_void::from_host(&output);
+  // Neither direct-return failure may consult absent guest LastError/TLS.
+  for (int i = 0; i < 3; ++i) {
+    CHECK(NetDll_XNetXnAddrToInAddr_entry(1, nullptr, nullptr, address) == 10022);
+    CHECK(NetDll_XNetXnAddrToInAddr_entry(1,
+        ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(input.data())),
+        nullptr, address) == 10049);
+    CHECK(output == 0x7b7c7d7e);
+  }
+}
 TEST_CASE("XNet entries round trip admission aliases with exact session and XUID", "[gameplay][network][xnet]") {
   using namespace rex::kernel::xam;
   SessionRegistry registry;auto session=registry.Create(1,"Host",{htonl(INADDR_LOOPBACK),30742},1,3,3);

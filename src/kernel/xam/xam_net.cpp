@@ -81,6 +81,7 @@ std::mutex bootstrap_result_mutex;
 std::array<BootstrapSocketResults, 128> bootstrap_socket_results{};
 
 uint32_t BootstrapGuestLinkRegister() {
+  if (!XThread::IsInThread()) return 0;
   auto* thread = XThread::GetCurrentThread();
   auto* state = thread ? thread->thread_state() : nullptr;
   const auto* context = state ? state->context() : nullptr;
@@ -116,6 +117,8 @@ void RetireBootstrapSocketResults(uint32_t handle) {
 }
 
 void ReportBootstrapAddressFailure(uint32_t caller, uint32_t result) {
+  // Direct host-side callers have no guest error state or link register.
+  if (!XThread::IsInThread()) return;
   // XNet conversion has no socket identity. Report only its first failure on
   // each invoking native thread, with an additional fixed process-wide bound.
   static std::atomic<uint32_t> reports{0};
