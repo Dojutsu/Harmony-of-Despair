@@ -1,4 +1,4 @@
-// Actual Runtime/HLE and authorized local session store; no title or listener.
+// Actual Runtime/HLE and authorized local session store; owned loopback UDP only.
 #include <rex/runtime.h>
 #include <rex/cvar.h>
 #include <rex/kernel/xam/apps/xgi_app.h>
@@ -11,6 +11,7 @@
 #include <rex/memory/mapping_lease.h>
 #include <rex/system/xio.h>
 #include <rex/system/xthread.h>
+#include <rex/system/xsocket.h>
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -20,6 +21,9 @@ REX_EXTERN(__imp__XMsgStartIORequest);
 REX_EXTERN(__imp__NtClose);
 REX_EXTERN(__imp__NtDuplicateObject);
 REX_EXTERN(__imp__NetDll_XNetXnAddrToMachineId);
+REX_EXTERN(__imp__NetDll_bind);
+REX_EXTERN(__imp__NetDll_XNetGetTitleXnAddr);
+REX_EXTERN(__imp__NetDll_closesocket);
 using namespace rex;
 using namespace rex::system;
 using namespace rex::system::xam;
@@ -60,6 +64,18 @@ void Run(KernelState* kernel) {
   Check(session && session->arbitration && session->host_machine_id,"actual hosted authority created");
   object->set_record(session);
   const auto machine=session->host_machine_id;
+  // Match the actual title's Create3074 -> bind guest1000/native52279 order.
+  // The bind HLE publishes the observed native endpoint to existing records.
+  auto gameplay_socket=make_object<XSocket>(kernel);
+  Check(gameplay_socket->Initialize(XSocket::X_AF_INET,XSocket::X_SOCK_DGRAM,XSocket::X_IPPROTO_UDP)==X_STATUS_SUCCESS,
+        "actual owned UDP gameplay socket");
+  std::memset(memory->TranslateVirtual(address),0,sizeof(XSOCKADDR_IN));
+  Put(memory,address,2,2);Put(memory,address+2,1000,2);Put(memory,address+4,0x7F000001u);
+  Check(Invoke(__imp__NetDll_bind,{1,gameplay_socket->handle(),address,sizeof(XSOCKADDR_IN)})==0,
+        "actual bind HLE maps guest1000 to configured native52279");
+  Check(session->info.host_address.port==52279 && session->members[0].gameplay_address.port==52279,
+        "bind after Create publishes native52279 to host record and member");
+  Check(Read(memory,address+2,2)==1000,"bind preserves guest socket port argument");
   auto setup=[&](uint32_t destination=0) {
     std::memset(memory->TranslateVirtual(request),0,32);
     Put(memory,request,object->guest_object());Put(memory,request+4,0);
@@ -179,6 +195,22 @@ void Run(KernelState* kernel) {
   };
   Check(machine_call()==0 && Read(memory,machine_output,8)==machine,"actual XNet writes full BE64 machine ID");
   unchanged(machine_output+8,8,0x5a,"XNet output is exactly eight bytes");
+  Check(Invoke(__imp__NetDll_XNetGetTitleXnAddr,{1,address})==0xAu && Read(memory,address+8,2)==3074,
+        "actual title XNADDR HLE retains explicit guest3074 port after native bind");
+  std::memset(memory->TranslateVirtual(machine_output),0x5a,16);
+  Check(machine_call()==0 && Read(memory,machine_output,8)==machine,
+        "known hosted native port52279 also resolves explicit guest3074 alias");
+  unchanged(machine_output+8,8,0x5a,"guest3074 alias writes exactly eight bytes");
+  Put(memory,address+8,52280,2);
+  std::memset(memory->TranslateVirtual(machine_output),0x5a,16);
+  Check(machine_call()==0x2741,"hosted identity rejects an unknown third port");
+  unchanged(machine_output,16,0x5a,"unknown hosted port preserves full output");
+  Put(memory,address+8,session->info.host_address.port,2);
+  const uint32_t wrong_host_ip=0x0200007fu;
+  std::memcpy(memory->TranslateVirtual(address),&wrong_host_ip,4);
+  Check(machine_call()==0x2741,"hosted identity rejects a different IPv4 endpoint");
+  unchanged(machine_output,16,0x5a,"wrong hosted IP preserves full output");
+  std::memcpy(memory->TranslateVirtual(address),&session->info.host_address.ipv4,4);
   memory->TranslateVirtual(address+35)[0]^=1;
   std::memset(memory->TranslateVirtual(machine_output),0x5a,16);
   Check(machine_call()==0x2741,"unknown exact XNADDR fails");
@@ -191,6 +223,53 @@ void Run(KernelState* kernel) {
   Check(machine_call(address,machine_crossing)==0x2726,"machine output requires full eight writable bytes");
   unchanged(machine_crossing,4,0x63,"failed machine64 output does not publish first DWORD");
   Check(heap->Protect(allocation+8*page,page,memory::kMemoryProtectRead|memory::kMemoryProtectWrite),"restore machine output tail");
+  // Accepted remote membership has a distinct native endpoint and an actual
+  // host-owned continuity record. It is joined, but has never registered.
+  const uint64_t peer_xuid=xuid^1u;
+  const uint64_t peer_machine=machine==0xAABBCCDD11223344ull ?
+      0xAABBCCDD11223345ull : 0xAABBCCDD11223344ull;
+  ArbitrationToken peer_challenge{},peer_credential{};
+  peer_challenge.fill(0x31);peer_credential.fill(0x42);
+  const uint32_t peer_ipv4=0x0200007fu;
+  const ArbitrationJoinClaim peer_claim{peer_xuid,peer_machine,{peer_ipv4,45000},peer_challenge,{}};
+  Check(session->arbitration->Admit(peer_claim,peer_credential,SessionArbitrationAuthority::Clock::now()).accepted(),
+        "actual host authority accepts native fixture peer admission");
+  SessionMember peer{};peer.xuid=peer_xuid;peer.name="Native peer";
+  peer.machine_id=peer_machine;peer.gameplay_address={peer_ipv4,52280};
+  Check(registry.JoinBatch(session,std::span<const SessionMember>(&peer,1)),
+        "actual membership store publishes admitted native peer endpoint");
+  auto write_peer_address=[&](uint64_t identity_xuid,uint32_t ipv4,uint16_t port) {
+    const auto identity=ReconstructXnAddrIdentity(identity_xuid);
+    std::memset(memory->TranslateVirtual(address),0,36);
+    std::memcpy(memory->TranslateVirtual(address),&ipv4,4);
+    Put(memory,address+8,port,2);
+    std::memcpy(memory->TranslateVirtual(address+10),identity.ethernet_address.data(),6);
+    std::memcpy(memory->TranslateVirtual(address+16),identity.online_address.data(),20);
+    std::memset(memory->TranslateVirtual(machine_output),0x5a,16);
+  };
+  for(const uint16_t port:{uint16_t(52280),uint16_t(3074)}) {
+    write_peer_address(peer_xuid,peer_ipv4,port);
+    Check(machine_call()==0 && Read(memory,machine_output,8)==peer_machine,
+          "actual HLE resolves admitted peer native port and explicit guest3074 alias to same BE64 identity");
+    Check(Read(memory,machine_output,4)==0xAABBCCDDu,"known peer machine retains high32 bits");
+    unchanged(machine_output+8,8,0x5a,"known peer output is exactly eight bytes");
+  }
+  write_peer_address(peer_xuid,peer_ipv4,52281);
+  Check(machine_call()==0x2741,"admitted peer rejects unknown third port");
+  unchanged(machine_output,16,0x5a,"unknown peer port preserves full output");
+  write_peer_address(peer_xuid,0x0300007fu,52280);
+  Check(machine_call()==0x2741,"admitted peer rejects wrong IP");
+  unchanged(machine_output,16,0x5a,"wrong peer IP preserves full output");
+  write_peer_address(peer_xuid^0x10u,peer_ipv4,52280);
+  Check(machine_call()==0x2741,"same native endpoint cannot manufacture nonmember identity");
+  unchanged(machine_output,16,0x5a,"nonmember identity preserves full output");
+  Check(registry.Leave(session->info.id,peer_xuid),"actual host store removes native peer");
+  write_peer_address(peer_xuid,peer_ipv4,3074);
+  Check(machine_call()==0x2741,"departed peer loses both endpoint aliases");
+  unchanged(machine_output,16,0x5a,"departed peer lookup preserves full output");
+  Check(Invoke(__imp__NetDll_closesocket,{1,gameplay_socket->handle()})==0,
+        "actual closesocket HLE retires the owned native socket");
+  gameplay_socket.reset();
   const auto snapshot=session->arbitration->Snapshot();
   Check(snapshot.has_value(),"real registered snapshot exists");
   auto bad_identity=snapshot->identity;bad_identity.incarnation[0]^=1;
@@ -247,6 +326,7 @@ void Run(KernelState* kernel) {
 int main() {
   InitLogging();
   Check(cvar::SetFlagFromCommandLine("lan_bind_address","127.0.0.1"),"process-local loopback isolation");
+  Check(cvar::SetFlagFromCommandLine("lan_gameplay_port","52279"),"process-local native gameplay port");
   Runtime runtime("");RuntimeConfig config;config.tool_mode=true;
   if(runtime.Setup(std::move(config)))return 2;
   // Tool mode returns before InitializeKernel registers any apps. Install the
