@@ -164,9 +164,17 @@ void SDLVirtualController() {
   std::this_thread::sleep_for(std::chrono::milliseconds(HID_SDL_REPEAT_DELAY + 50));
   Check(chrono::Clock::QueryGuestUptimeMillis() - pressed_at > HID_SDL_REPEAT_DELAY,
         "modal lasts beyond actual SDL guest repeat delay");
+  input.SetUIControllerCapture(false);
+  input.SetActiveCallback([] { return false; });
+  Check(input.GetState(0, &guest) == X_ERROR_SUCCESS && !guest.gamepad.buttons,
+        "closing modal while guest activity is masked remains neutral");
+  input.SetActiveCallback([] { return true; });
+  Check(input.GetState(0, &guest) == X_ERROR_SUCCESS && !guest.gamepad.buttons,
+        "activity-filtered zero cannot release physically held closing A");
+  Check(input.GetKeystroke(0, 0, &key) == X_ERROR_EMPTY,
+        "held closing A stays suppressed in actual SDL keystrokes after activity resumes");
   SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_SOUTH, false);
   SDL_UpdateJoysticks(); SDL_PumpEvents();
-  input.SetUIControllerCapture(false);
   Check(input.GetKeystroke(0, 0, &key) == X_ERROR_SUCCESS && key.virtual_key == 0x5800 &&
         key.flags == X_INPUT_KEYSTROKE_KEYUP,
         "actual SDL release emits keyup instead of stale keydown repeat after modal");

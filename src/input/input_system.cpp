@@ -248,7 +248,18 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
   if (result != X_ERROR_SUCCESS) return result;
   if (user_index < await_controller_release_.size()) {
     auto& awaiting = await_controller_release_[user_index];
-    if (!ui_controller_capture_ && ControllerNeutral(state.gamepad)) awaiting = false;
+    if (!ui_controller_capture_ && awaiting && ControllerNeutral(state.gamepad)) {
+      // Guest activity may have filtered a held SDL control to zero. Confirm
+      // native release before removing the modal latch. Require this guest
+      // sample to be neutral too, so a later raw release cannot expose an
+      // earlier held sample from the same poll.
+      X_INPUT_STATE raw{};
+      const auto raw_status = SampleState(user_index, &raw, true);
+      if ((raw_status == X_ERROR_SUCCESS && ControllerNeutral(raw.gamepad)) ||
+          raw_status == X_ERROR_DEVICE_NOT_CONNECTED) {
+        awaiting = false;
+      }
+    }
     if (ui_controller_capture_ || awaiting) state.gamepad = {};
     state.packet_number = uint32_t(state.packet_number) + ui_packet_bias_;
   }
