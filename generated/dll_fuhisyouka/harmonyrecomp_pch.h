@@ -86,36 +86,47 @@ extern PPCFuncMapping PPCFuncMappings[];
 #if defined(REXGLUE_PROFILE_GUEST_FUNCTIONS) && defined(REXGLUE_ENABLE_PROFILING)
 #include <tracy/Tracy.hpp>
 #if defined(__clang__)
-#define REX_FUNC_PROLOGUE()                     \
+#define REX_FUNC_ALIGNMENT_PROLOGUE()                     \
   __builtin_assume(((size_t)base & 0x1F) == 0); \
   ZoneNamedN(___tracy_guest_zone, __func__, TracyIsStarted)
 #elif defined(__GNUC__)
-#define REX_FUNC_PROLOGUE()         \
+#define REX_FUNC_ALIGNMENT_PROLOGUE()         \
   do {                              \
     if (((size_t)base & 0x1F) != 0) \
       __builtin_unreachable();      \
   } while (0);                      \
   ZoneNamedN(___tracy_guest_zone, __func__, TracyIsStarted)
 #else
-#define REX_FUNC_PROLOGUE() ZoneNamedN(___tracy_guest_zone, __func__, TracyIsStarted)
+#define REX_FUNC_ALIGNMENT_PROLOGUE() ZoneNamedN(___tracy_guest_zone, __func__, TracyIsStarted)
 #endif
 #else
 #if defined(__clang__)
-#define REX_FUNC_PROLOGUE() __builtin_assume(((size_t)base & 0x1F) == 0)
+#define REX_FUNC_ALIGNMENT_PROLOGUE() __builtin_assume(((size_t)base & 0x1F) == 0)
 #elif defined(__GNUC__)
-#define REX_FUNC_PROLOGUE()         \
+#define REX_FUNC_ALIGNMENT_PROLOGUE()         \
   do {                              \
     if (((size_t)base & 0x1F) != 0) \
       __builtin_unreachable();      \
   } while (0)
 #else
-#define REX_FUNC_PROLOGUE() ((void)0)
+#define REX_FUNC_ALIGNMENT_PROLOGUE() ((void)0)
 #endif
 #endif
 
 //=============================================================================
 // Memory Access
 //=============================================================================
+
+// The optional Linux function scope is unsupported across native nonlocal jumps.
+// Keep this off for projects using setjmp/longjmp or foreign callbacks that jump.
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64 && defined(REXGLUE_FUNCTION_MEMORY_CONSUMER) && REXGLUE_FUNCTION_MEMORY_CONSUMER
+#include <rex/platform/function_memory_consumer.h>
+#define REX_FUNC_PROLOGUE() REX_FUNC_ALIGNMENT_PROLOGUE(); [[maybe_unused]] rex::guest::detail::FunctionMemoryConsumer __rex_function_memory
+#define REX_MEMORY_CONSUMER_CALL(name) __rex_function_memory.name
+#else
+#define REX_FUNC_PROLOGUE() REX_FUNC_ALIGNMENT_PROLOGUE()
+#define REX_MEMORY_CONSUMER_CALL(name) rex::guest::name
+#endif
 
 #if REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && REX_ARCH_ARM64)
 #define REX_PHYS_HOST_OFFSET(addr) (((u32)(addr) >= 0xE0000000u) ? 0x1000u : 0u)
@@ -127,15 +138,15 @@ extern PPCFuncMapping PPCFuncMappings[];
 
 #if REX_PLATFORM_LINUX && REX_ARCH_AMD64
 #include <rex/platform/guest_memory.h>
-#define REX_LOAD_U8(x) rex::guest::Read<u8>(REX_RAW_ADDR(x))
-#define REX_LOAD_U16(x) __builtin_bswap16(rex::guest::Read<u16>(REX_RAW_ADDR(x)))
-#define REX_LOAD_U32(x) __builtin_bswap32(rex::guest::Read<u32>(REX_RAW_ADDR(x)))
-#define REX_LOAD_U64(x) __builtin_bswap64(rex::guest::Read<u64>(REX_RAW_ADDR(x)))
-#define REX_LOAD_STRING(x, len) rex::guest::ReadString(REX_RAW_ADDR(x), (len))
-#define REX_STORE_U8(x, y) rex::guest::Write<u8>(REX_RAW_ADDR(x), (y))
-#define REX_STORE_U16(x, y) rex::guest::Write<u16>(REX_RAW_ADDR(x), __builtin_bswap16(y))
-#define REX_STORE_U32(x, y) rex::guest::Write<u32>(REX_RAW_ADDR(x), __builtin_bswap32(y))
-#define REX_STORE_U64(x, y) rex::guest::Write<u64>(REX_RAW_ADDR(x), __builtin_bswap64(y))
+#define REX_LOAD_U8(x) REX_MEMORY_CONSUMER_CALL(Read)<u8>(REX_RAW_ADDR(x))
+#define REX_LOAD_U16(x) __builtin_bswap16(REX_MEMORY_CONSUMER_CALL(Read)<u16>(REX_RAW_ADDR(x)))
+#define REX_LOAD_U32(x) __builtin_bswap32(REX_MEMORY_CONSUMER_CALL(Read)<u32>(REX_RAW_ADDR(x)))
+#define REX_LOAD_U64(x) __builtin_bswap64(REX_MEMORY_CONSUMER_CALL(Read)<u64>(REX_RAW_ADDR(x)))
+#define REX_LOAD_STRING(x, len) REX_MEMORY_CONSUMER_CALL(ReadString)(REX_RAW_ADDR(x), (len))
+#define REX_STORE_U8(x, y) REX_MEMORY_CONSUMER_CALL(Write)<u8>(REX_RAW_ADDR(x), (y))
+#define REX_STORE_U16(x, y) REX_MEMORY_CONSUMER_CALL(Write)<u16>(REX_RAW_ADDR(x), __builtin_bswap16(y))
+#define REX_STORE_U32(x, y) REX_MEMORY_CONSUMER_CALL(Write)<u32>(REX_RAW_ADDR(x), __builtin_bswap32(y))
+#define REX_STORE_U64(x, y) REX_MEMORY_CONSUMER_CALL(Write)<u64>(REX_RAW_ADDR(x), __builtin_bswap64(y))
 #else
 #define REX_LOAD_U8(x) (*(volatile u8*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
 #define REX_LOAD_U16(x) __builtin_bswap16(*(volatile u16*)(base + (u32)(x) + REX_PHYS_HOST_OFFSET(x)))
@@ -162,43 +173,43 @@ extern PPCFuncMapping PPCFuncMappings[];
 #if REX_PLATFORM_LINUX && REX_ARCH_AMD64
 #define REX_MM_STORE_U8(addr, val) \
   do { u32 _address = (addr); auto _value = (val); \
-    if (REX_IS_MMIO_ADDR(_address)) { rex::guest::MmioWrite32(base, _address, static_cast<u32>(_value)); } \
-    else { rex::guest::Write<u8>(REX_RAW_ADDR(_address), _value); } \
+    if (REX_IS_MMIO_ADDR(_address)) { REX_MEMORY_CONSUMER_CALL(MmioWrite32)(base, _address, static_cast<u32>(_value)); } \
+    else { REX_MEMORY_CONSUMER_CALL(Write)<u8>(REX_RAW_ADDR(_address), _value); } \
   } while (0)
 #define REX_MM_LOAD_U8(addr) \
   ([&]() -> u8 { u32 _address = (addr); \
-    if (REX_IS_MMIO_ADDR(_address)) return static_cast<u8>(rex::guest::MmioRead32(base, _address)); \
-    return rex::guest::Read<u8>(REX_RAW_ADDR(_address)); \
+    if (REX_IS_MMIO_ADDR(_address)) return static_cast<u8>(REX_MEMORY_CONSUMER_CALL(MmioRead32)(base, _address)); \
+    return REX_MEMORY_CONSUMER_CALL(Read)<u8>(REX_RAW_ADDR(_address)); \
   }())
 #define REX_MM_STORE_U16(addr, val) \
   do { u32 _address = (addr); auto _value = (val); \
-    if (REX_IS_MMIO_ADDR(_address)) { rex::guest::MmioWrite32(base, _address, static_cast<u32>(_value)); } \
-    else { rex::guest::Write<u16>(REX_RAW_ADDR(_address), __builtin_bswap16(_value)); } \
+    if (REX_IS_MMIO_ADDR(_address)) { REX_MEMORY_CONSUMER_CALL(MmioWrite32)(base, _address, static_cast<u32>(_value)); } \
+    else { REX_MEMORY_CONSUMER_CALL(Write)<u16>(REX_RAW_ADDR(_address), __builtin_bswap16(_value)); } \
   } while (0)
 #define REX_MM_LOAD_U16(addr) \
   ([&]() -> u16 { u32 _address = (addr); \
-    if (REX_IS_MMIO_ADDR(_address)) return static_cast<u16>(rex::guest::MmioRead32(base, _address)); \
-    return __builtin_bswap16(rex::guest::Read<u16>(REX_RAW_ADDR(_address))); \
+    if (REX_IS_MMIO_ADDR(_address)) return static_cast<u16>(REX_MEMORY_CONSUMER_CALL(MmioRead32)(base, _address)); \
+    return __builtin_bswap16(REX_MEMORY_CONSUMER_CALL(Read)<u16>(REX_RAW_ADDR(_address))); \
   }())
 #define REX_MM_STORE_U32(addr, val) \
   do { u32 _address = (addr); auto _value = (val); \
-    if (REX_IS_MMIO_ADDR(_address)) { rex::guest::MmioWrite32(base, _address, static_cast<u32>(_value)); } \
-    else { rex::guest::Write<u32>(REX_RAW_ADDR(_address), __builtin_bswap32(_value)); } \
+    if (REX_IS_MMIO_ADDR(_address)) { REX_MEMORY_CONSUMER_CALL(MmioWrite32)(base, _address, static_cast<u32>(_value)); } \
+    else { REX_MEMORY_CONSUMER_CALL(Write)<u32>(REX_RAW_ADDR(_address), __builtin_bswap32(_value)); } \
   } while (0)
 #define REX_MM_LOAD_U32(addr) \
   ([&]() -> u32 { u32 _address = (addr); \
-    if (REX_IS_MMIO_ADDR(_address)) return static_cast<u32>(rex::guest::MmioRead32(base, _address)); \
-    return __builtin_bswap32(rex::guest::Read<u32>(REX_RAW_ADDR(_address))); \
+    if (REX_IS_MMIO_ADDR(_address)) return static_cast<u32>(REX_MEMORY_CONSUMER_CALL(MmioRead32)(base, _address)); \
+    return __builtin_bswap32(REX_MEMORY_CONSUMER_CALL(Read)<u32>(REX_RAW_ADDR(_address))); \
   }())
 #define REX_MM_STORE_U64(addr, val) \
   do { u32 _address = (addr); u64 _value = (val); \
-    if (REX_IS_MMIO_ADDR(_address)) { rex::guest::MmioWrite32(base, _address, static_cast<u32>(_value >> 32)); rex::guest::MmioWrite32(base, _address + 4, static_cast<u32>(_value)); } \
-    else { rex::guest::Write<u64>(REX_RAW_ADDR(_address), __builtin_bswap64(_value)); } \
+    if (REX_IS_MMIO_ADDR(_address)) { REX_MEMORY_CONSUMER_CALL(MmioWrite32)(base, _address, static_cast<u32>(_value >> 32)); REX_MEMORY_CONSUMER_CALL(MmioWrite32)(base, _address + 4, static_cast<u32>(_value)); } \
+    else { REX_MEMORY_CONSUMER_CALL(Write)<u64>(REX_RAW_ADDR(_address), __builtin_bswap64(_value)); } \
   } while (0)
 #define REX_MM_LOAD_U64(addr) \
   ([&]() -> u64 { u32 _address = (addr); \
-    if (REX_IS_MMIO_ADDR(_address)) return ([&]() { u32 _hi = rex::guest::MmioRead32(base, _address); u32 _lo = rex::guest::MmioRead32(base, _address + 4); return (static_cast<u64>(_hi) << 32) | _lo; }()); \
-    return __builtin_bswap64(rex::guest::Read<u64>(REX_RAW_ADDR(_address))); \
+    if (REX_IS_MMIO_ADDR(_address)) return ([&]() { u32 _hi = REX_MEMORY_CONSUMER_CALL(MmioRead32)(base, _address); u32 _lo = REX_MEMORY_CONSUMER_CALL(MmioRead32)(base, _address + 4); return (static_cast<u64>(_hi) << 32) | _lo; }()); \
+    return __builtin_bswap64(REX_MEMORY_CONSUMER_CALL(Read)<u64>(REX_RAW_ADDR(_address))); \
   }())
 #else
 #define REX_MM_STORE_U8(addr, val)                                                         \
@@ -292,15 +303,15 @@ extern PPCFuncMapping PPCFuncMappings[];
 // The Windows backends preserve the original native expressions. Only Linux
 // guest accesses enter registered leaves; host vector temporaries remain native.
 #if REX_PLATFORM_LINUX && REX_ARCH_AMD64
-#define REX_LOAD_VECTOR(x) rex::guest::ReadVector<simde__m128i>(REX_RAW_ADDR(x))
-#define REX_STORE_VECTOR(x, y) rex::guest::WriteVector(REX_RAW_ADDR(x), (y))
-#define REX_LOAD_RESERVED_U32(x) rex::guest::ReadReserved32(REX_RAW_ADDR(x))
-#define REX_LOAD_RESERVED_U64(x) rex::guest::ReadReserved64(REX_RAW_ADDR(x))
+#define REX_LOAD_VECTOR(x) REX_MEMORY_CONSUMER_CALL(ReadVector)<simde__m128i>(REX_RAW_ADDR(x))
+#define REX_STORE_VECTOR(x, y) REX_MEMORY_CONSUMER_CALL(WriteVector)(REX_RAW_ADDR(x), (y))
+#define REX_LOAD_RESERVED_U32(x) REX_MEMORY_CONSUMER_CALL(ReadReserved32)(REX_RAW_ADDR(x))
+#define REX_LOAD_RESERVED_U64(x) REX_MEMORY_CONSUMER_CALL(ReadReserved64)(REX_RAW_ADDR(x))
 #define REX_COMPARE_EXCHANGE_U32(x, expected, value) \
-  (rex::guest::CompareExchange32(REX_RAW_ADDR(x), (expected), (value)) == (expected))
+  (REX_MEMORY_CONSUMER_CALL(CompareExchange32)(REX_RAW_ADDR(x), (expected), (value)) == (expected))
 #define REX_COMPARE_EXCHANGE_U64(x, expected, value) \
-  (rex::guest::CompareExchange64(REX_RAW_ADDR(x), (expected), (value)) == (expected))
-#define REX_FILL_BYTES(x, value, count) rex::guest::FillBytes(REX_RAW_ADDR(x), (value), (count))
+  (REX_MEMORY_CONSUMER_CALL(CompareExchange64)(REX_RAW_ADDR(x), (expected), (value)) == (expected))
+#define REX_FILL_BYTES(x, value, count) REX_MEMORY_CONSUMER_CALL(FillBytes)(REX_RAW_ADDR(x), (value), (count))
 #else
 #define REX_LOAD_VECTOR(x) simde_mm_load_si128((simde__m128i*)REX_RAW_ADDR(x))
 #define REX_STORE_VECTOR(x, y) simde_mm_store_si128((simde__m128i*)REX_RAW_ADDR(x), (y))
@@ -388,10 +399,25 @@ inline std::unordered_map<u32, jmp_buf>& get_jmp_buf_map() {
 // Trap Handling
 //=============================================================================
 
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64 && defined(REXGLUE_FUNCTION_MEMORY_CONSUMER) && REXGLUE_FUNCTION_MEMORY_CONSUMER
+namespace rex::guest::detail {
+template<bool Allowed = false> inline int RejectFunctionScopeNonlocalJump() {
+  static_assert(Allowed, "Function memory consumers cannot cross native setjmp/longjmp; disable REXGLUE_FUNCTION_MEMORY_CONSUMER for this project");
+  return 0;
+}
+}
+#undef ppc_setjmp
+#define ppc_setjmp(guest_buf_addr) rex::guest::detail::RejectFunctionScopeNonlocalJump<>()
+#define ppc_longjmp(guest_buf_addr, value) rex::guest::detail::RejectFunctionScopeNonlocalJump<>()
+#endif
+
 inline void ppc_trap(PPCContext& ctx, u8* base, u16 trap_type) {
   switch (trap_type) {
     case 20:
     case 26: {
+      #if REX_PLATFORM_LINUX && REX_ARCH_AMD64 && defined(REXGLUE_FUNCTION_MEMORY_CONSUMER) && REXGLUE_FUNCTION_MEMORY_CONSUMER
+      rex::guest::detail::FunctionMemoryConsumer __rex_function_memory;
+#endif
       auto str = REX_LOAD_STRING(ctx.r3.u32, ctx.r4.u16);
       REXCPU_DEBUG("(service trap) {}", str);
       break;

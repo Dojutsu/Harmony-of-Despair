@@ -8,6 +8,14 @@ project(harmonyrecomp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# This title's generated modules contain no native nonlocal-jump sites. Reuse
+# the checked normal consumer only on the qualified Linux x86-64 target; SDK
+# consumers elsewhere retain the default-OFF policy and authored C++ APIs.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    option(REXGLUE_FUNCTION_MEMORY_CONSUMER
+        "Reuse checked consumers in the qualified Harmony generated functions" ON)
+endif()
+
 include(generated/rexglue.cmake)
 
 # rexruntime exposes public UI headers that include imgui.h, but its build-tree
