@@ -315,7 +315,14 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
     ImGui::TextWrapped("Leave your current team before joining a different invitation.");
     ImGui::BeginDisabled(invitation_task_.busy());
     ImGui::SetNextItemWidth(110.0f);
+    if (invitation_focus_pending_) {
+      // Focus only this form when it first becomes visible. The old code is
+      // selected so keyboard entry can replace it during a same-title rejoin.
+      ImGui::SetKeyboardFocusHere();
+      invitation_focus_pending_ = false;
+    }
     bool submit = ImGui::InputText("Invitation code", invitation_code_, sizeof(invitation_code_),
+                                   ImGuiInputTextFlags_AutoSelectAll |
                                    ImGuiInputTextFlags_CharsUppercase |
                                    ImGuiInputTextFlags_CharsNoBlank |
                                    ImGuiInputTextFlags_EnterReturnsTrue);

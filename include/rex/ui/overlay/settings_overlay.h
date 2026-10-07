@@ -33,6 +33,7 @@ class SettingsDialog : public ImGuiDialog {
   std::filesystem::path config_path_;
   InvitationUpdateTask invitation_task_;
   bool invitation_available_ = false;
+  bool invitation_focus_pending_ = true;
   char invitation_code_[7] = {};
   std::string invitation_status_;
   char search_buf_[128] = {};
