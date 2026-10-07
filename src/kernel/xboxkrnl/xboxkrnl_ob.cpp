@@ -18,6 +18,7 @@
 #include <rex/hook.h>
 #include <rex/types.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/object_wait_trace.h>
 #include <rex/system/util/string_utils.h>
 #include <rex/system/xevent.h>
 #include <rex/system/xobject.h>
@@ -222,6 +223,7 @@ u32 NtDuplicateObject_entry(u32 handle, mapped_u32 new_handle_ptr, u32 options) 
 u32 NtClose_entry(u32 handle) {
   REXKRNL_IMPORT_TRACE("NtClose", "handle={:#x}", (uint32_t)handle);
   auto result = REX_KERNEL_OBJECTS()->ReleaseHandle(handle);
+  TraceObjectWait(handle, "handle_close", 0, 0, result, true);
   REXKRNL_IMPORT_RESULT("NtClose", "{:#x}", result);
   return result;
 }

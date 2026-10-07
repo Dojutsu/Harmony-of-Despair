@@ -9,10 +9,15 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <chrono>
+#include <mutex>
 #include <vector>
 
 #include <rex/chrono/clock.h>
+#include <rex/cvar.h>
+#include <rex/logging.h>
 #include <rex/stream.h>
+#include <rex/system/object_wait_trace.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/util/string_utils.h>  // For TranslateAnsiStringAddress
 #include <rex/system/xobject.h>
@@ -28,6 +33,49 @@
 #include <rex/system/xthread.h>
 
 namespace rex::system {
+
+REXCVAR_DEFINE_UINT32(guest_wait_trace_handle, 0, "Kernel",
+                     "Trace one guest wait handle; zero disables tracing")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_UINT32(guest_wait_trace_delay_ms, 0, "Kernel",
+                     "Delay non-lifecycle wait observations after the first targeted operation")
+    .range(0, 600000)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+void TraceObjectWait(uint32_t handle, std::string_view operation, int64_t value1,
+                     int64_t value2, uint32_t status, bool lifecycle) {
+  const auto target = REXCVAR_GET(guest_wait_trace_handle);
+  if (!target || handle != target) {
+    return;
+  }
+  static std::mutex trace_mutex;
+  static const auto first_observation = std::chrono::steady_clock::now();
+  static uint32_t observation_count = 0;
+  static bool exhausted = false;
+  const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - first_observation)
+                              .count();
+  if (!lifecycle && elapsed_ms < REXCVAR_GET(guest_wait_trace_delay_ms)) {
+    return;
+  }
+  std::lock_guard lock(trace_mutex);
+  // A busy frame barrier must not produce unbounded logs. Exhaustion is explicit
+  // so a truncated trace cannot be mistaken for a missing producer operation.
+  constexpr uint32_t kMaximumObservations = 8192;
+  if (observation_count == kMaximumObservations) {
+    if (!exhausted) {
+      exhausted = true;
+      REXSYS_INFO("Guest wait trace handle={:08X} exhausted={} observations", handle,
+                  kMaximumObservations);
+    }
+    return;
+  }
+  REXSYS_INFO("Guest wait trace seq={} ms={} handle={:08X} native_tid={} guest_tid={} "
+              "op={} value1={} value2={} status={:08X}",
+              ++observation_count, elapsed_ms, handle, rex::thread::current_thread_system_id(),
+              XThread::GetCurrentThread() ? XThread::GetCurrentThread()->thread_id() : 0,
+              operation, value1, value2, status);
+}
 
 XObject::XObject(Type type) : kernel_state_(nullptr), pointer_ref_count_(1), type_(type) {
   handles_.reserve(10);
@@ -213,21 +261,28 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
                                 : std::chrono::milliseconds::max();
 
   XThread::CheckTitleTermination();
+  TraceObjectWait(handle(), "wait_begin", opt_timeout ? static_cast<int64_t>(*opt_timeout) : 0,
+                  alertable, 0);
   auto result = rex::thread::Wait(wait_handle, alertable ? true : false, timeout_ms);
+  TraceObjectWait(handle(), "wait_native_result", static_cast<int64_t>(result), 0, 0);
   XThread::CheckTitleTermination();
   switch (result) {
     case rex::thread::WaitResult::kSuccess:
       WaitCallback();
+      TraceObjectWait(handle(), "wait_callback_success", 0, 0, X_STATUS_SUCCESS);
       return X_STATUS_SUCCESS;
     case rex::thread::WaitResult::kUserCallback:
       // Or X_STATUS_ALERTED?
+      TraceObjectWait(handle(), "wait_return", 0, 0, X_STATUS_USER_APC);
       return X_STATUS_USER_APC;
     case rex::thread::WaitResult::kTimeout:
       rex::thread::MaybeYield();
+      TraceObjectWait(handle(), "wait_return", 0, 0, X_STATUS_TIMEOUT);
       return X_STATUS_TIMEOUT;
     default:
     case rex::thread::WaitResult::kAbandoned:
     case rex::thread::WaitResult::kFailed:
+      TraceObjectWait(handle(), "wait_return", 0, 0, X_STATUS_ABANDONED_WAIT_0);
       return X_STATUS_ABANDONED_WAIT_0;
   }
 }
