@@ -5,6 +5,26 @@
 
 using rex::platform::ResolveModuleLibraryPath;
 
+TEST_CASE("Optional debugger lookup retains existing modules only", "[core][dynlib]") {
+  rex::platform::DynamicLibrary existing;
+  CHECK_FALSE(existing.LoadExisting(""));
+  CHECK_FALSE(existing.LoadExisting("full-send-missing-optional-debugger-library"));
+  CHECK_FALSE(bool(existing));
+#if REX_PLATFORM_LINUX
+  // libc is already linked into this process. Retaining it must preserve symbols
+  // after a second independently owned reference is released.
+  REQUIRE(existing.LoadExisting("libc.so.6"));
+  auto strlen_symbol = existing.GetSymbol<size_t (*)(const char*)>("strlen");
+  REQUIRE(strlen_symbol);
+  rex::platform::DynamicLibrary second;
+  REQUIRE(second.LoadExisting("libc.so.6"));
+  second.Close();
+  CHECK(strlen_symbol("Full-Send") == 9);
+  existing.Close();
+  CHECK_FALSE(bool(existing));
+#endif
+}
+
 TEST_CASE("Native module target stems use the platform library filename", "[core][dynlib]") {
 #if REX_PLATFORM_LINUX
   const auto module_path = ResolveModuleLibraryPath("harmonyrecomp_dllAlucard");

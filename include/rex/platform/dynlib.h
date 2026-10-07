@@ -37,6 +37,9 @@ class DynamicLibrary {
   DynamicLibrary& operator=(DynamicLibrary&& other) noexcept;
 
   bool Load(const std::filesystem::path& path, SymbolResolution mode = SymbolResolution::kLazy);
+  // Retain an existing loaded module without loading it or running initializers.
+  // Close releases this object's reference exactly as for Load.
+  bool LoadExisting(const std::filesystem::path& path);
   void Close();
   explicit operator bool() const { return handle_ != nullptr; }
 

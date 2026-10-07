@@ -25,10 +25,9 @@ std::unique_ptr<RenderDocAPI> RenderDocAPI::CreateIfConnected() {
 
   pRENDERDOC_GetAPI get_api = nullptr;
 
-  // Try to load the RenderDoc library. If RenderDoc is attached, the library
-  // should already be loaded into the process and this will increment the
-  // reference count. If not attached, the load will fail and we return nullptr.
-  if (!renderdoc_api->library_.Load(platform::lib_names::kRenderDoc)) {
+  // Detection must not activate RenderDoc merely because its library is installed.
+  // Retain it only when the user has already attached it to this process.
+  if (!renderdoc_api->library_.LoadExisting(platform::lib_names::kRenderDoc)) {
     return nullptr;
   }
   get_api = renderdoc_api->library_.GetSymbol<pRENDERDOC_GetAPI>("RENDERDOC_GetAPI");
