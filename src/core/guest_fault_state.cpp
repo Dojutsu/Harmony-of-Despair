@@ -17,7 +17,15 @@ namespace rex::guest {
 namespace {
 // This TLS owner is normal-context state. The signal layer has its own minimal
 // preinitialized TLS frame and never calls Current() or touches this object.
+// The admitted GNU/Linux runtime is linked at process startup, as required by
+// the signal layer's initial-exec TLS. Preserve all normal-context ownership
+// checks while avoiding a dynamic TLS lookup at every guest memory boundary.
+#if REX_PLATFORM_GNU_LINUX
+thread_local ExecutionActivation* current_activation
+    __attribute__((tls_model("initial-exec"))) = nullptr;
+#else
 thread_local ExecutionActivation* current_activation = nullptr;
+#endif
 std::atomic<uint64_t> next_activation_id{0};
 }  // namespace
 

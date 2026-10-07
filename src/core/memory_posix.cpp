@@ -114,7 +114,14 @@ void AndroidShutdown() {
 #endif
 
 size_t page_size() {
+#if REX_PLATFORM_GNU_LINUX
+  // The process page size cannot change. Cache the queried host value rather
+  // than making each guarded access call through getpagesize again.
+  static const size_t cached_page_size = static_cast<size_t>(getpagesize());
+  return cached_page_size;
+#else
   return getpagesize();
+#endif
 }
 size_t allocation_granularity() {
   return page_size();
