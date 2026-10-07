@@ -333,6 +333,14 @@ X_RESULT SDLInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
                 : uint64_t(0);
   KeystrokeState& last = controller->keystroke;
 
+  // A modal can suppress guest keystroke polls beyond the repeat delay.
+  // Cancel a released control before considering repeat, so the first resumed
+  // poll sends its pending KEYUP instead of a stale KEYDOWN|REPEAT.
+  if (last.repeat_state != RepeatState::Idle &&
+      !(curr_butts & (uint64_t(1) << last.repeat_butt_idx))) {
+    last.repeat_state = RepeatState::Idle;
+  }
+
   // Handle repeating
   auto guest_now = rex::chrono::Clock::QueryGuestUptimeMillis();
   static_assert(HID_SDL_REPEAT_DELAY >= HID_SDL_REPEAT_RATE);

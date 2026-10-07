@@ -1,5 +1,6 @@
 #define SDL_MAIN_HANDLED
 #include <SDL3/SDL_main.h>
+#include <rex/chrono/clock.h>
 #include <rex/input/input_system.h>
 #include <rex/input/sdl/sdl_input_driver.h>
 #include <rex/ui/windowed_app_context_sdl.h>
@@ -143,6 +144,38 @@ void SDLVirtualController() {
   input.SetUIControllerCapture(false);
   Check(input.GetState(0, &guest) == X_ERROR_SUCCESS && !guest.gamepad.buttons,
         "actual SDL closing B cannot leak into guest after modal closes");
+  Check(SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_EAST, false) &&
+        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTX, 0) &&
+        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFTY, 0),
+        "private SDL controller released before keystroke-only cycle");
+  SDL_UpdateJoysticks(); SDL_PumpEvents();
+  X_INPUT_KEYSTROKE key{};
+  Check(input.GetKeystroke(0, 0, &key) == X_ERROR_EMPTY,
+        "actual SDL neutral release clears previous modal gate without guest state poll");
+  SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_SOUTH, true);
+  SDL_UpdateJoysticks(); SDL_PumpEvents();
+  Check(input.GetKeystroke(0, 0, &key) == X_ERROR_SUCCESS && key.virtual_key == 0x5800 &&
+        key.flags == X_INPUT_KEYSTROKE_KEYDOWN,
+        "actual SDL guest A keydown establishes repeat state before modal");
+  const auto pressed_at = chrono::Clock::QueryGuestUptimeMillis();
+  input.SetUIControllerCapture(true);
+  Check(input.GetKeystroke(0, 0, &key) == X_ERROR_EMPTY,
+        "modal suppresses actual SDL keystroke polling");
+  std::this_thread::sleep_for(std::chrono::milliseconds(HID_SDL_REPEAT_DELAY + 50));
+  Check(chrono::Clock::QueryGuestUptimeMillis() - pressed_at > HID_SDL_REPEAT_DELAY,
+        "modal lasts beyond actual SDL guest repeat delay");
+  SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_SOUTH, false);
+  SDL_UpdateJoysticks(); SDL_PumpEvents();
+  input.SetUIControllerCapture(false);
+  Check(input.GetKeystroke(0, 0, &key) == X_ERROR_SUCCESS && key.virtual_key == 0x5800 &&
+        key.flags == X_INPUT_KEYSTROKE_KEYUP,
+        "actual SDL release emits keyup instead of stale keydown repeat after modal");
+  Check(input.GetKeystroke(0, 0, &key) == X_ERROR_EMPTY,
+        "actual SDL neutral controller has no repeat after release");
+  SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_SOUTH, true);
+  SDL_UpdateJoysticks(); SDL_PumpEvents();
+  Check(input.GetKeystroke(0, 0, &key) == X_ERROR_SUCCESS && key.flags == X_INPUT_KEYSTROKE_KEYDOWN,
+        "actual SDL fresh press resumes keystrokes after modal release");
   SDL_CloseJoystick(joystick);
   Check(SDL_DetachVirtualJoystick(id), "private virtual gamepad detaches cleanly");
   Check(input.GetStateForUI(0, &host) == X_ERROR_DEVICE_NOT_CONNECTED,
