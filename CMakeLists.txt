@@ -71,6 +71,22 @@ target_link_libraries(stfs_inspect PRIVATE rex::runtime)
 
 include(CTest)
 enable_testing()
+# Generated call sites must retain the authoritative host-owned dispatch path.
+# Installed SDKs do not include codegen source templates; the isolated source
+# build checks every module as well as the synchronizer's preservation contract.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+   EXISTS "${REXSDK_DIR}/resources/templates/codegen/_indirect_call.inja")
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME indirect-dispatch-sync-tests
+        COMMAND ${Python3_EXECUTABLE} -B
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/linux-steamos/test_sync_indirect_dispatch.py")
+    add_test(NAME indirect-dispatch-sync
+        COMMAND ${Python3_EXECUTABLE} -B
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/linux-steamos/sync_indirect_dispatch.py"
+            --source "${CMAKE_CURRENT_SOURCE_DIR}" --sdk "${REXSDK_DIR}")
+    set_tests_properties(indirect-dispatch-sync-tests indirect-dispatch-sync
+        PROPERTIES LABELS "security;dispatch" TIMEOUT 30)
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(linux_user_paths_tests tests/linux_user_paths_test.cpp)
     target_include_directories(linux_user_paths_tests PRIVATE src)
