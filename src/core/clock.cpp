@@ -42,6 +42,60 @@ uint64_t last_host_tick_count_ = Clock::QueryHostTickCount();
 // Mutex to ensure last_host_tick_count_ and last_guest_tick_count_ are in sync
 std::mutex tick_mutex_;
 
+// Retain the sub-tick fraction between updates. Both values are protected by
+// tick_mutex_; the remainder is always smaller than guest_tick_ratio_.second.
+uint64_t guest_tick_remainder_ = 0;
+
+namespace {
+// Divide the full mathematical delta * numerator + remainder without an
+// overflowing intermediate. Tick counts themselves retain uint64 wrap semantics.
+std::pair<uint64_t, uint64_t> ScaleGuestTicks(uint64_t delta, uint64_t numerator,
+                                           uint64_t denominator, uint64_t remainder) {
+  const auto add_fraction = [denominator](uint64_t& whole, uint64_t& fraction,
+                                        uint64_t addend) {
+    if (fraction >= denominator - addend) {
+      fraction -= denominator - addend;
+      ++whole;
+    } else {
+      fraction += addend;
+    }
+  };
+  if (numerator == 1) {
+    uint64_t whole = delta / denominator;
+    uint64_t fraction = delta % denominator;
+    add_fraction(whole, fraction, remainder);
+    return {whole, fraction};
+  }
+  if (!numerator) return {0, remainder};
+  constexpr auto max = std::numeric_limits<uint64_t>::max();
+  if (delta <= (max - remainder) / numerator) {
+    const auto scaled = delta * numerator + remainder;
+    return {scaled / denominator, scaled % denominator};
+  }
+
+  // Portable overflow fallback: accumulate the quotient and remainder one bit
+  // at a time. No wider integer type or platform-specific division is required.
+  const uint64_t whole_numerator = numerator / denominator;
+  const uint64_t fractional_numerator = numerator % denominator;
+  uint64_t whole = 0, fraction = 0;
+  for (unsigned bit = 64; bit-- > 0;) {
+    whole *= 2;
+    if (fraction >= denominator - fraction) {
+      fraction -= denominator - fraction;
+      ++whole;
+    } else {
+      fraction *= 2;
+    }
+    if ((delta >> bit) & 1) {
+      whole += whole_numerator;
+      add_fraction(whole, fraction, fractional_numerator);
+    }
+  }
+  add_fraction(whole, fraction, remainder);
+  return {whole, fraction};
+}
+}  // namespace
+
 void RecomputeGuestTickScalar() {
   // Create a rational number with numerator (first) and denominator (second)
   auto frac = std::make_pair(guest_tick_frequency_, Clock::QueryHostTickFrequency());
@@ -58,6 +112,7 @@ void RecomputeGuestTickScalar() {
   reduce_fraction(frac);
 
   std::lock_guard<std::mutex> lock(tick_mutex_);
+  if (guest_tick_ratio_ != frac) guest_tick_remainder_ = 0;
   guest_tick_ratio_ = frac;
 }
 
@@ -68,18 +123,22 @@ uint64_t UpdateGuestClock() {
 
   if (REXCVAR_GET(clock_no_scaling)) {
     // Nothing to update, calculate on the fly
-    return host_tick_count * guest_tick_ratio_.first / guest_tick_ratio_.second;
+    const auto ratio = Clock::guest_tick_ratio();
+    return ScaleGuestTicks(host_tick_count, ratio.first, ratio.second, 0).first;
   }
 
   std::unique_lock<std::mutex> lock(tick_mutex_, std::defer_lock);
   if (lock.try_lock()) {
-    // Translate host tick count to guest tick count.
-    uint64_t host_tick_delta =
-        host_tick_count > last_host_tick_count_ ? host_tick_count - last_host_tick_count_ : 0;
-    last_host_tick_count_ = host_tick_count;
-    uint64_t guest_tick_delta =
-        host_tick_delta * guest_tick_ratio_.first / guest_tick_ratio_.second;
-    last_guest_tick_count_ += guest_tick_delta;
+    // A thread may have sampled before a newer update acquired the lock.
+    // Ignore that stale sample rather than rewinding the elapsed-time anchor.
+    if (host_tick_count > last_host_tick_count_) {
+      const auto delta = ScaleGuestTicks(host_tick_count - last_host_tick_count_,
+                                        guest_tick_ratio_.first, guest_tick_ratio_.second,
+                                        guest_tick_remainder_);
+      last_host_tick_count_ = host_tick_count;
+      last_guest_tick_count_ += delta.first;
+      guest_tick_remainder_ = delta.second;
+    }
     return last_guest_tick_count_;
   } else {
     // Wait until another thread has finished updating the clock.
