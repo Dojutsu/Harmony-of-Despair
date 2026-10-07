@@ -268,3 +268,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME cvar_cli COMMAND cvar_cli_test)
     set_tests_properties(cvar_cli PROPERTIES LABELS "linux;cvar" TIMEOUT 20)
 endif()
+
+# Syscall interposition is confined to this native process, not unit_tests.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(linux_clock_test core/linux_clock_test.cpp)
+    target_link_libraries(linux_clock_test PRIVATE rexruntime)
+    set_target_properties(linux_clock_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>
+        INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
+    add_test(NAME linux_clock COMMAND linux_clock_test)
+    set_tests_properties(linux_clock PROPERTIES LABELS "linux;clock" TIMEOUT 20)
+endif()
