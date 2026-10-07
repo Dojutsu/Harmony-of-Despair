@@ -44,6 +44,11 @@ class BitStream {
   uint64_t Read(size_t num_bits);
   bool Write(uint64_t val, size_t num_bits);
 
+  // Copy to dest_buffer starting at offset_bits() modulo 8, preserving bits
+  // outside the field. Returns that starting bit offset. The caller must supply
+  // ceil((starting offset + num_bits) / 8) destination bytes. Out-of-range,
+  // nonempty null-buffer and overlapping requests leave data and cursor intact;
+  // overlapping source/destination byte ranges are unsupported.
   size_t Copy(uint8_t* dest_buffer, size_t num_bits);
 
  private:

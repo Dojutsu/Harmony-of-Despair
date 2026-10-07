@@ -88,44 +88,48 @@ bool BitStream::Write(uint64_t val, size_t num_bits) {
 }
 
 size_t BitStream::Copy(uint8_t* dest_buffer, size_t num_bits) {
-  size_t offset_bytes = offset_bits_ >> 3;
-  size_t rel_offset_bits = offset_bits_ - (offset_bytes << 3);
+  const size_t rel_offset_bits = offset_bits_ & 7;
+  // Empty and invalid requests must not read a partial byte or advance the
+  // stream. The API returns starting padding, so preserve that on rejection.
+  if (!num_bits || num_bits > BitsRemaining() || !buffer_ || !dest_buffer)
+    return rel_offset_bits;
+
+  const auto* source = buffer_ + (offset_bits_ >> 3);
+  const size_t copy_bytes = num_bits / 8 + ((num_bits % 8 + rel_offset_bits + 7) / 8);
+  // The previous implementation used memcpy, which did not support overlap.
+  // Reject it explicitly before even boundary-byte mutation, including exact
+  // aliases. Compare address differences to avoid pointer-end overflow.
+  const auto source_address = reinterpret_cast<uintptr_t>(source);
+  const auto dest_address = reinterpret_cast<uintptr_t>(dest_buffer);
+  const bool overlaps = source_address <= dest_address
+                            ? dest_address - source_address < copy_bytes
+                            : source_address - dest_address < copy_bytes;
+  if (overlaps)
+    return rel_offset_bits;
+
   size_t bits_left = num_bits;
   size_t out_offset_bytes = 0;
-
-  // First: Copy the first few bits up to a byte boundary.
   if (rel_offset_bits) {
-    uint64_t bits = Peek(8 - rel_offset_bits);
-    uint8_t clear_mask = ~((uint8_t(1) << rel_offset_bits) - 1);
-    dest_buffer[out_offset_bytes] &= clear_mask;
-    dest_buffer[out_offset_bytes] |= (uint8_t)bits;
-
-    bits_left -= 8 - rel_offset_bits;
-    Advance(8 - rel_offset_bits);
-    out_offset_bytes++;
+    const size_t count = std::min(bits_left, 8 - rel_offset_bits);
+    const size_t shift = 8 - rel_offset_bits - count;
+    const auto mask = static_cast<uint8_t>(((uint32_t(1) << count) - 1) << shift);
+    dest_buffer[0] = static_cast<uint8_t>((dest_buffer[0] & ~mask) | (source[0] & mask));
+    bits_left -= count;
+    ++out_offset_bytes;
   }
 
-  // Second: Use memcpy for the bytes left.
-  if (bits_left >= 8) {
-    std::memcpy(dest_buffer + out_offset_bytes, buffer_ + offset_bytes + out_offset_bytes,
-                bits_left / 8);
-    out_offset_bytes += (bits_left / 8);
-    Advance((bits_left / 8) * 8);
-    bits_left -= (bits_left / 8) * 8;
+  const size_t whole_bytes = bits_left / 8;
+  if (whole_bytes) {
+    std::memcpy(dest_buffer + out_offset_bytes, source + out_offset_bytes, whole_bytes);
+    out_offset_bytes += whole_bytes;
+    bits_left -= whole_bytes * 8;
   }
-
-  // Third: Copy the last few bits.
   if (bits_left) {
-    uint64_t bits = Peek(bits_left);
-    bits <<= 8 - bits_left;
-
-    uint8_t clear_mask = ((uint8_t(1) << bits_left) - 1);
-    dest_buffer[out_offset_bytes] &= clear_mask;
-    dest_buffer[out_offset_bytes] |= (uint8_t)bits;
-    Advance(bits_left);
+    const auto mask = static_cast<uint8_t>(0xFF << (8 - bits_left));
+    dest_buffer[out_offset_bytes] = static_cast<uint8_t>(
+        (dest_buffer[out_offset_bytes] & ~mask) | (source[out_offset_bytes] & mask));
   }
-
-  // Return the bit offset to the copied bits.
+  offset_bits_ += num_bits;  // Bounded by BitsRemaining() above.
   return rel_offset_bits;
 }
 

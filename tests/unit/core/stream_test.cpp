@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <random>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -456,4 +457,144 @@ TEST_CASE("BitStream invalid writes preserve buffer and offset",
   CHECK(empty.Peek(0) == 0);
   CHECK(empty.Read(0) == 0);
   CHECK_FALSE(empty.Write(1, 1));
+}
+
+
+TEST_CASE("BitStream short unaligned copies preserve boundary bits",
+          "[stream][bitstream][copy]") {
+  std::array<uint8_t, 2> source{0xAB, 0xCD};
+  std::array<uint8_t, 2> dest{0xFF, 0x0F};
+  BitStream stream(source.data(), 16);
+  stream.SetOffset(1);
+  CHECK(stream.Copy(dest.data(), 2) == 1);
+  CHECK(dest == std::array<uint8_t, 2>{0xBF, 0x0F});
+  CHECK(stream.offset_bits() == 3);
+
+  dest = {0xF0, 0x0F};
+  stream.SetOffset(3);
+  CHECK(stream.Copy(dest.data(), 10) == 3);
+  CHECK(dest == std::array<uint8_t, 2>{0xEB, 0xCF});
+  CHECK(stream.offset_bits() == 13);
+
+  // Zero bits at an unaligned position must touch no memory.
+  CHECK(stream.Copy(nullptr, 0) == 5);
+  CHECK(stream.offset_bits() == 13);
+  CHECK(dest == std::array<uint8_t, 2>{0xEB, 0xCF});
+}
+
+TEST_CASE("BitStream bounded copies match an independent wire model",
+          "[stream][bitstream][copy]") {
+  std::mt19937 random(0xC057B175);
+  for (size_t iteration = 0; iteration < 2048; ++iteration) {
+    const size_t offset = iteration < 8 * 129 ? iteration / 129 : random() % 256;
+    const size_t width = iteration < 8 * 129 ? iteration % 129 : random() % 2049;
+    CAPTURE(iteration, offset, width);
+    const size_t padding = offset & 7;
+    const size_t size_bits = offset + width;
+    // Minimal allocations make even a one-byte overread visible to ASan.
+    std::vector<uint8_t> source((size_bits + 7) / 8);
+    std::vector<uint8_t> dest((padding + width + 7) / 8);
+    for (auto& byte : source)
+      byte = static_cast<uint8_t>(random());
+    for (auto& byte : dest)
+      byte = static_cast<uint8_t>(random());
+    const auto source_before = source;
+    auto expected = dest;
+    for (size_t bit = 0; bit < width; ++bit) {
+      const auto source_index = offset + bit;
+      const auto dest_index = padding + bit;
+      const auto mask = uint8_t(0x80 >> (dest_index & 7));
+      if (source[source_index / 8] & (0x80 >> (source_index & 7)))
+        expected[dest_index / 8] |= mask;
+      else
+        expected[dest_index / 8] &= uint8_t(~mask);
+    }
+    BitStream stream(source.data(), size_bits);
+    stream.SetOffset(offset);
+    // Random requests past EOF must reject before mutating either buffer.
+    const auto dest_before = dest;
+    CHECK(stream.Copy(dest.data(), width + 1 + random() % 128) == padding);
+    CHECK(dest == dest_before);
+    CHECK(source == source_before);
+    CHECK(stream.offset_bits() == offset);
+    CHECK(stream.Copy(dest.data(), width) == padding);
+    CHECK(dest == expected);
+    CHECK(source == source_before);
+    CHECK(stream.offset_bits() == size_bits);
+    CHECK(stream.BitsRemaining() == 0);
+  }
+}
+
+TEST_CASE("BitStream invalid copy ranges and buffers leave state intact",
+          "[stream][bitstream][copy]") {
+  std::array<uint8_t, 3> source{0xA5, 0x5A, 0xC3};
+  std::array<uint8_t, 3> dest{0x96, 0x69, 0xF0};
+  const auto source_before = source;
+  const auto dest_before = dest;
+  BitStream stream(source.data(), 17);
+  stream.SetOffset(9);
+  for (auto width : {size_t(9), size_t(18), std::numeric_limits<size_t>::max()}) {
+    CHECK(stream.Copy(dest.data(), width) == 1);
+    CHECK(stream.offset_bits() == 9);
+    CHECK(dest == dest_before);
+    CHECK(source == source_before);
+  }
+  CHECK(stream.Copy(nullptr, 1) == 1);
+  CHECK(stream.offset_bits() == 9);
+  stream.SetOffset(17);
+  CHECK(stream.Copy(dest.data(), 1) == 1);
+  CHECK(stream.Copy(nullptr, 0) == 1);
+  CHECK(stream.offset_bits() == 17);
+  CHECK(dest == dest_before);
+  BitStream empty(nullptr, 0);
+  CHECK(empty.Copy(nullptr, 0) == 0);
+  CHECK(empty.Copy(dest.data(), 1) == 0);
+  CHECK(empty.offset_bits() == 0);
+  BitStream missing_source(nullptr, 8);
+  CHECK(missing_source.Copy(dest.data(), 8) == 0);
+  CHECK(missing_source.offset_bits() == 0);
+  CHECK(dest == dest_before);
+}
+
+TEST_CASE("BitStream copy rejects overlap and allows adjacent ranges",
+          "[stream][bitstream][copy]") {
+  std::mt19937 random(0xA11A5);
+  for (size_t iteration = 0; iteration < 1024; ++iteration) {
+    std::array<uint8_t, 128> storage;
+    for (auto& byte : storage)
+      byte = static_cast<uint8_t>(random());
+    const auto before = storage;
+    const size_t offset = random() % 32;
+    const size_t width = 1 + random() % 129;
+    const size_t padding = offset & 7;
+    const size_t source_origin = 32;
+    const size_t source_first = source_origin + offset / 8;
+    const size_t touched_bytes = (padding + width + 7) / 8;
+    // Include exact aliases, both directions, adjacent and separated ranges.
+    const size_t destination = iteration % 4 == 0 ? source_first
+                               : iteration % 4 == 1 ? source_first + touched_bytes
+                               : iteration % 4 == 2 ? source_first - touched_bytes
+                                                    : random() % 65;
+    const bool overlap = destination < source_first + touched_bytes &&
+                         source_first < destination + touched_bytes;
+    CAPTURE(iteration, offset, width, destination, overlap);
+    auto expected = before;
+    if (!overlap) {
+      for (size_t bit = 0; bit < width; ++bit) {
+        const auto source_index = offset + bit;
+        const auto dest_index = padding + bit;
+        const auto mask = uint8_t(0x80 >> (dest_index & 7));
+        auto& byte = expected[destination + dest_index / 8];
+        if (before[source_origin + source_index / 8] & (0x80 >> (source_index & 7)))
+          byte |= mask;
+        else
+          byte &= uint8_t(~mask);
+      }
+    }
+    BitStream stream(storage.data() + source_origin, offset + width);
+    stream.SetOffset(offset);
+    CHECK(stream.Copy(storage.data() + destination, width) == padding);
+    CHECK(storage == expected);
+    CHECK(stream.offset_bits() == (overlap ? offset : offset + width));
+  }
 }
