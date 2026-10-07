@@ -343,3 +343,39 @@ TEST_CASE("PPCContext: restoring a zeroed fpscr leaves host FP exception masks i
   CHECK((ctx.fpscr.getcsr() & ~kGuestMask) == (host_before & ~kGuestMask));
   CHECK(ctx.fpscr.csr == ctx.fpscr.getcsr());
 }
+
+TEST_CASE("FunctionDispatcher: guest slot corruption cannot change host registrations",
+          "[runtime][dispatcher][dispatch-boundary]") {
+  auto& memory = GetTestMemory();
+  rex::runtime::ExportResolver resolver;
+  rex::runtime::FunctionDispatcher dispatcher(&memory, &resolver);
+  constexpr uint32_t code = 0x82000000, table = 0x8C000000, target = code + 0x10;
+  REQUIRE(dispatcher.InitializeFunctionTable(code, 0x10000, code, 0x100000, table));
+  REQUIRE(dispatcher.SetFunction(target, &DummyFn));
+  auto* slot = memory.TranslateVirtual<PPCFunc**>(table + (target - code) * 2);
+  const auto hostile = +[](PPCContext&, uint8_t*) {};
+  *slot = hostile;
+  CHECK(*slot == hostile);
+  CHECK(dispatcher.GetFunction(target) == &DummyFn);
+  *memory.TranslateVirtual<PPCFunc**>(table + 0x40) = hostile;
+  CHECK(dispatcher.GetFunction(code + 0x20) == nullptr);
+  CHECK(dispatcher.GetFunction(UINT32_MAX) == nullptr);
+}
+
+TEST_CASE("FunctionDispatcher: unaligned target rejection preserves registered slots",
+          "[runtime][dispatcher][dispatch-boundary]") {
+  auto& memory = GetTestMemory();
+  rex::runtime::ExportResolver resolver;
+  rex::runtime::FunctionDispatcher dispatcher(&memory, &resolver);
+  constexpr uint32_t code = 0x83000000, table = 0x8C000000, target = code + 0x10;
+  REQUIRE(dispatcher.InitializeFunctionTable(code, 0x10000, code, 0x100000, table));
+  REQUIRE(dispatcher.SetFunction(target, &DummyFn));
+  auto* slot = memory.TranslateVirtual<PPCFunc**>(table + (target - code) * 2);
+  for (uint32_t offset = 1; offset < 4; ++offset) {
+    CHECK_FALSE(dispatcher.SetFunction(target + offset, &DummyFn));
+    CHECK_FALSE(memory.SetFunction(target + offset, &DummyFn));
+    CHECK(dispatcher.GetFunction(target + offset) == nullptr);
+    CHECK(*slot == &DummyFn);
+    CHECK(dispatcher.GetFunction(target) == &DummyFn);
+  }
+}

@@ -419,7 +419,7 @@
             },
             "filter": {
                 "include": {
-                    "name": "^(unit\\.|xgi_slot_array$|accepted_invite_kernel$|video_swap$|linux_startup$|linux_guest_fault$|recvfrom_lifetime$)"
+                    "name": "^(unit\\.|xgi_slot_array$|accepted_invite_kernel$|video_swap$|indirect_dispatch$|linux_startup$|linux_guest_fault$|recvfrom_lifetime$)"
                 },
                 "exclude": {
                     "name": "^unit\\.(LAN discovery advertises and returns a created session|unreachable session directory preserves LAN discovery|pending NAT traversal preserves LAN broadcast discovery|stopping a LAN advertisement removes the hosted session|production public Search leaves invite admission isolated|configured invite claim is one-flight and isolated from public Search|configured invite cancellation gates every discovery send boundary|configured invite reaches immutable READY result using its own endpoint|lease renewal cancellation rejects the in-flight late callback|gameplay directory worker survives manual admission and joins at shutdown|production admission to independent gameplay sockets fixture)$"

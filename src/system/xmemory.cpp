@@ -883,6 +883,7 @@ bool Memory::DestroyFunctionTable(uint32_t code_base) {
 }
 
 bool Memory::SetFunction(uint32_t guest_address, PPCFunc* host_function) {
+  if (guest_address & 3) return false;
   uint32_t table_address = 0;
   {
     std::lock_guard lock(function_tables_mutex_);

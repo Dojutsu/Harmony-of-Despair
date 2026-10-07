@@ -130,6 +130,20 @@ add_test(NAME accepted_invite_kernel COMMAND accepted_invite_kernel_test)
 # Fatal native faults are isolated in bounded child processes. This fixture
 # targets the current Linux x86-64 startup ABI, not guest SEH unwind parity.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    # Compile the actual pure-C++ dispatch template, so tests cannot silently
+    # diverge from the macro emitted into every recompiled module.
+    configure_file(${PROJECT_SOURCE_DIR}/resources/templates/codegen/_indirect_call.inja
+        ${CMAKE_CURRENT_BINARY_DIR}/indirect_call_test.inc COPYONLY)
+    add_executable(indirect_dispatch_test system/indirect_dispatch_test.cpp)
+    target_include_directories(indirect_dispatch_test PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+    target_link_libraries(indirect_dispatch_test PRIVATE rexruntime)
+    target_compile_options(indirect_dispatch_test PRIVATE -UREXGLUE_ENABLE_PROFILING)
+    set_target_properties(indirect_dispatch_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>
+        INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
+    add_test(NAME indirect_dispatch COMMAND indirect_dispatch_test)
+    set_tests_properties(indirect_dispatch PROPERTIES LABELS "linux;security;dispatch" TIMEOUT 60)
+
     add_executable(video_swap_test kernel/video_swap_test.cpp)
     target_link_libraries(video_swap_test PRIVATE rexruntime)
     set_target_properties(video_swap_test PROPERTIES

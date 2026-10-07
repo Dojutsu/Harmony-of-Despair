@@ -375,6 +375,10 @@ uint32_t FunctionDispatcher::FindCallerModuleBase(uint32_t guest_address) {
 }
 
 bool FunctionDispatcher::SetFunction(uint32_t guest_address, ::PPCFunc* func) {
+  if (guest_address & 3) {
+    REXLOG_ERROR("SetFunction: unaligned guest instruction address {:08X}", guest_address);
+    return false;
+  }
   std::lock_guard<std::recursive_mutex> lock(dispatch_mutex_);
   assert_true(!module_tables_.empty());
 
@@ -399,6 +403,7 @@ bool FunctionDispatcher::SetFunction(uint32_t guest_address, ::PPCFunc* func) {
 }
 
 ::PPCFunc* FunctionDispatcher::GetFunction(uint32_t guest_address) {
+  if (guest_address & 3) return nullptr;
   std::lock_guard<std::recursive_mutex> lock(dispatch_mutex_);
   auto it = function_table_.find(guest_address);
   if (it != function_table_.end()) {
