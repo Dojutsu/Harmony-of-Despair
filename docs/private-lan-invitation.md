@@ -40,7 +40,15 @@ provider's constant-time routine. Network callers must include exact session
 incarnation, request challenge, ordered ephemeral keys, endpoints and roles,
 and must validate fresh correlation before accepting a replayed proof.
 
-This checkpoint provides the tested file loader, possession proofs and local
-generator. The discovery/bootstrap and protected gameplay integration remain
+Private tickets use the existing X25519/AES-256-GCM exchange with a separate
+key-derivation domain and a 768-byte plaintext bound. The production wrapper
+authenticates ordered recipient/server public keys, IV, ciphertext length,
+ciphertext, tag and the complete caller-bound AAD with the matching private
+invitation grant before decrypting or publishing plaintext. Decrypted bytes
+have exclusive move ownership and are cleansed on destruction. The old
+16-byte continuity envelope retains its original domain and behavior.
+
+This checkpoint provides the tested file loader, possession proofs, authenticated
+ticket-envelope component and local generator. The discovery/bootstrap and protected gameplay integration remain
 active work; possession-proof unit tests alone do not establish playable LAN
 multiplayer or authenticate an unauthenticated X25519 exchange.

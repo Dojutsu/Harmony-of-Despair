@@ -7,6 +7,7 @@
 #endif
 #include <algorithm>
 #include <utility>
+#include <string_view>
 
 namespace rex::system::xam {
 namespace {
@@ -34,7 +35,8 @@ template<size_t N> struct SensitiveBytes {
 };
 bool DeriveKey(EVP_PKEY* own, const ArbitrationPublicKey& peer,
                const ArbitrationPublicKey& client, const ArbitrationPublicKey& server,
-               std::span<const uint8_t> aad, SensitiveBytes<32>& output) {
+               std::span<const uint8_t> aad, SensitiveBytes<32>& output,
+               std::string_view domain = "ReXGlue LAN arbitration credential envelope v2") {
   if (!own || !Nonzero(peer) || !ValidAAD(aad)) return false;
   KeyOwner peer_key(EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, nullptr, peer.data(), peer.size()), EVP_PKEY_free);
   KeyContext context(EVP_PKEY_CTX_new(own, nullptr), EVP_PKEY_CTX_free);
@@ -46,7 +48,6 @@ bool DeriveKey(EVP_PKEY* own, const ArbitrationPublicKey& peer,
       size != shared.bytes.size() || !Nonzero(shared.bytes)) return false;
   // Full32 SHA256 output, with fixed domain, ordered raw public keys and an
   // explicit AAD length. Binding raw keys also covers X25519 encoding aliases.
-  static constexpr char domain[] = "ReXGlue LAN arbitration credential envelope v2";
   const auto aad_size = static_cast<uint32_t>(aad.size());
   const std::array<uint8_t, 4> encoded_size{
       static_cast<uint8_t>(aad_size >> 24), static_cast<uint8_t>(aad_size >> 16),
@@ -54,7 +55,7 @@ bool DeriveKey(EVP_PKEY* own, const ArbitrationPublicKey& peer,
   DigestContext digest(EVP_MD_CTX_new(), EVP_MD_CTX_free); unsigned int written = 0;
   return digest && EVP_DigestInit_ex(digest.get(), EVP_sha256(), nullptr) == 1 &&
       EVP_DigestUpdate(digest.get(), shared.bytes.data(), shared.bytes.size()) == 1 &&
-      EVP_DigestUpdate(digest.get(), domain, sizeof(domain) - 1) == 1 &&
+      EVP_DigestUpdate(digest.get(), domain.data(), domain.size()) == 1 &&
       EVP_DigestUpdate(digest.get(), client.data(), client.size()) == 1 &&
       EVP_DigestUpdate(digest.get(), server.data(), server.size()) == 1 &&
       EVP_DigestUpdate(digest.get(), encoded_size.data(), encoded_size.size()) == 1 &&
@@ -153,6 +154,90 @@ std::optional<ArbitrationToken> OpenArbitrationCredential(
   return token.bytes;
 #else
   (void)client; (void)envelope; (void)aad; return std::nullopt;
+#endif
+}
+struct SensitiveArbitrationPayload::State {
+  std::vector<uint8_t> bytes;
+  ~State() {
+#if REX_PLATFORM_LINUX
+    OPENSSL_cleanse(bytes.data(), bytes.size());
+#endif
+  }
+};
+SensitiveArbitrationPayload::SensitiveArbitrationPayload() noexcept = default;
+SensitiveArbitrationPayload::~SensitiveArbitrationPayload() = default;
+SensitiveArbitrationPayload::SensitiveArbitrationPayload(SensitiveArbitrationPayload&&) noexcept = default;
+SensitiveArbitrationPayload& SensitiveArbitrationPayload::operator=(SensitiveArbitrationPayload&&) noexcept = default;
+std::span<const uint8_t> SensitiveArbitrationPayload::bytes() const noexcept {
+  return state_ ? std::span<const uint8_t>(state_->bytes) : std::span<const uint8_t>{};
+}
+
+std::optional<ArbitrationPayloadEnvelope> SealArbitrationPayload(
+    const ArbitrationPublicKey& peer, std::span<const uint8_t> plaintext,
+    std::span<const uint8_t> aad) {
+#if REX_PLATFORM_LINUX
+  if (!Nonzero(peer) || !ValidAAD(aad) || plaintext.empty() ||
+      plaintext.size() > kMaximumArbitrationPayload) return std::nullopt;
+  try {
+    auto server = NewArbitrationKey(); if (!server) return std::nullopt;
+    ArbitrationPayloadEnvelope result;
+    result.server_public_key = server->public_key(); result.ciphertext.resize(plaintext.size());
+    SensitiveBytes<32> key;
+    if (!DeriveKey(server->state_->key.get(), peer, peer, result.server_public_key, aad, key,
+                   "ReXGlue private LAN payload envelope v1")) return std::nullopt;
+    if (RAND_bytes(result.iv.data(), int(result.iv.size())) != 1 || !Nonzero(result.iv)) return std::nullopt;
+    CipherContext cipher(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+    int written = 0, final_size = 0; SensitiveBytes<16> final;
+    if (!cipher || EVP_EncryptInit_ex(cipher.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+        EVP_CIPHER_CTX_ctrl(cipher.get(), EVP_CTRL_GCM_SET_IVLEN, int(result.iv.size()), nullptr) != 1 ||
+        EVP_EncryptInit_ex(cipher.get(), nullptr, nullptr, key.bytes.data(), result.iv.data()) != 1 ||
+        EVP_EncryptUpdate(cipher.get(), nullptr, &written, aad.data(), int(aad.size())) != 1 ||
+        EVP_EncryptUpdate(cipher.get(), result.ciphertext.data(), &written, plaintext.data(), int(plaintext.size())) != 1 ||
+        written != int(plaintext.size()) ||
+        EVP_EncryptFinal_ex(cipher.get(), final.bytes.data(), &final_size) != 1 || final_size != 0 ||
+        EVP_CIPHER_CTX_ctrl(cipher.get(), EVP_CTRL_GCM_GET_TAG, int(result.tag.size()), result.tag.data()) != 1)
+      return std::nullopt;
+    return result;
+  } catch (...) { return std::nullopt; }
+#else
+  (void)peer; (void)plaintext; (void)aad;
+  return std::nullopt;
+#endif
+}
+
+std::optional<SensitiveArbitrationPayload> OpenArbitrationPayload(
+    const EphemeralArbitrationKey& client, const ArbitrationPayloadEnvelope& envelope,
+    std::span<const uint8_t> aad) {
+#if REX_PLATFORM_LINUX
+  if (!client.valid() || !ValidAAD(aad) || !Nonzero(envelope.server_public_key) ||
+      !Nonzero(envelope.iv) || envelope.ciphertext.empty() ||
+      envelope.ciphertext.size() > kMaximumArbitrationPayload || !Nonzero(envelope.tag)) return std::nullopt;
+  try {
+    SensitiveBytes<32> key; SensitiveBytes<16> final;
+    if (!DeriveKey(client.state_->key.get(), envelope.server_public_key, client.public_key(),
+                   envelope.server_public_key, aad, key,
+                   "ReXGlue private LAN payload envelope v1")) return std::nullopt;
+    SensitiveArbitrationPayload result;
+    result.state_ = std::make_unique<SensitiveArbitrationPayload::State>();
+    result.state_->bytes.resize(envelope.ciphertext.size());
+    auto tag = envelope.tag;
+    CipherContext cipher(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+    int written = 0, final_size = 0;
+    if (!cipher || EVP_DecryptInit_ex(cipher.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+        EVP_CIPHER_CTX_ctrl(cipher.get(), EVP_CTRL_GCM_SET_IVLEN, int(envelope.iv.size()), nullptr) != 1 ||
+        EVP_DecryptInit_ex(cipher.get(), nullptr, nullptr, key.bytes.data(), envelope.iv.data()) != 1 ||
+        EVP_DecryptUpdate(cipher.get(), nullptr, &written, aad.data(), int(aad.size())) != 1 ||
+        EVP_DecryptUpdate(cipher.get(), result.state_->bytes.data(), &written,
+                          envelope.ciphertext.data(), int(envelope.ciphertext.size())) != 1 ||
+        written != int(envelope.ciphertext.size()) ||
+        EVP_CIPHER_CTX_ctrl(cipher.get(), EVP_CTRL_GCM_SET_TAG, int(tag.size()), tag.data()) != 1 ||
+        EVP_DecryptFinal_ex(cipher.get(), final.bytes.data(), &final_size) != 1 || final_size != 0)
+      return std::nullopt;
+    return result;
+  } catch (...) { return std::nullopt; }
+#else
+  (void)client; (void)envelope; (void)aad;
+  return std::nullopt;
 #endif
 }
 } // namespace rex::system::xam
