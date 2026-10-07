@@ -87,6 +87,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
             --source "${CMAKE_CURRENT_SOURCE_DIR}" --sdk "${REXSDK_DIR}")
     set_tests_properties(indirect-dispatch-sync-tests indirect-dispatch-sync
         PROPERTIES LABELS "security;dispatch" TIMEOUT 30)
+    add_test(NAME generated-support-sync-tests
+        COMMAND ${Python3_EXECUTABLE} -B
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/linux-steamos/test_sync_generated_support.py")
+    add_test(NAME generated-support-sync
+        COMMAND ${Python3_EXECUTABLE} -B
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/linux-steamos/sync_generated_support.py"
+            --source "${CMAKE_CURRENT_SOURCE_DIR}" --sdk "${REXSDK_DIR}")
+    set_tests_properties(generated-support-sync-tests generated-support-sync
+        PROPERTIES LABELS "security;codegen" TIMEOUT 30)
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(linux_user_paths_tests tests/linux_user_paths_test.cpp)
