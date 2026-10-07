@@ -26,7 +26,7 @@ class ControllerNavigation {
         std::abs(int(int16_t(state.thumb_ly))) < 8000;
     if (!connected && captured_) await_release_ = true;
     if (connected && neutral) await_release_ = false;
-    const bool enabled = connected && !await_release_;
+    const bool enabled = connected && captured_ && !await_release_;
     if (connected) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
     else io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
     auto button = [&](ImGuiKey key, uint16_t mask) {

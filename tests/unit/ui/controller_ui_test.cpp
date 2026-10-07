@@ -333,6 +333,7 @@ class DialogFrames {
     first_ = false;
     ImGui::Render();
   }
+  void Capture(bool value) { navigation_.SetCaptured(value); }
   int chosen = -1, focused = -1;
   bool cancelled = false;
  private:
@@ -343,6 +344,12 @@ class DialogFrames {
   bool first_ = true;
 };
 void ImGuiBehavior() {
+  {
+    DialogFrames dialog(0); dialog.Capture(false); dialog.Frame(); dialog.Frame();
+    dialog.Frame(X_INPUT_GAMEPAD_A); dialog.Frame(X_INPUT_GAMEPAD_B);
+    Check(dialog.chosen == -1 && !dialog.cancelled,
+        "noncapturing overlays cannot also consume guest A or B");
+  }
   {
     DialogFrames dialog(0, true); dialog.Frame(); dialog.Frame();
     Check(dialog.focused == 0, "host message default focus overrides read-only text area");
