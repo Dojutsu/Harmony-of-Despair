@@ -20,14 +20,28 @@ namespace rex::guest {
 namespace {
 using MMIO = runtime::MMIOHandler;
 constexpr unsigned kRetryLimit = 8;
+// Only operation-local address arithmetic is shared: no owner, backing,
+// mapping, permission, callback or retry decision is retained here.
+struct HostPageBoundary { size_t page; size_t offset; };
+size_t HostPageOffset(uintptr_t address, size_t page) noexcept {
+  return address % page;
+}
+HostPageBoundary HostBoundaryFor(const void* pointer, size_t width) noexcept {
+  const auto address = reinterpret_cast<uintptr_t>(pointer);
+  if (width > std::numeric_limits<uintptr_t>::max() - address)
+    FaultContractFailure("access-range-overflow");
+  const auto page = memory::page_size();
+  return {page, HostPageOffset(address, page)};
+}
+
 // Ordinary virtual RAM has no physical write-watch/device callbacks. Retain
 // owner and mapping admission through one x86 scalar MOV, including its epilogue.
 // A failing MOV publishes no bytes/output and is never split or replayed.
 // This is an unaligned scalar operation, not an atomic snapshot guarantee.
-std::optional<AccessAttempt> CaptureCrossPageRamScalar(const void* pointer,void* value,size_t width,bool write) noexcept {
+std::optional<AccessAttempt> CaptureCrossPageRamScalar(const void* pointer,void* value,size_t width,bool write,const HostPageBoundary& boundary) noexcept {
   const auto address=reinterpret_cast<uintptr_t>(pointer);
-  const auto page=memory::page_size();
-  if(address>std::numeric_limits<uintptr_t>::max()-width || address%page<=page-width)return std::nullopt;
+  const auto page=boundary.page;
+  if(address>std::numeric_limits<uintptr_t>::max()-width || boundary.offset<=page-width)return std::nullopt;
   auto* thread=runtime::ThreadState::Get();
   if(!thread)return std::nullopt;
   memory::GuestMemoryAccessPin owner(thread->memory_access_control());
@@ -52,7 +66,7 @@ std::optional<AccessAttempt> CaptureCrossPageRamScalar(const void* pointer,void*
   const bool last_admitted=(b.state&memory::kMemoryAllocationCommit) && (b.protect&permissions)==permissions;
   if(!first_admitted || !last_admitted) {
     AccessAttempt denied{};
-    denied.fault.address=first_admitted?address+page-address%page:address;
+    denied.fault.address=first_admitted?address+page-boundary.offset:address;
     denied.fault.access_intent=write;
     return denied;
   }
@@ -101,11 +115,13 @@ void DiagnoseCrossPage(const void* pointer,size_t width,bool atomic,bool vector,
   }
   void* frames[32];int count=backtrace(frames,32);backtrace_symbols_fd(frames,count,2);
 }
-void ValidateRange(const void* pointer,size_t width,bool atomic=false,bool vector=false,bool write=false) noexcept {
+void ValidateRange(const void* pointer,size_t width,bool atomic=false,bool vector=false,bool write=false,
+                   const HostPageBoundary* boundary=nullptr) noexcept {
   auto address=reinterpret_cast<uintptr_t>(pointer);
   if(width>std::numeric_limits<uintptr_t>::max()-address) FaultContractFailure("access-range-overflow");
-  auto page=memory::page_size();
-  if(width>page || address%page>page-width) {
+  const auto page=boundary ? boundary->page : memory::page_size();
+  const auto offset=boundary ? boundary->offset : HostPageOffset(address,page);
+  if(width>page || offset>page-width) {
     DiagnoseCrossPage(pointer,width,atomic,vector,write);
     FaultContractFailure("unadmitted-cross-page-access");
   }
@@ -221,13 +237,15 @@ void RequireFillRange(void* destination,size_t length) noexcept {
 }
 AccessResult<bool> TryReadBytes(const void* address,void* output,size_t width,bool vector,bool reservation) noexcept {
   RequireAccess();
-  if((width==2 || width==4 || width==8) && !vector && !reservation) {
-    if(auto captured=CaptureCrossPageRamScalar(address,output,width,false)) {
+  const auto boundary = HostBoundaryFor(address,width);
+  if((width==2 || width==4 || width==8) && !vector && !reservation &&
+     width<=boundary.page && boundary.offset>boundary.page-width) {
+    if(auto captured=CaptureCrossPageRamScalar(address,output,width,false,boundary)) {
       if(captured->success)return AccessResult<bool>::Success(true);
       return Terminal<bool>(captured->fault);
     }
   }
-  ValidateRange(address,width,reservation,vector);
+  ValidateRange(address,width,reservation,vector,false,&boundary);
   if(reservation)RejectMappedAtomic(address,width);
   auto transaction=detail::DeferredTransactionBridge::Create();
   if(CompleteMappedRead(address,output,width,vector||reservation,transaction))return AccessResult<bool>::Success(true);
@@ -259,13 +277,15 @@ AccessResult<bool> TryReadBytes(const void* address,void* output,size_t width,bo
 }
 AccessResult<bool> TryWriteBytes(void* address,const void* value,size_t width,bool vector) noexcept {
   RequireAccess();
-  if((width==2 || width==4 || width==8) && !vector) {
-    if(auto captured=CaptureCrossPageRamScalar(address,const_cast<void*>(value),width,true)) {
+  const auto boundary = HostBoundaryFor(address,width);
+  if((width==2 || width==4 || width==8) && !vector &&
+     width<=boundary.page && boundary.offset>boundary.page-width) {
+    if(auto captured=CaptureCrossPageRamScalar(address,const_cast<void*>(value),width,true,boundary)) {
       if(captured->success)return AccessResult<bool>::Success(true);
       return Terminal<bool>(captured->fault);
     }
   }
-  ValidateRange(address,width,false,vector,true);auto transaction=detail::DeferredTransactionBridge::Create();
+  ValidateRange(address,width,false,vector,true,&boundary);auto transaction=detail::DeferredTransactionBridge::Create();
   if(CompleteMappedWrite(address,value,width,vector,transaction))return AccessResult<bool>::Success(true);
   for(unsigned attempt=0;attempt<kRetryLimit;++attempt){
     ScalarCaptureFailure failure;

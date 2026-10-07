@@ -866,5 +866,56 @@ TEST_CASE("Linux private and public transaction entry points reject stale owners
     CHECK(diagnostic.find(marker)!=std::string::npos);
   }
 }
+TEST_CASE("Linux scalar page boundaries preserve exact-end and crossing read/write fault ownership",
+          "[linux][guest-fault][cross-page][boundary-sharing]") {
+  auto& memory=rex::testing::GetTestMemory();
+  auto* heap=memory.LookupHeapByType(false,65536);
+  REQUIRE(heap!=nullptr);PhysicalAllocation allocation{heap};
+  REQUIRE(heap->Alloc(65536,65536,
+    rex::memory::kMemoryAllocationReserve|rex::memory::kMemoryAllocationCommit,
+    rex::memory::kMemoryProtectRead|rex::memory::kMemoryProtectWrite,false,&allocation.address));
+  const auto page=rex::memory::page_size();
+  REQUIRE(page>=8);REQUIRE(page<=32768);
+  auto* pages=memory.TranslateVirtual<unsigned char*>(allocation.address);
+  struct Binding {
+    rex::runtime::ThreadState* saved=rex::runtime::ThreadState::Get();
+    rex::runtime::ThreadState thread;
+    Binding(rex::memory::Memory& memory):thread(99,0,0,&memory){rex::runtime::ThreadState::Bind(&thread);}
+    ~Binding(){rex::runtime::ThreadState::Bind(saved);}
+  } binding(memory);
+  for(size_t width:{size_t(2),size_t(4),size_t(8)})for(size_t first=1;first<=width;++first)
+    for(unsigned denied=0;denied<4;++denied)for(bool write:{false,true}) {
+      CAPTURE(width,first,denied,write);
+      auto* pointer=pages+page-first;
+      std::array<unsigned char,16> original{};
+      for(size_t i=0;i<original.size();++i)original[i]=uint8_t(0xA5+i);
+      std::memcpy(pages+page-8,original.data(),original.size());
+      REQUIRE(mprotect(pages,page,denied&1?PROT_NONE:PROT_READ|PROT_WRITE)==0);
+      REQUIRE(mprotect(pages+page,page,denied&2?PROT_NONE:PROT_READ|PROT_WRITE)==0);
+      const bool succeeds=!(denied&1)&&(!(denied&2)||first==width);
+      rex::guest::ExecutionActivation activation;
+      uint64_t output=0xDEADBEEF18273645ULL;
+      const uint64_t replacement=0x91572368A5B6C7D8ULL;
+      auto result=write?rex::guest::detail::TryWriteBytes(pointer,&replacement,width):
+                        rex::guest::detail::TryReadBytes(pointer,&output,width);
+      CHECK(result.IsSuccess()==succeeds);
+      if(result.Failed()) {
+        CHECK(activation.HasPendingFault());
+        auto fault=activation.Consume(result.Fault());
+        CHECK(fault.access_intent==unsigned(write));
+        CHECK(fault.address==reinterpret_cast<uintptr_t>(denied&1?pointer:pages+page));
+        CHECK(activation.published_faults()==1);CHECK(activation.consumed_faults()==1);
+        if(!write)CHECK(output==0xDEADBEEF18273645ULL);
+      } else {
+        CHECK(activation.published_faults()==0);CHECK(activation.consumed_faults()==0);
+        if(!write)CHECK(std::memcmp(&output,original.data()+8-first,width)==0);
+      }
+      CHECK_FALSE(activation.HasPendingFault());
+      REQUIRE(mprotect(pages,page*2,PROT_READ|PROT_WRITE)==0);
+      if(write&&succeeds)std::memcpy(original.data()+8-first,&replacement,width);
+      CHECK(std::memcmp(pages+page-8,original.data(),original.size())==0);
+    }
+
+}
 
 #endif
