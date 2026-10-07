@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <cstdio>
 #include <memory>
 #include <thread>
 
@@ -15,6 +16,9 @@
 #include <WinSock2.h>
 #else
 #include <arpa/inet.h>
+#if REX_PLATFORM_LINUX
+#include <dlfcn.h>
+#endif
 #endif
 
 #include <rex/system/xam/nat_probe.h>
@@ -789,6 +793,32 @@ TEST_CASE("authenticated grant drives the complete host admission path",
     CHECK(grants->available_grant_count() == 0);
   }
 
+  SECTION("private eligibility commits to witnessed public-only host capacity") {
+    auto session = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 3074}, 0x42f, 6, 0);
+    auto grants = std::make_shared<HostAdmissionGrantStore>();
+    NatFixture nat;
+    LanDiscoveryService host(title_id, port, grants);
+    REQUIRE(host.Advertise(session));
+    nat.Add(kAttemptA);
+    Install(*grants, Clock::now(), PrivateAttempt(kAttemptA, 1, 60000));
+    SocketFixture peer;
+    REQUIRE(peer.socket != kBadSocket);
+    const auto peer_address = BindLoopback(peer.socket);
+    AcknowledgeHostAttempt(peer.socket, port, kAttemptA, peer_address);
+    const auto requested_private = JoinPacket(*session, title_id, 2, true);
+    REQUIRE(TransferDiscovery(peer.socket, port, requested_private));
+    REQUIRE(session->members.size() == 2);
+    CHECK_FALSE(session->members.back().private_slot);
+    CHECK(session->FilledPublicSlots() == 2);
+    CHECK(session->FilledPrivateSlots() == 0);
+    CHECK(grants->available_grant_count() == 0);
+    REQUIRE(TransferDiscovery(peer.socket, port, requested_private));
+    CHECK(session->members.size() == 2);
+    CHECK_FALSE(session->members.back().private_slot);
+    CHECK(Reserve(*grants, 3, Clock::now(), "session-a").status ==
+          HostAdmissionReservationStatus::kNoMatch);
+  }
+
   SECTION("capacity rejection releases the reservation for retry") {
     auto session = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 3074}, 1, 1, 0);
     auto grants = std::make_shared<HostAdmissionGrantStore>();
@@ -801,7 +831,7 @@ TEST_CASE("authenticated grant drives the complete host admission path",
     REQUIRE(peer.socket != kBadSocket);
     const auto peer_address = BindLoopback(peer.socket);
     AcknowledgeHostAttempt(peer.socket, port, kAttemptA, peer_address);
-    const auto join = JoinPacket(*session, title_id, 2, false);
+    const auto join = JoinPacket(*session, title_id, 2, true);
 
     CHECK_FALSE(TransferDiscovery(peer.socket, port, join));
     CHECK(session->members.size() == 1);
@@ -809,6 +839,8 @@ TEST_CASE("authenticated grant drives the complete host admission path",
     REQUIRE(registry.Modify(session->info.id, 1, 2, 0));
     REQUIRE(TransferDiscovery(peer.socket, port, join));
     CHECK(session->members.size() == 2);
+    CHECK_FALSE(session->members.back().private_slot);
+    CHECK(session->FilledPrivateSlots() == 0);
     CHECK(grants->available_grant_count() == 0);
   }
 
@@ -876,12 +908,163 @@ TEST_CASE("grant-backed public request is transactional with private pool full",
   CHECK(session.FilledPublicSlots() == 2);
   CHECK(session.FilledPrivateSlots() == 1);
 
-  auto impossible_private = Member(4, true);
+  auto private_eligible = Member(4, true);
+  REQUIRE(ApplyDiscoveryMemberBatch(
+      session, std::span<const SessionMember>(&private_eligible, 1), invite));
+  CHECK_FALSE(session.members.back().private_slot);
+  CHECK(session.FilledPublicSlots() == 3);
+  CHECK(session.FilledPrivateSlots() == 1);
+  auto no_capacity = Member(5, true);
   CHECK_FALSE(ApplyDiscoveryMemberBatch(
-      session, std::span<const SessionMember>(&impossible_private, 1), invite));
-  std::array invalid_share{Member(4), Member(5)};
+      session, std::span<const SessionMember>(&no_capacity, 1), invite));
+  std::array invalid_share{Member(5), Member(6)};
   CHECK_FALSE(ApplyDiscoveryMemberBatch(session, invalid_share, invite));
-  CHECK(session.members.size() == 3);
+  CHECK(session.members.size() == 4);
+}
+
+TEST_CASE("authenticated private eligibility uses witnessed public-only host capacity",
+          "[session][invite-grant][admission][private-fallback]") {
+#if REX_PLATFORM_LINUX
+  Dl_info loaded{};
+  REQUIRE(dladdr(reinterpret_cast<const void*>(&ApplyDiscoveryMemberBatch), &loaded));
+  REQUIRE(loaded.dli_fname);
+  const nlohmann::json loaded_row{{"kind", "loaded_runtime"}, {"path", loaded.dli_fname}};
+  std::printf("%s\n", loaded_row.dump().c_str());
+#endif
+  SessionRegistry registry;
+  auto session = registry.Create(1, "LocalHost", {htonl(INADDR_LOOPBACK), 3074},
+                                 0x42f, 6, 0);
+  REQUIRE(session->members.size() == 1);
+  REQUIRE(session->members.front().local);
+  REQUIRE_FALSE(session->members.front().private_slot);
+  const DiscoveryAdmissionContext invite{DiscoveryAdmissionSource::kInviteGrant};
+  auto requested = Member(2, true);
+  requested.gameplay_admission = std::make_shared<const GameplayAdmissionBinding>(
+      GameplayAdmissionBinding{"session-a", std::string(kAttemptA), std::string(kGeneration)});
+  REQUIRE(ApplyDiscoveryMemberBatch(*session, std::span(&requested, 1), invite));
+  REQUIRE(session->members.size() == 2);
+  CHECK_FALSE(session->members.back().private_slot);
+  CHECK_FALSE(session->members.back().local);
+  CHECK(session->members.back().gameplay_admission == requested.gameplay_admission);
+  CHECK(session->FilledPublicSlots() == 2);
+  CHECK(session->FilledPrivateSlots() == 0);
+  CHECK(session->OpenPublicSlots() == 4);
+  CHECK(session->OpenPrivateSlots() == 0);
+  // The authenticated confirmation/retry preserves the allocated public pool,
+  // its admission instance and metadata even though private eligibility repeats.
+  const auto admission = session->members.back().gameplay_admission;
+  requested.name = "Replacement";
+  REQUIRE(ApplyDiscoveryMemberBatch(*session, std::span(&requested, 1), invite));
+  CHECK(session->members.size() == 2);
+  CHECK_FALSE(session->members.back().private_slot);
+  CHECK(session->members.back().name == "Player2");
+  CHECK(session->members.back().gameplay_admission == admission);
+}
+
+TEST_CASE("authenticated private preference preserves pool constraints and rollback",
+          "[session][invite-grant][admission][private-fallback]") {
+  const DiscoveryAdmissionContext invite{DiscoveryAdmissionSource::kInviteGrant};
+  SessionRecord session;
+  session.host_xuid = 1;
+  session.max_public_slots = 2;
+  session.max_private_slots = 1;
+  session.members = {Member(1)};
+  auto first = Member(2, true);
+  REQUIRE(ApplyDiscoveryMemberBatch(session, std::span(&first, 1), invite));
+  CHECK(session.members.back().private_slot);
+  auto second = Member(3, true);
+  REQUIRE(ApplyDiscoveryMemberBatch(session, std::span(&second, 1), invite));
+  CHECK_FALSE(session.members.back().private_slot);
+  CHECK(session.FilledPublicSlots() == 2);
+  CHECK(session.FilledPrivateSlots() == 1);
+  const auto before = session.members;
+  auto reject_unchanged = [&](std::span<const SessionMember> batch) {
+    CHECK_FALSE(ApplyDiscoveryMemberBatch(session, batch, invite));
+    REQUIRE(session.members.size() == before.size());
+    for (size_t i = 0; i < before.size(); ++i) {
+      CHECK(session.members[i].xuid == before[i].xuid);
+      CHECK(session.members[i].name == before[i].name);
+      CHECK(session.members[i].private_slot == before[i].private_slot);
+      CHECK(session.members[i].gameplay_admission == before[i].gameplay_admission);
+    }
+  };
+  auto full = Member(4, true);
+  reject_unchanged(std::span(&full, 1));
+  auto invalid = Member(0, true);
+  reject_unchanged(std::span(&invalid, 1));
+  auto host = Member(1, true);
+  reject_unchanged(std::span(&host, 1));
+  std::array repeated{Member(4, true), Member(4)};
+  reject_unchanged(repeated);
+  std::array mixed{Member(2), Member(4, true)};
+  reject_unchanged(mixed);
+  // Existing membership is idempotent even with both pools full, and never
+  // reclassifies a private member into the full public pool.
+  auto retry = Member(2, false);
+  REQUIRE(ApplyDiscoveryMemberBatch(session, std::span(&retry, 1), invite));
+  CHECK(session.members[1].private_slot);
+}
+
+TEST_CASE("private eligibility never expands public or ordinary title authority",
+          "[session][invite-grant][admission][private-fallback][security]") {
+  SessionRegistry registry;
+  auto session = registry.Create(1, "Host", {}, 1, 1, 1);
+  const DiscoveryAdmissionContext invite{DiscoveryAdmissionSource::kInviteGrant};
+  auto private_claim = Member(2, true);
+  CHECK_FALSE(ApplyDiscoveryMemberBatch(*session, std::span(&private_claim, 1), {}));
+  CHECK(session->members.size() == 1);
+  auto public_request = Member(2);
+  CHECK_FALSE(ApplyDiscoveryMemberBatch(*session, std::span(&public_request, 1), invite));
+  REQUIRE(ApplyDiscoveryMemberBatch(*session, std::span(&private_claim, 1), invite));
+  CHECK(session->members.back().private_slot);
+  CHECK_FALSE(registry.Join(session->info.id, Member(2, false)));
+  CHECK(session->members.back().private_slot);
+
+  auto public_only = registry.Create(3, "Host", {}, 1, 6, 0);
+  CHECK_FALSE(registry.Join(public_only->info.id, Member(4, true)));
+  CHECK(public_only->members.size() == 1);
+}
+
+TEST_CASE("zero public capacity and zero total capacity stay bounded for invite allocation",
+          "[session][invite-grant][admission][private-fallback]") {
+  SessionRecord session;
+  session.host_xuid = 1;
+  const DiscoveryAdmissionContext invite{DiscoveryAdmissionSource::kInviteGrant};
+  auto requested = Member(2, true);
+  CHECK_FALSE(ApplyDiscoveryMemberBatch(session, std::span(&requested, 1), invite));
+  CHECK(session.members.empty());
+  session.max_private_slots = 1;
+  REQUIRE(ApplyDiscoveryMemberBatch(session, std::span(&requested, 1), invite));
+  CHECK(session.members.back().private_slot);
+  auto next = Member(3, true);
+  CHECK_FALSE(ApplyDiscoveryMemberBatch(session, std::span(&next, 1), invite));
+  CHECK(session.members.size() == 1);
+}
+
+TEST_CASE("invite fallback final public slot has one atomic winner",
+          "[session][invite-grant][admission][private-fallback][concurrency]") {
+  for (unsigned iteration = 0; iteration < 16; ++iteration) {
+    SessionRegistry registry;
+    auto session = registry.Create(1, "Host", {}, 1, 2, 0);
+    const DiscoveryAdmissionContext invite{DiscoveryAdmissionSource::kInviteGrant};
+    std::barrier start(3);
+    std::array<bool, 2> admitted{};
+    std::thread first([&] {
+      auto member = Member(2, true);
+      start.arrive_and_wait();
+      admitted[0] = ApplyDiscoveryMemberBatch(*session, std::span(&member, 1), invite);
+    });
+    std::thread second([&] {
+      auto member = Member(3, true);
+      start.arrive_and_wait();
+      admitted[1] = ApplyDiscoveryMemberBatch(*session, std::span(&member, 1), invite);
+    });
+    start.arrive_and_wait();
+    first.join(); second.join();
+    CHECK(unsigned(admitted[0]) + unsigned(admitted[1]) == 1);
+    CHECK(session->FilledPublicSlots() == 2);
+    CHECK(session->FilledPrivateSlots() == 0);
+  }
 }
 
 TEST_CASE("successful grant-backed public request consumes its exact grant",

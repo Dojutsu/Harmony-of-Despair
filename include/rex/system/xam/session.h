@@ -148,7 +148,8 @@ struct DiscoveryAdmissionContext {
 };
 
 // Authoritative hosted-session mutation seam. Public discovery ignores a peer
-// private-bit claim; an invite context may honor the title-selected slot pool.
+// private-bit claim. A verified invite permits private-first allocation with
+// public fallback; the stored private_slot always describes the allocated pool.
 bool ApplyDiscoveryMemberBatch(SessionRecord& session, std::span<const SessionMember> members,
                                DiscoveryAdmissionContext context);
 

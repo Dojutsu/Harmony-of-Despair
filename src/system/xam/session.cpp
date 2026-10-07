@@ -183,8 +183,20 @@ bool ApplyMemberBatch(SessionRecord& session, std::span<const SessionMember> mem
       if (it != candidate.end())
         continue;
       member.local = false;
-      if (source == MemberUpdateSource::kDiscoveryPublic)
+      if (source == MemberUpdateSource::kDiscoveryPublic) {
         member.private_slot = false;
+      } else if (member.private_slot) {
+        // A verified invite makes the joining player eligible for a private
+        // slot. It does not require a private slot: the title may host only
+        // public capacity while still joining through its invite path. Plan
+        // the final pool under this same record lock, preferring private
+        // capacity and falling back to public capacity when it is exhausted.
+        const auto private_count = std::count_if(
+            candidate.begin(), candidate.end(),
+            [](const auto& current) { return current.private_slot; });
+        if (uint64_t(private_count) >= session.max_private_slots)
+          member.private_slot = false;
+      }
     } else if (it != candidate.end() && member.name.empty()) {
       // Preserve a name learned from the companion status channel when the
       // title retries membership with no display-name field.

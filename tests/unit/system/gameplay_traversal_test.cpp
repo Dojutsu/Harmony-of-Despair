@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/syscall.h>
+#include <dlfcn.h>
 #include <future>
 #endif
 #include <rex/system/xam/gameplay_traversal.h>
@@ -20,6 +21,7 @@
 #include <filesystem>
 #include <thread>
 #include <cstdlib>
+#include <cstdio>
 #include <set>
 #include <rex/system/xam/session_directory.h>
 
@@ -268,6 +270,17 @@ TEST_CASE("production admission to independent gameplay sockets fixture", "[.gam
   if(!root_env || !role_env || !url_env) SKIP("Run tools/gameplay_traversal_audit/integration.py");
   const std::filesystem::path root(root_env);
   const uint64_t local=std::stoull(role_env);
+  const char* fallback_env = std::getenv("HARMONY_GAMEPLAY_PRIVATE_FALLBACK");
+  const bool private_fallback = fallback_env && std::string_view(fallback_env) == "1";
+#if REX_PLATFORM_LINUX
+  Dl_info loaded{};
+  REQUIRE(dladdr(reinterpret_cast<const void*>(&ApplyDiscoveryMemberBatch), &loaded));
+  REQUIRE(loaded.dli_fname);
+  const auto loaded_path = std::filesystem::canonical(loaded.dli_fname).string();
+  REQUIRE(loaded_path.find("librexruntime") != std::string::npos);
+  std::printf("{\"kind\":\"loaded_runtime\",\"path\":\"%s\",\"role\":%llu}\n",
+              loaded_path.c_str(), static_cast<unsigned long long>(local));
+#endif
   const uint16_t discovery_port=uint16_t(std::stoul(std::getenv("HARMONY_GAMEPLAY_DISCOVERY_PORT")));
   REXCVAR_SET(session_directory_url,std::string(url_env));
   REXCVAR_SET(session_directory_build_id,std::string("gameplay-fixture"));
@@ -286,7 +299,8 @@ TEST_CASE("production admission to independent gameplay sockets fixture", "[.gam
   uint16_t discovery_source_port=0;
   if(local==1) {
     gameplay=std::make_unique<RuntimeUdp>();gameplay->Attach();
-    session=registry.Create(1,"FixtureHost",gameplay->address,1,3,3);
+    session=registry.Create(1,"FixtureHost",gameplay->address,private_fallback ? 0x42f : 1,
+                            private_fallback ? 6 : 3, private_fallback ? 0 : 3);
     REQUIRE(BindGameplaySocket(session,1,gameplay->socket,1000));
     REQUIRE(discovery.Advertise(session));
     std::string code;
@@ -309,7 +323,12 @@ TEST_CASE("production admission to independent gameplay sockets fixture", "[.gam
     sockaddr_in addr{};SockLen size=sizeof(addr);
     REQUIRE(getsockname(found->socket,reinterpret_cast<sockaddr*>(&addr),&size)==0);
     discovery_source_port=ntohs(addr.sin_port);
-    auto correlated=std::make_shared<SessionRecord>(std::move(found->session));
+    auto correlated=registry.UpsertDiscovered(std::move(found->session));
+    REQUIRE(correlated);
+    if (private_fallback) {
+      REQUIRE(correlated->max_public_slots == 6);
+      REQUIRE(correlated->max_private_slots == 0);
+    }
     REQUIRE(discovery.PrepareClientAdmission(0,issued->attempt,*correlated,found->socket)==ClientAdmissionPrepareResult::kPrepared);
     REQUIRE(discovery.ConfirmClientAdmissionSession(0,correlated));
     std::optional<ReadyAcceptedSessionCandidate> ready;
@@ -320,13 +339,37 @@ TEST_CASE("production admission to independent gameplay sockets fixture", "[.gam
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     REQUIRE(ready);
+    REQUIRE(ready->private_allocation_eligible);
     auto joined=discovery.Join(*correlated,{local,"FixtureClient",0,true,true,false},1000);
     REQUIRE(joined);
-    session=std::make_shared<SessionRecord>(std::move(*joined));
-    for(auto& member:session->members) {
+    bool local_member_found = false;
+    for(auto& member:joined->members) {
       member.local=member.xuid==local;
-      if(member.local)member.gameplay_admission=std::make_shared<const GameplayAdmissionBinding>(
-          GameplayAdmissionBinding{ready->directory_session_id,ready->attempt_id,ready->admission_generation});
+      if(member.local) {
+        local_member_found = true;
+        member.user_index = 0;
+        member.name = "FixtureClient";
+        if (private_fallback) REQUIRE_FALSE(member.private_slot);
+        member.gameplay_admission=std::make_shared<const GameplayAdmissionBinding>(
+            GameplayAdmissionBinding{ready->directory_session_id,ready->attempt_id,ready->admission_generation});
+      }
+    }
+    REQUIRE(local_member_found);
+    // Use the same retained-record publication as XGI JoinLocal. Local
+    // projection changes identity metadata but preserves the host's pool.
+    const auto retained = correlated;
+    REQUIRE(registry.CommitJoinedRecord(correlated, std::move(*joined), [&] {
+      return correlated == retained;
+    }));
+    session = correlated;
+    if (private_fallback) {
+      CHECK(session->FilledPrivateSlots() == 0);
+      const auto member = std::find_if(session->members.begin(), session->members.end(),
+          [&](const auto& value) { return value.xuid == local; });
+      REQUIRE(member != session->members.end());
+      REQUIRE(member->local);
+      REQUIRE_FALSE(member->private_slot);
+      REQUIRE(member->gameplay_admission);
     }
     discovery.QueueGameplayAdmission(session,0,local,issued->attempt,ready->admission_generation);
     // Create A2 only after the host has had time to complete/retire A1.
@@ -338,7 +381,19 @@ TEST_CASE("production admission to independent gameplay sockets fixture", "[.gam
   auto deadline=Clock::now()+std::chrono::seconds(35);
   auto next_send=Clock::now();
   bool reported=false;
+  bool encrypted_wire_observed = false;
   while(Clock::now()<deadline && !std::filesystem::exists(root/"stop")) {
+    // Observe the native transport without consuming it. The actual XSocket
+    // below must then authenticate/decrypt and preserve every plaintext byte.
+    std::array<uint8_t,128> wire{};
+    const int wire_count = ::recvfrom(gameplay->socket, reinterpret_cast<char*>(wire.data()),
+                                     int(wire.size()), MSG_PEEK, nullptr, nullptr);
+    if (wire_count >= 4 && std::memcmp(wire.data(), "HGDP", 4) == 0) {
+      REQUIRE(wire_count == 39 + kGameplayDatagramHeaderBytes + kGameplayDatagramTagBytes);
+      REQUIRE(wire[4] == 1);
+      REQUIRE(wire[7] == kGameplayDatagramHeaderBytes);
+      encrypted_wire_observed = true;
+    }
     std::array<uint8_t,2048> buffer{};N_XSOCKADDR_IN source{};uint32_t length=sizeof(source);
     int count=gameplay->endpoint.RecvFrom(buffer.data(),buffer.size(),0,&source,&length);
     if(count>=0) {
@@ -366,17 +421,22 @@ TEST_CASE("production admission to independent gameplay sockets fixture", "[.gam
       }
       next_send=Clock::now()+std::chrono::milliseconds(80);
     }
-    if(received.size()==2 && !reported) {
+    if(received.size()==2 && encrypted_wire_observed && !reported) {
       std::ofstream out(root/(std::to_string(local)+".ready"));
-      out<<"discovery="<<discovery_source_port<<" gameplay="<<gameplay->address.port<<" peers=2 bytes=39";
+      out<<"discovery="<<discovery_source_port<<" gameplay="<<gameplay->address.port<<" peers=2 bytes=39"
+         <<" private_eligible=1 public_fallback="<<int(private_fallback)
+         <<" private_cap="<<session->max_private_slots<<" encrypted_wire=1";
       reported=true;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
   CHECK(received.size()==2);
+  CHECK(encrypted_wire_observed);
   if(local==1) {
     std::lock_guard lock(*session->mutex);
-    CHECK(session->members.size()==3);CHECK(session->FilledPublicSlots()==1);CHECK(session->FilledPrivateSlots()==2);
+    CHECK(session->members.size()==3);
+    CHECK(session->FilledPublicSlots()==(private_fallback ? 3 : 1));
+    CHECK(session->FilledPrivateSlots()==(private_fallback ? 0 : 2));
   }
 }
 } // namespace rex::system::xam
