@@ -27,6 +27,8 @@
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/util.h>
 
+#include "capture_submission.h"
+
 #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
 #include <ffx_api/ffx_api.h>
 #include <ffx_api/ffx_upscale.h>
@@ -457,6 +459,12 @@ Surface::TypeFlags VulkanPresenter::GetSupportedSurfaceTypes() const {
 }
 
 bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
+  VulkanCaptureState& capture_state = vulkan_device_->capture_state();
+  auto capture_lock = capture_state.Acquire();
+  if (!capture_state.ReapCompleted()) {
+    return false;
+  }
+
   std::shared_ptr<GuestOutputImage> guest_output_image;
   {
     uint32_t guest_output_mailbox_index;
@@ -487,8 +495,11 @@ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
   if (buffer_size > kMaximumCaptureBytes) {
     return false;
   }
-  VkBuffer buffer;
-  VkDeviceMemory buffer_memory;
+  const VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  const VkDevice device = vulkan_device_->device();
+  auto submission = std::make_unique<VulkanCaptureSubmission>(device, dfn, guest_output_image);
+  VkBuffer& buffer = submission->buffer;
+  VkDeviceMemory& buffer_memory = submission->memory;
   uint32_t buffer_memory_type;
   if (!util::CreateDedicatedAllocationBuffer(
           vulkan_device_, buffer_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -497,25 +508,22 @@ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
     return false;
   }
 
-  const VulkanDevice::Functions& dfn = vulkan_device_->functions();
-  const VkDevice device = vulkan_device_->device();
-
   {
     VkCommandPoolCreateInfo command_pool_create_info;
     command_pool_create_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     command_pool_create_info.pNext = nullptr;
     command_pool_create_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
     command_pool_create_info.queueFamilyIndex = vulkan_device_->queue_family_graphics_compute();
-    VkCommandPool command_pool;
-    if (dfn.vkCreateCommandPool(device, &command_pool_create_info, nullptr, &command_pool) !=
+    VkCommandPool created_command_pool = VK_NULL_HANDLE;
+    if (dfn.vkCreateCommandPool(device, &command_pool_create_info, nullptr, &created_command_pool) !=
         VK_SUCCESS) {
       REXLOG_ERROR(
           "VulkanPresenter: Failed to create the guest output capturing "
           "command pool");
-      dfn.vkDestroyBuffer(device, buffer, nullptr);
-      dfn.vkFreeMemory(device, buffer_memory, nullptr);
       return false;
     }
+    VkCommandPool& command_pool = submission->command_pool;
+    command_pool = created_command_pool;
 
     VkCommandBufferAllocateInfo command_buffer_allocate_info;
     command_buffer_allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -523,15 +531,12 @@ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
     command_buffer_allocate_info.commandPool = command_pool;
     command_buffer_allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     command_buffer_allocate_info.commandBufferCount = 1;
-    VkCommandBuffer command_buffer;
+    VkCommandBuffer& command_buffer = submission->command_buffer;
     if (dfn.vkAllocateCommandBuffers(device, &command_buffer_allocate_info, &command_buffer) !=
         VK_SUCCESS) {
       REXLOG_ERROR(
           "VulkanPresenter: Failed to allocate the guest output capturing "
           "command buffer");
-      dfn.vkDestroyCommandPool(device, command_pool, nullptr);
-      dfn.vkDestroyBuffer(device, buffer, nullptr);
-      dfn.vkFreeMemory(device, buffer_memory, nullptr);
       return false;
     }
 
@@ -544,9 +549,6 @@ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
       REXLOG_ERROR(
           "VulkanPresenter: Failed to begin recording the guest output "
           "capturing command buffer");
-      dfn.vkDestroyCommandPool(device, command_pool, nullptr);
-      dfn.vkDestroyBuffer(device, buffer, nullptr);
-      dfn.vkFreeMemory(device, buffer_memory, nullptr);
       return false;
     }
 
@@ -595,9 +597,6 @@ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
       REXLOG_ERROR(
           "VulkanPresenter: Failed to end recording the guest output capturing "
           "command buffer");
-      dfn.vkDestroyCommandPool(device, command_pool, nullptr);
-      dfn.vkDestroyBuffer(device, buffer, nullptr);
-      dfn.vkFreeMemory(device, buffer_memory, nullptr);
       return false;
     }
 
@@ -605,56 +604,49 @@ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &command_buffer;
-    VulkanSubmissionTracker submission_tracker(vulkan_device_);
-    {
-      VulkanSubmissionTracker::FenceAcquisition fence_acqusition(
-          submission_tracker.AcquireFenceToAdvanceSubmission());
-      if (!fence_acqusition.fence()) {
-        REXLOG_ERROR(
-            "VulkanPresenter: Failed to acquire a fence for guest output "
-            "capturing");
-        fence_acqusition.SubmissionFailedOrDropped();
-        dfn.vkDestroyCommandPool(device, command_pool, nullptr);
-        dfn.vkDestroyBuffer(device, buffer, nullptr);
-        dfn.vkFreeMemory(device, buffer_memory, nullptr);
-        return false;
-      }
-      VkResult submit_result;
-      {
-        const VulkanDevice::Queue::Acquisition queue_acquisition =
-            vulkan_device_->AcquireQueue(vulkan_device_->queue_family_graphics_compute(), 0);
-        submit_result =
-            dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence_acqusition.fence());
-      }
-      if (submit_result != VK_SUCCESS) {
-        REXLOG_ERROR(
-            "VulkanPresenter: Failed to submit the guest output capturing "
-            "command buffer");
-        fence_acqusition.SubmissionFailedOrDropped();
-        dfn.vkDestroyCommandPool(device, command_pool, nullptr);
-        dfn.vkDestroyBuffer(device, buffer, nullptr);
-        dfn.vkFreeMemory(device, buffer_memory, nullptr);
-        return false;
-      }
+    VkFenceCreateInfo fence_create_info = {};
+    fence_create_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence created_fence = VK_NULL_HANDLE;
+    if (dfn.vkCreateFence(device, &fence_create_info, nullptr, &created_fence) != VK_SUCCESS) {
+      REXLOG_ERROR("VulkanPresenter: Failed to create the guest output capture fence");
+      return false;
     }
-    if (!submission_tracker.AwaitAllSubmissionsCompletion()) {
-      REXLOG_ERROR("VulkanPresenter: Failed to await the guest output capturing fence");
-      dfn.vkDestroyCommandPool(device, command_pool, nullptr);
-      dfn.vkDestroyBuffer(device, buffer, nullptr);
-      dfn.vkFreeMemory(device, buffer_memory, nullptr);
+    submission->fence = created_fence;
+    VkResult submit_result;
+    {
+      const VulkanDevice::Queue::Acquisition queue_acquisition =
+          vulkan_device_->AcquireQueue(vulkan_device_->queue_family_graphics_compute(), 0);
+      submit_result = dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, submission->fence);
+    }
+    if (submit_result != VK_SUCCESS) {
+      REXLOG_ERROR("VulkanPresenter: Failed to submit guest output capture ({})",
+                   int32_t(submit_result));
+      if (submit_result == VK_ERROR_DEVICE_LOST) {
+        capture_state.DeviceLost();
+      }
+      return false;
+    }
+    submission->MarkSubmitted();
+    // Diagnostics must not hold the capture worker's shutdown join indefinitely.
+    // A timeout keeps every referenced Vulkan resource alive on the device.
+    VkResult wait_result = capture_state.AwaitCapture(submission);
+    if (wait_result != VK_SUCCESS) {
+      REXLOG_WARN("VulkanPresenter: Guest output capture fence wait failed ({})",
+                  int32_t(wait_result));
       return false;
     }
 
     dfn.vkDestroyCommandPool(device, command_pool, nullptr);
+    command_pool = VK_NULL_HANDLE;
   }
 
   // Don't need the buffer anymore, just its memory.
   dfn.vkDestroyBuffer(device, buffer, nullptr);
+  buffer = VK_NULL_HANDLE;
 
   void* mapping;
   if (dfn.vkMapMemory(device, buffer_memory, 0, VK_WHOLE_SIZE, 0, &mapping) != VK_SUCCESS) {
     REXLOG_ERROR("VulkanPresenter: Failed to map the guest output capture memory");
-    dfn.vkFreeMemory(device, buffer_memory, nullptr);
     return false;
   }
 
@@ -671,7 +663,6 @@ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
     if (dfn.vkInvalidateMappedMemoryRanges(device, 1, &range) != VK_SUCCESS) {
       REXLOG_ERROR("VulkanPresenter: Failed to invalidate guest output capture memory");
       // Freeing mapped memory also unmaps it, as on the normal path below.
-      dfn.vkFreeMemory(device, buffer_memory, nullptr);
       return false;
     }
   }
@@ -685,9 +676,7 @@ bool VulkanPresenter::CaptureGuestOutput(RawImage& image_out) {
     image_out_pixels[i] = Packed10bpcRGBTo8bpcBytes(reinterpret_cast<const uint32_t*>(mapping)[i]);
   }
 
-  // Unmapping will be done by freeing.
-  dfn.vkFreeMemory(device, buffer_memory, nullptr);
-
+  // The completed submission owner frees the mapped allocation (which unmaps it).
   return true;
 }
 

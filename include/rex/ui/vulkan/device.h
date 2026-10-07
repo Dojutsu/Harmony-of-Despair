@@ -20,6 +20,8 @@ namespace rex {
 namespace ui {
 namespace vulkan {
 
+class VulkanCaptureState;
+
 class VulkanDevice {
  public:
   static std::unique_ptr<VulkanDevice> CreateIfSupported(const VulkanInstance* vulkan_instance,
@@ -226,6 +228,9 @@ class VulkanDevice {
 
   const Functions& functions() const { return functions_; }
 
+  // Capture-specific ownership outlives a timed-out capture and its presenter.
+  VulkanCaptureState& capture_state() const { return *capture_state_; }
+
   template <typename Object>
   void SetObjectName(const VkObjectType object_type, const Object object_handle,
                      const char* const object_name) const {
@@ -306,6 +311,7 @@ class VulkanDevice {
   uint32_t queue_family_sparse_binding_ = UINT32_MAX;
 
   MemoryTypes memory_types_;
+  std::unique_ptr<VulkanCaptureState> capture_state_;
 };
 
 }  // namespace vulkan

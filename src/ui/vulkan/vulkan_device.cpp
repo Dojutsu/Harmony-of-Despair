@@ -22,6 +22,8 @@
 #include <rex/string.h>
 #include <rex/ui/vulkan/device.h>
 
+#include "capture_submission.h"
+
 REXCVAR_DEFINE_BOOL(vulkan_require_fragment_stores_and_atomics, true, "UI/Vulkan",
                     "Deprecated and ignored for parity; fragmentStoresAndAtomics is always "
                     "required for Vulkan GPU emulation")
@@ -853,13 +855,17 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
 
 VulkanDevice::~VulkanDevice() {
   if (device_) {
+    // Destroy retained capture resources only after completion or device loss.
+    capture_state_->Shutdown();
     vulkan_instance_->functions().vkDestroyDevice(device_, nullptr);
   }
 }
 
 VulkanDevice::VulkanDevice(const VulkanInstance* const vulkan_instance,
                            const VkPhysicalDevice physical_device)
-    : vulkan_instance_(vulkan_instance), physical_device_(physical_device) {
+    : vulkan_instance_(vulkan_instance),
+      physical_device_(physical_device),
+      capture_state_(std::make_unique<VulkanCaptureState>()) {
   assert_not_null(vulkan_instance);
   assert_not_null(physical_device);
 }

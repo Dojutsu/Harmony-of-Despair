@@ -88,6 +88,19 @@ if(UNIX AND NOT APPLE)
     )
 endif()
 
+# Capture-only Vulkan resource lifetime policy needs no GPU or Vulkan loader.
+if(REXGLUE_USE_VULKAN)
+    find_package(Threads REQUIRED)
+    add_executable(vulkan_capture_lifetime_test ui/vulkan_capture_lifetime_test.cpp)
+    target_include_directories(vulkan_capture_lifetime_test PRIVATE
+        ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
+    target_link_libraries(vulkan_capture_lifetime_test PRIVATE Vulkan::Headers Threads::Threads renderdoc)
+    set_target_properties(vulkan_capture_lifetime_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
+    add_test(NAME vulkan_capture_lifetime COMMAND vulkan_capture_lifetime_test)
+    set_tests_properties(vulkan_capture_lifetime PROPERTIES LABELS "vulkan;capture;lifetime" TIMEOUT 30)
+endif()
+
 # Discover tests
 add_executable(online_status_lifecycle system/online_status_lifecycle.cpp)
 target_link_libraries(online_status_lifecycle PRIVATE rexruntime)
