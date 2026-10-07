@@ -1,6 +1,7 @@
 #include <rex/system/xam/nat_probe.h>
 
 #include <algorithm>
+#include <set>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -485,6 +486,52 @@ bool NatProbeInstallAuthenticatedLanPeer(const NatProbeIdentity& value, uint64_t
     found->second.attempts.emplace(identity.key, std::move(route));
   }
   return true;
+}
+
+bool NatProbeCommitAuthenticatedLanPeers(uint64_t socket,
+    std::span<const NatProbeAuthenticatedLanPeer> peers,
+    std::chrono::steady_clock::time_point expires_at,
+    bool (*commit)(void*) noexcept,void* context) noexcept {
+  if(!commit||peers.size()>5||expires_at<=std::chrono::steady_clock::now())return false;
+  try {
+    std::lock_guard lock(state_mutex);
+    auto found=states.find(socket);
+    if(found==states.end()||found->second.role!=NatProbeRole::kGameplay)return false;
+    auto prepared=found->second.attempts;
+    std::unordered_set<std::string> links;
+    std::set<std::pair<uint32_t,uint16_t>> endpoints,logical_addresses;
+    for(const auto& peer:peers) {
+      const auto ip=ntohl(peer.native.ipv4);
+      Identity identity{};
+      if(peer.identity.participant>1||!peer.logical.ipv4||!peer.logical.port||!peer.native.port||
+         !((ip>>24)==127||(ip>>24)==10||(ip>>20)==0xac1||(ip>>16)==0xc0a8)||
+         !ParseHex(peer.identity.attempt_id,identity.attempt.data())||
+         !ParseHex(peer.identity.capability,identity.capability.data())||
+         !std::any_of(identity.attempt.begin(),identity.attempt.end(),[](uint8_t b){return b!=0;})||
+         !std::any_of(identity.capability.begin(),identity.capability.end(),[](uint8_t b){return b!=0;})||
+         !links.insert(peer.identity.attempt_id).second||
+         !endpoints.emplace(peer.native.ipv4,peer.native.port).second||
+         !logical_addresses.emplace(peer.logical.ipv4,peer.logical.port).second)return false;
+      identity.key=peer.identity.attempt_id;identity.participant=peer.identity.participant;
+      identity.owner_socket=socket;identity.gameplay_authorized=true;identity.direct_lan=true;identity.expires_at=expires_at;
+      auto old=prepared.find(identity.key);
+      if(old!=prepared.end()) {
+        if(!old->second.identity.direct_lan||!old->second.identity.gameplay_authorized||
+           old->second.identity.capability!=identity.capability||old->second.identity.participant!=identity.participant||
+           old->second.logical_gameplay_peer!=peer.logical||old->second.endpoint.acknowledged_peer()!=peer.native)return false;
+        old->second.identity.expires_at=expires_at;
+      } else {
+        AttemptState route;route.identity=identity;route.logical_gameplay_peer=peer.logical;
+        route.attached_at=std::chrono::steady_clock::now();
+        if(!route.endpoint.UpdatePeer(peer.native)||!route.endpoint.Acknowledge(peer.native))return false;
+        prepared.emplace(identity.key,std::move(route));
+      }
+    }
+    std::erase_if(prepared,[&](const auto& pair){return pair.second.identity.gameplay_authorized&&!links.contains(pair.first);});
+    if(expires_at<=std::chrono::steady_clock::now()||!commit(context))return false;
+    found->second.attempts.swap(prepared);
+    return true;
+  }catch(...){return false;}
 }
 
 bool NatProbeIsPendingGameplaySource(uint64_t socket, LanAddress native) {
