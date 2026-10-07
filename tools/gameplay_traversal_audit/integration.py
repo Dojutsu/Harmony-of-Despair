@@ -21,6 +21,8 @@ def main():
                         help='native unit_tests executable; defaults to the Windows build')
     parser.add_argument('--output-directory', type=Path,
                         help='new isolated fixture output directory')
+    parser.add_argument('--invite-public-fallback', action='store_true',
+                        help='verify private-eligible joins against the witnessed six-public/zero-private host')
     args = parser.parse_args()
     binary = args.unit_tests.resolve(strict=True)
     output = (args.output_directory.resolve() if args.output_directory else
@@ -53,6 +55,10 @@ def main():
         env.update(HARMONY_GAMEPLAY_FIXTURE=str(output), HARMONY_GAMEPLAY_ROLE=str(role),
                    HARMONY_GAMEPLAY_URL=f'http://127.0.0.1:{http.server_address[1]}',
                    HARMONY_GAMEPLAY_DISCOVERY_PORT=str(discovery_port), LOCALAPPDATA=str(output / f'profile-{role}'))
+        if args.invite_public_fallback:
+            env['HARMONY_GAMEPLAY_PRIVATE_FALLBACK'] = '1'
+        else:
+            env.pop('HARMONY_GAMEPLAY_PRIVATE_FALLBACK', None)
         log=(output/f'{role}.log').open('w');logs.append(log)
         processes.append(subprocess.Popen([str(binary),
             '[.gameplay-integration]', '--reporter', 'compact'],env=env,stdout=log,stderr=subprocess.STDOUT,
@@ -87,7 +93,34 @@ def main():
                    'process_returncodes': [p.returncode for p in processes],
                    'participants': 3, 'independent_endpoints': 3, 'pair_links': 3,
                    'discovery_attempts_retired': True, 'payload_bytes': 39, 'gameplay_datagram_protocol': 1,
-                   'runtime_socket_send_and_receive': True}
+                   'runtime_socket_send_and_receive': True,
+                   'private_eligible_requests': True,
+                   'host_public_slots': 6 if args.invite_public_fallback else 3,
+                   'host_private_slots': 0 if args.invite_public_fallback else 3,
+                   'public_fallback_verified': args.invite_public_fallback,
+                   'encrypted_wire_observed': True}
+        loaded_runtime_paths = []
+        for role in (1, 2, 3):
+            marker = (output / f'{role}.ready').read_text()
+            assert 'encrypted_wire=1' in marker
+            rows = []
+            for line in (output / f'{role}.log').read_text().splitlines():
+                if line.startswith('{'):
+                    row = json.loads(line)
+                    if row.get('kind') == 'loaded_runtime':
+                        rows.append(row)
+            if sys.platform == 'linux':
+                assert len(rows) == 1 and rows[0]['role'] == role
+                path = Path(rows[0]['path']).resolve(strict=True)
+                assert path.name.startswith('librexruntime')
+                loaded_runtime_paths.append(str(path))
+        if loaded_runtime_paths:
+            assert len(set(loaded_runtime_paths)) == 1
+            receipt['loaded_runtime_paths'] = loaded_runtime_paths
+        if args.invite_public_fallback:
+            for role in (1, 2, 3):
+                marker = (output / f'{role}.ready').read_text()
+                assert 'public_fallback=1 private_cap=0' in marker
         (output/'validation.json').write_text(json.dumps(receipt, indent=2) + '\n')
         print('PASS: production discovery/admission/completion -> three distinct gameplay sockets, all peer pairs, authenticated unchanged 39-byte bidirectional payloads through actual XSocket')
         for i in (1,2,3): print(i,(output/f'{i}.ready').read_text())
