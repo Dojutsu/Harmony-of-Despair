@@ -67,9 +67,17 @@ endif()
 # The options go on the target as well: CMake compiles the header from its own
 # cmake_pch.hxx.cxx, which carries none of the source properties above, and
 # clang rejects a PCH whose EH mode disagrees with the TU including it.
+# Opt-in only: never enable this for a project using native nonlocal jumps.
+option(REXGLUE_FUNCTION_MEMORY_CONSUMER
+    "Reuse a lazy checked guest consumer for generated Linux function accesses" OFF)
+
 function(rexglue_apply_recomp_settings target_name pch_header)
     target_precompile_headers({{ cmake_var("target_name") }} PRIVATE "{{ cmake_var("pch_header") }}")
     target_compile_options({{ cmake_var("target_name") }} PRIVATE {{ cmake_var("REXGLUE_RECOMP_OPTIONS") }})
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$"
+       AND REXGLUE_FUNCTION_MEMORY_CONSUMER)
+        target_compile_definitions({{ cmake_var("target_name") }} PRIVATE REXGLUE_FUNCTION_MEMORY_CONSUMER=1)
+    endif()
 endfunction()
 
 # Configure a rexglue target with SDK libraries and platform settings.

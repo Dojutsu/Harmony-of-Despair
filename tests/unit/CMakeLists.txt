@@ -279,3 +279,22 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME linux_clock COMMAND linux_clock_test)
     set_tests_properties(linux_clock PROPERTIES LABELS "linux;clock" TIMEOUT 20)
 endif()
+
+# This test needs the hidden signal-context marker without exposing a production
+# test seam. Link one exact runtime object/dependency set into the executable;
+# linking the shared runtime as well would create competing private TLS copies.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    add_executable(function_memory_consumer_test core/function_memory_consumer_test.cpp
+        $<TARGET_OBJECTS:rexruntime>)
+    get_target_property(_function_consumer_runtime_libraries rexruntime LINK_LIBRARIES)
+    get_target_property(_function_consumer_runtime_includes rexruntime INCLUDE_DIRECTORIES)
+    target_link_libraries(function_memory_consumer_test PRIVATE ${_function_consumer_runtime_libraries})
+    target_include_directories(function_memory_consumer_test PRIVATE
+        ${_function_consumer_runtime_includes} ${PROJECT_SOURCE_DIR}/thirdparty)
+    target_link_options(function_memory_consumer_test PRIVATE "-Wl,-z,now" "-Wl,-z,text")
+    set_target_properties(function_memory_consumer_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>
+        INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
+    add_test(NAME function_memory_consumer COMMAND function_memory_consumer_test)
+    set_tests_properties(function_memory_consumer PROPERTIES LABELS "linux;guest_fault;codegen" TIMEOUT 60)
+endif()
