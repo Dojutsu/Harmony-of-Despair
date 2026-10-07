@@ -63,6 +63,8 @@ class Member:
 class Link:
     members: tuple[Member, Member]
     credentials: tuple[bytes, bytes] = field(default_factory=lambda: (secrets.token_bytes(16), secrets.token_bytes(16)))
+    # Private admission-ticket material, independent of wire-visible HNAT credentials.
+    traffic_key: bytes = field(default_factory=lambda: secrets.token_bytes(32), repr=False)
     last_seen: dict[int, float] = field(default_factory=dict)
 
 
@@ -171,7 +173,8 @@ class GameplayRegistry:
             links.append(dict(attempt_id=key.hex(), capability=link.credentials[index].hex(),
                 participant=index, peer_xuid=peer.xuid, peer_nonce=peer.nonce,
                 peer_logical_ipv4=peer.logical_ipv4, peer_attempt_id=peer.attempt,
-                peer_admission_generation=peer.generation))
+                peer_admission_generation=peer.generation,
+                traffic_key=link.traffic_key.hex(), datagram_protocol=1))
         return dict(session_id=session, xbox_session=group.xbox_session,
             host_xuid=group.host_xuid, xuid=member.xuid, attempt_id=member.attempt,
             admission_generation=member.generation, member_nonce=member.nonce,

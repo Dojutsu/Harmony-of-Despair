@@ -98,6 +98,47 @@ class GameplayTests(unittest.TestCase):
             self.sync(xbox_session="ffffffffffffffff")
         self.assertEqual(self.claim(a, ac)['member_nonce'], av['member_nonce'])
 
+    def test_pair_traffic_keys_are_private_shared_and_stable_across_renewal(self):
+        a, ac, _ = self.admit(2)
+        b, bc, _ = self.admit(3)
+        host = self.sync()
+        av, bv = self.claim(a, ac), self.claim(b, bc)
+        def link(view, xuid):
+            return next(value for value in view['links'] if value['peer_xuid'] == xuid)
+        ha, ah = link(host, a['xuid']), link(av, self.host_xuid)
+        hb, bh = link(host, b['xuid']), link(bv, self.host_xuid)
+        ab, ba = link(av, b['xuid']), link(bv, a['xuid'])
+        for left, right in ((ha, ah), (hb, bh), (ab, ba)):
+            self.assertTrue(left['traffic_key'] == right['traffic_key'])
+            self.assertTrue(len(bytes.fromhex(left['traffic_key'])) == 32)
+            self.assertTrue(int(left['traffic_key'], 16) != 0)
+            self.assertEqual(left['datagram_protocol'], 1)
+            self.assertNotEqual(left['traffic_key'], left['capability'])
+        self.assertEqual(len({ha['traffic_key'], hb['traffic_key'], ab['traffic_key']}), 3)
+        self.now += 10
+        refreshed = self.sync()
+        self.assertTrue(link(refreshed, a['xuid'])['traffic_key'] == ha['traffic_key'])
+        self.assertTrue(link(self.claim(a, ac), self.host_xuid)['traffic_key'] == ha['traffic_key'])
+        self.assertIsNone(self.claim(a, bc))
+        for record in self.rv.gameplay.groups[self.session].links.values():
+            self.assertNotIn(record.traffic_key.hex(), repr(record))
+
+    def test_departure_and_new_admission_rotate_only_affected_pair_keys(self):
+        a, ac, _ = self.admit(2)
+        b, bc, _ = self.admit(3)
+        initial = self.sync()
+        keys = {value['peer_xuid']: value['traffic_key'] for value in initial['links']}
+        self.members.remove(a)
+        self.sync()
+        self.now += 2  # Real attempt issuance rate limit remains enforced.
+        anew, acnew, _ = self.admit(2)
+        after = self.sync()
+        new_keys = {value['peer_xuid']: value['traffic_key'] for value in after['links']}
+        self.assertTrue(new_keys[b['xuid']] == keys[b['xuid']])
+        self.assertTrue(new_keys[anew['xuid']] != keys[a['xuid']])
+        self.assertIsNone(self.claim(a, ac))
+        self.assertIsNotNone(self.claim(anew, acnew))
+
     def test_completion_and_grant_expiry_do_not_retire_gameplay(self):
         a, ac, ah = self.admit(2)
         initial = self.sync()
