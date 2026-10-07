@@ -5,6 +5,7 @@
 #include <rex/system/xsocket.h>
 #include <rex/cvar.h>
 #include <array>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -130,10 +131,11 @@ TEST_CASE("private LAN invitation tickets protect three real independent runtime
   ArbitrationIdentity identity;std::unique_ptr<PrivateLanAuthority> authority;
   std::optional<EphemeralArbitrationKey> key;PrivateLanJoinClaim own_claim;
   std::optional<GameplayAuthorization> authorization;
+  uint64_t rpc_sequence=0;
   auto initialize_claim=[&] {
     key=NewArbitrationKey();REQUIRE(key);own_claim.xuid=local;own_claim.machine_id=local*11;
     own_claim.endpoint=gameplay->address;own_claim.challenge=*NewArbitrationToken();
-    own_claim.client_public_key=key->public_key();
+    own_claim.client_public_key=key->public_key();own_claim.request_id=*NewArbitrationToken();rpc_sequence=0;
   };
   if(local==1) {
     SessionRegistry registry;auto hosted=registry.Create(1,"Host",gameplay->address,1,3,3);REQUIRE(hosted);
@@ -143,15 +145,51 @@ TEST_CASE("private LAN invitation tickets protect three real independent runtime
   } else {
     auto bytes=Load(root/"identity",64);REQUIRE(bytes);identity=ReadIdentity(*bytes);initialize_claim();
   }
-  auto deadline=LanClock::now()+std::chrono::seconds(35);auto next_rpc=LanClock::time_point{};
+  bool departed=false,rejoined=false,removed=false;
+  if(local!=1) {
+    auto bad_claim=own_claim;std::optional<PrivateLanInvitation::Tag> bad_proof;
+    if(local==2) {
+      auto wrong=PrivateLanInvitation::Load((root/"wrong-invitations/client-0000000000000002.hpli").string());REQUIRE(wrong);
+      bad_proof=wrong->Proof(local,"lan-private-join-claim-v1",PrivateLanJoinTranscript(kPrivateFixtureTitle,identity,bad_claim));
+    } else {
+      bad_claim.xuid=2;
+      bad_proof=invitation->Proof(local,"lan-private-join-claim-v1",PrivateLanJoinTranscript(kPrivateFixtureTitle,identity,bad_claim));
+    }
+    REQUIRE(bad_proof);Save(root/("claim-"+std::to_string(local)),ClaimBytes(bad_claim,*bad_proof));
+  }
+  const auto started=LanClock::now();auto deadline=started+std::chrono::seconds(50);
+  auto last_received=started;auto next_rpc=LanClock::time_point{};
   auto next_send=LanClock::time_point{};std::set<uint64_t> received;bool bound=false,reported=false;
   while(LanClock::now()<deadline&&!std::filesystem::exists(root/"stop")) {
+    if(local!=1&&!std::filesystem::exists(root/("rejected-"+std::to_string(local)))) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));continue;
+    }
+    if(std::filesystem::exists(root/"depart2")&&!removed&&local==1) {
+      REQUIRE(authority->Remove(2));removed=true;Mark(root,"1.removed");
+    }
+    if(std::filesystem::exists(root/"depart2")&&!departed&&local==2) {
+      RevokeGameplayAuthorization(session,local);gameplay.reset();authorization.reset();bound=false;
+      departed=true;Mark(root,"2.departed");
+    }
+    if(departed&&!rejoined&&local==2) {
+      if(!std::filesystem::exists(root/"rejoin2")) {std::this_thread::sleep_for(std::chrono::milliseconds(2));continue;}
+      gameplay=std::make_unique<PrivateRuntimeUdp>();session=std::make_shared<SessionRecord>();
+      initialize_claim();rejoined=true;received.clear();reported=false;next_rpc=LanClock::time_point{};
+    }
+    if(local!=2&&!rejoined&&std::filesystem::exists(root/"rejoin2")) {
+      rejoined=true;received.clear();reported=false;
+    }
     if(LanClock::now()>=next_rpc) {
       if(local==1) {
         for(uint64_t client:{2,3}) {
           auto bytes=Load(root/("claim-"+std::to_string(client)),102);if(!bytes||bytes->size()!=102)continue;
           auto [claim,proof]=ReadClaim(*bytes);
-          if(claim.xuid!=client||!authority->Admit(claim,proof)) {Mark(root,"rejected-"+std::to_string(client));continue;}
+          if(!authority->Admit(claim,proof)) {
+            Mark(root,"rejected-"+std::to_string(client));
+            if(removed&&client==2&&!std::filesystem::exists(root/"rejoin2"))Mark(root,"retired-replay-rejected");
+            continue;
+          }
+          REQUIRE(claim.xuid==client);
           auto ticket=authority->Ticket(client);REQUIRE(ticket);
           const auto aad=PrivateLanJoinTranscript(kPrivateFixtureTitle,identity,claim);
           auto envelope=SealPrivateLanPayload(*invitation,client,claim.client_public_key,*ticket,aad);
@@ -164,7 +202,8 @@ TEST_CASE("private LAN invitation tickets protect three real independent runtime
       } else {
         // The next claim replaces the previous request only after its response
         // is processed below. Each envelope is correlated with this exact ID.
-        own_claim.request_id=*NewArbitrationToken();
+        REQUIRE(rpc_sequence!=UINT64_MAX);++rpc_sequence;
+        for(size_t i=0;i<8;++i)own_claim.request_id[8+i]=uint8_t(rpc_sequence>>((7-i)*8));
         const auto aad=PrivateLanJoinTranscript(kPrivateFixtureTitle,identity,own_claim);
         auto proof=invitation->Proof(local,"lan-private-join-claim-v1",aad);REQUIRE(proof);
         Save(root/("claim-"+std::to_string(local)),ClaimBytes(own_claim,*proof));
@@ -178,6 +217,7 @@ TEST_CASE("private LAN invitation tickets protect three real independent runtime
         auto opened=OpenPrivateLanPayload(*invitation,local,*key,*envelope,aad);REQUIRE(opened);
         auto ticket=ParsePrivateLanGameplayTicket(kPrivateFixtureTitle,identity,local,opened->bytes());REQUIRE(ticket);
         authorization=ticket->authorization;Adopt(session,*authorization);
+        if(local==3&&std::filesystem::exists(root/"depart2")&&authorization->peers.size()==1)Mark(root,"3.removed");
         std::filesystem::remove(root/("reply-"+std::to_string(local)));
       }
     }
@@ -188,7 +228,7 @@ TEST_CASE("private LAN invitation tickets protect three real independent runtime
       if(count>=0) {
         REQUIRE(count==39);REQUIRE(uint16_t(source.sin_port)==3074);
         auto peer=GameplayLogicalToXnAddr(htonl(uint32_t(source.sin_addr)));REQUIRE(peer);
-        REQUIRE(peer->xuid!=local);for(size_t i=0;i<39;++i)REQUIRE(buffer[i]==uint8_t(peer->xuid+i));received.insert(peer->xuid);
+        REQUIRE(peer->xuid!=local);for(size_t i=0;i<39;++i)REQUIRE(buffer[i]==uint8_t(peer->xuid+i));received.insert(peer->xuid);last_received=LanClock::now();
       }
       if(LanClock::now()>=next_send) {
         for(const auto& peer:authorization->peers) {
@@ -200,10 +240,11 @@ TEST_CASE("private LAN invitation tickets protect three real independent runtime
         next_send=LanClock::now()+std::chrono::milliseconds(50);
       }
     }
-    if(received.size()==2&&!reported) {Mark(root,std::to_string(local)+".ready");reported=true;}
+    if(received.size()==2&&!reported) {Mark(root,std::to_string(local)+(rejoined?".rejoined":".ready"));reported=true;}
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
-  CHECK(received.size()==2);RevokeGameplayAuthorization(session,local);
+  CHECK(received.size()==2);CHECK(LanClock::now()-last_received<std::chrono::milliseconds(500));
+  CHECK(LanClock::now()-started>std::chrono::seconds(30));RevokeGameplayAuthorization(session,local);
 #endif
 }
 } // namespace rex::system::xam

@@ -61,9 +61,9 @@ void Run(){
   Check(bool(authority),"legitimate private LAN authority");
   auto key2=NewArbitrationKey(),key3=NewArbitrationKey();Check(bool(key2)&&bool(key3),"authority actual client keys");
   PrivateLanJoinClaim second;second.xuid=2;second.machine_id=22;second.endpoint={htonl(INADDR_LOOPBACK),30002};
-  second.challenge[0]=59;second.request_id[0]=71;second.client_public_key=key2->public_key();
+  second.challenge[0]=59;second.request_id[0]=71;second.request_id[15]=1;second.client_public_key=key2->public_key();
   PrivateLanJoinClaim third;third.xuid=3;third.machine_id=33;third.endpoint={htonl(INADDR_LOOPBACK),30003};
-  third.challenge[0]=83;third.request_id[0]=97;third.client_public_key=key3->public_key();
+  third.challenge[0]=83;third.request_id[0]=97;third.request_id[15]=1;third.client_public_key=key3->public_key();
   auto proof=[&](const PrivateLanInvitation& invitation,const PrivateLanJoinClaim& claim){
     auto tag=invitation.Proof(claim.xuid,"lan-private-join-claim-v1",PrivateLanJoinTranscript(title,identity,claim));
     Check(bool(tag),"client creates its expected private claim proof");return *tag;};
@@ -141,6 +141,24 @@ void Run(){
   Check(!ParsePrivateLanGameplayTicket(title,identity,2,corrupt),"public ticket endpoint rejected");
   corrupt=*encoded;corrupt[112+114]=1;Check(!ParsePrivateLanGameplayTicket(title,identity,2,corrupt),"peer reserved bytes rejected");
   Check(!authority->Ticket(1,999)&&!authority->Ticket(1,60001)&&!authority->Remove(1),"lease bounds and host identity guarded");
+  auto expiry_authority=PrivateLanAuthority::Create(title,identity,{htonl(INADDR_LOOPBACK),30001},invitations.host);
+  Check(bool(expiry_authority),"fresh expiry authority");
+  const auto started=PrivateLanAuthority::Clock::now();
+  Check(expiry_authority->Admit(second,proof(*invitations.second,second),started),"fresh expiry admission");
+  Check(expiry_authority->Admit(second,proof(*invitations.second,second),started+std::chrono::seconds(59)),"duplicate lost-reply RPC accepted without lease renewal");
+  Check(expiry_authority->Expire(started+std::chrono::seconds(60))==std::vector<uint64_t>{2},"duplicate replay cannot extend host membership");
+  Check(!expiry_authority->Ticket(2)&&!expiry_authority->Admit(second,proof(*invitations.second,second),started+std::chrono::seconds(61)),"expired challenge cannot recreate membership");
+  second.challenge[1]=1;second.request_id[15]=1;
+  Check(expiry_authority->Admit(second,proof(*invitations.second,second),started+std::chrono::seconds(62)),"fresh challenge after liveness expiry");
+  const auto before_rpc=second;second.request_id[15]=2;
+  Check(expiry_authority->Admit(second,proof(*invitations.second,second),started+std::chrono::seconds(120)),"fresh monotonic authenticated renewal");
+  Check(expiry_authority->Expire(started+std::chrono::seconds(121)).empty(),"fresh renewal extends exact host liveness");
+  Check(!expiry_authority->Admit(before_rpc,proof(*invitations.second,before_rpc),started+std::chrono::seconds(121)),"earlier signed request rejected after fresh renewal");
+  changed=second;changed.request_id[0]^=1;
+  Check(!expiry_authority->Admit(changed,proof(*invitations.second,changed),started+std::chrono::seconds(121)),"RPC nonce prefix replacement rejected within admission");
+  changed=second;std::fill(changed.request_id.begin()+8,changed.request_id.end(),0);
+  Check(!expiry_authority->Admit(changed,proof(*invitations.second,changed)),"zero renewal sequence rejected");
+  Check(expiry_authority->Expire(started+std::chrono::seconds(180))==std::vector<uint64_t>{2},"renewed member still expires without another fresh RPC");
   std::cout<<checks<<" private LAN authority, three-pair datagram, replay/rejoin and ticket parser checks passed\n";
 }
 #endif

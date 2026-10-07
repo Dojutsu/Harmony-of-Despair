@@ -17,6 +17,7 @@ std::vector<uint8_t> PrivateLanJoinTranscript(uint32_t title,
     const ArbitrationIdentity& identity, const PrivateLanJoinClaim& claim);
 class PrivateLanAuthority final {
  public:
+  using Clock = std::chrono::steady_clock;
   static std::unique_ptr<PrivateLanAuthority> Create(uint32_t title,
       ArbitrationIdentity identity, LanAddress host_endpoint,
       std::shared_ptr<const PrivateLanInvitation> invitation);
@@ -25,7 +26,13 @@ class PrivateLanAuthority final {
   PrivateLanAuthority& operator=(const PrivateLanAuthority&) = delete;
   // Verifies the per-client possession proof before creating immutable member
   // generations and fresh pair links. Exact initial retries retain their keys.
-  bool Admit(const PrivateLanJoinClaim& claim, std::span<const uint8_t> proof);
+  // Private request IDs consist of a stable random 64-bit prefix and a strictly
+  // increasing nonzero big-endian 64-bit sequence. Exact lost-reply retries
+  // succeed without extending host liveness; earlier requests cannot renew it.
+  bool Admit(const PrivateLanJoinClaim& claim, std::span<const uint8_t> proof,
+             Clock::time_point now = Clock::now());
+  // Atomically retire members without a fresh authenticated RPC for 60 seconds.
+  std::vector<uint64_t> Expire(Clock::time_point now = Clock::now());
   bool Remove(uint64_t client);
   // Private encoded ticket, delivered only inside the authenticated ephemeral
   // envelope. Callers must cleanse this temporary buffer after sealing.

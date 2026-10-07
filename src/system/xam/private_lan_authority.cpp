@@ -71,6 +71,7 @@ struct Pair {
 };
 struct Member {
   PrivateLanJoinClaim join;
+  PrivateLanAuthority::Clock::time_point last_fresh_rpc{};
   Bytes16 nonce{},generation{},capability{};uint32_t logical=0;
   ~Member(){
 #if REX_PLATFORM_GNU_LINUX
@@ -121,22 +122,31 @@ std::unique_ptr<PrivateLanAuthority> PrivateLanAuthority::Create(uint32_t title,
   (void)title;(void)identity;(void)endpoint;(void)invitation;return {};
 #endif
 }
-bool PrivateLanAuthority::Admit(const PrivateLanJoinClaim& claim,std::span<const uint8_t> proof) {
+bool PrivateLanAuthority::Admit(const PrivateLanJoinClaim& claim,std::span<const uint8_t> proof,Clock::time_point now) {
 #if REX_PLATFORM_GNU_LINUX
   if(!claim.xuid||claim.xuid==state_->identity.host_xuid||!claim.machine_id||!PrivateEndpoint(claim.endpoint)||
-      !Nonzero(claim.challenge)||!Nonzero(claim.request_id)||!Nonzero(claim.client_public_key))return false;
+      !Nonzero(claim.challenge)||!Nonzero(std::span(claim.request_id).first(8))||
+      !Get(claim.request_id.data()+8,8)||!Nonzero(claim.client_public_key))return false;
   try {
     auto transcript=PrivateLanJoinTranscript(state_->title,state_->identity,claim);
     if(!state_->invitation->Verify(claim.xuid,"lan-private-join-claim-v1",transcript,proof))return false;
     std::lock_guard lock(state_->mutex);
-    if(auto old=state_->members.find(claim.xuid);old!=state_->members.end())return SameAdmission(old->second,claim);
-    if(state_->members.size()>=6||state_->retired.size()>=256||
+    if(auto old=state_->members.find(claim.xuid);old!=state_->members.end()) {
+      auto& member=old->second;
+      if(!SameAdmission(member,claim)||!std::equal(claim.request_id.begin(),claim.request_id.begin()+8,member.join.request_id.begin())||
+          now-member.last_fresh_rpc>=std::chrono::seconds(60))return false;
+      const auto previous=Get(member.join.request_id.data()+8,8),sequence=Get(claim.request_id.data()+8,8);
+      if(sequence<previous)return false;
+      if(sequence>previous) {member.join.request_id=claim.request_id;member.last_fresh_rpc=now;}
+      return true;
+    }
+    if(state_->members.size()>=6||state_->retired.size()+state_->members.size()-1>=256||
         state_->retired.contains({claim.xuid,Hex(claim.challenge)}))return false;
     for(const auto& [xuid,member]:state_->members)
       if(member.join.machine_id==claim.machine_id||member.join.endpoint==claim.endpoint)return false;
     // Reject low-order/invalid X25519 public keys before publishing authority.
     const std::array<uint8_t,1> probe{1};if(!SealArbitrationPayload(claim.client_public_key,probe,transcript))return false;
-    Member member;member.join=claim;
+    Member member;member.join=claim;member.last_fresh_rpc=now;
     if(!Random(member.nonce)||!Random(member.generation)||!Random(member.capability))return false;
     const auto clients=state_->invitation->clients();
     const auto ordinal=std::find(clients.begin(),clients.end(),claim.xuid);
@@ -153,7 +163,7 @@ bool PrivateLanAuthority::Admit(const PrivateLanJoinClaim& claim,std::span<const
     members.emplace(claim.xuid,member);state_->members.swap(members);state_->pairs.swap(pairs);return true;
   }catch(...){return false;}
 #else
-  (void)claim;(void)proof;return false;
+  (void)claim;(void)proof;(void)now;return false;
 #endif
 }
 bool PrivateLanAuthority::Remove(uint64_t client) {
@@ -167,10 +177,31 @@ bool PrivateLanAuthority::Remove(uint64_t client) {
     return true;
   }catch(...){return false;}
 }
+std::vector<uint64_t> PrivateLanAuthority::Expire(Clock::time_point now) {
+  try {
+    std::lock_guard lock(state_->mutex);
+    std::vector<uint64_t> expired;
+    for(const auto& [xuid,member]:state_->members)
+      if(xuid!=state_->identity.host_xuid&&now-member.last_fresh_rpc>=std::chrono::seconds(60))expired.push_back(xuid);
+    if(expired.empty())return expired;
+    // Allocate every replacement before modifying any member, key or replay
+    // tombstone. Capacity is bounded by Admit's maximum of 256 generations.
+    auto members=state_->members;auto pairs=state_->pairs;auto retired=state_->retired;
+    for(auto xuid:expired) {
+      retired.emplace(xuid,Hex(members.at(xuid).join.challenge));members.erase(xuid);
+      std::erase_if(pairs,[&](const auto& pair){return pair.first.first==xuid||pair.first.second==xuid;});
+    }
+    if(retired.size()>256)return {};
+    state_->members.swap(members);state_->pairs.swap(pairs);state_->retired.swap(retired);return expired;
+  }catch(...){return {};}
+}
 std::optional<std::vector<uint8_t>> PrivateLanAuthority::Ticket(uint64_t local,uint32_t lease) const {
   if(lease<1000||lease>60000||!state_->invitation->Current())return std::nullopt;
   try {
     std::lock_guard lock(state_->mutex);auto member=state_->members.find(local);if(member==state_->members.end())return std::nullopt;
+    const auto now=Clock::now();
+    for(const auto& [xuid,current]:state_->members)
+      if(xuid!=state_->identity.host_xuid&&now-current.last_fresh_rpc>=std::chrono::seconds(60))return std::nullopt;
     std::vector<uint8_t> bytes;bytes.reserve(kTicketHeader+(state_->members.size()-1)*kTicketPeer);
     const std::array<uint8_t,8> header{'H','P','L','T',1,uint8_t(state_->members.size()-1),0,0};Append(bytes,header);
     Append(bytes,state_->fingerprint);Put(bytes,state_->identity.host_xuid,8);Put(bytes,local,8);
