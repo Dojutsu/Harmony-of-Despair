@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <limits>
 #include <utility>
@@ -191,6 +192,11 @@ bool MMIOHandler::IsMappedRange(const void* host_address, size_t length) const n
     // cannot match, even if its declared size overlaps the guest interval.
     if (range.address & ~range.mask) continue;
     if ((guest_first & range.mask) == range.address) return true;
+    // Above the highest differing endpoint bit, every address in the
+    // contiguous interval has the same prefix. A conflicting fixed pattern
+    // bit there proves no address can match; keep the general fallback below.
+    if ((uint64_t((guest_first ^ range.address) & range.mask) >>
+         std::bit_width(guest_first ^ guest_last)) != 0) continue;
     // Every next matching word differs first from guest_first at one zero bit
     // becoming one. Keep that higher prefix, choose the required lower fixed
     // bits and set all free lower bits to zero. At most 32 candidates suffice.

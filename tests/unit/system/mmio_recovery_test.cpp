@@ -307,6 +307,38 @@ TEST_CASE("Linux mapped interval admission preserves mask semantics and interior
       }
     }
   }
+  // RAM intervals have a fixed high prefix conflicting with every device.
+  // This must remain false for all generated scalar/vector widths and bulk.
+  for (size_t width : {size_t(1), size_t(2), size_t(4), size_t(8), size_t(16),
+                       size_t(128), size_t(4096), size_t(65536)}) {
+    CHECK_FALSE(handler->IsMappedRange(memory.TranslateVirtual<uint8_t*>(0x40001000), width));
+  }
+  // Sparse fixed bits below the common prefix must keep the general matching
+  // path. Query actual metadata against an independent contained-byte oracle.
+  uint32_t sparse_index = 0;
+  for (uint32_t low_mask : {0xA5A5u, 0x55555u, 0x80000u, 0xFFFFFu}) {
+    for (uint32_t low_pattern : {0u, low_mask, low_mask & 0x15555u}) {
+      const uint32_t prefix = 0x6D000000 + (++sparse_index << 20);
+      const uint32_t mask = 0xFFF00000 | low_mask;
+      const uint32_t pattern = prefix | low_pattern;
+      REQUIRE(handler->RegisterRange(pattern, mask, 0, &device, ReadDevice, WriteDevice));
+      for (uint32_t first : {0u, 1u, 15u, 255u, 256u, 0xFFFFu, 0x10000u,
+                             0x55554u, 0x7FFFFu, 0x80000u, 0xFFFFEu}) {
+        for (uint32_t width : {1u, 2u, 4u, 16u, 128u, 256u}) {
+          bool expected = false;
+          for (uint32_t offset = 0; offset < width; ++offset)
+            expected |= ((prefix + first + offset) & mask) == pattern;
+          CAPTURE(low_mask, low_pattern, first, width);
+          CHECK(handler->IsMappedRange(memory.TranslateVirtual<uint8_t*>(prefix + first), width) == expected);
+        }
+      }
+    }
+  }
+  // Differing endpoints can cover all32 bits. The prefix check must not shift
+  // a uint32 by32 or suppress an interior device match. These reads are metadata
+  // only, including the protected guest zero page.
+  CHECK(handler->IsMappedRange(memory.TranslateVirtual<uint8_t*>(0), size_t(1) << 32));
+  CHECK_FALSE(handler->IsMappedRange(memory.physical_membase(), 4096));
   CHECK(device.reads == 0);
   CHECK(device.writes == 0);
 }
