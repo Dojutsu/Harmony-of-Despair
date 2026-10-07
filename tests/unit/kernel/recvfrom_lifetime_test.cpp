@@ -370,6 +370,15 @@ static void RunLinuxSocketAbi(KernelState* kernel) {
   Check(XThread::GetLastError() == 10035, "guest WSAEWOULDBLOCK");
   Check(uint32_t(*source_length) == 16 && std::memcmp(source_before.data(), source.host_address(), 16) == 0,
         "receive error output unchanged");
+  Check(sender->SendTo(payload.data(), payload.size(), 0, &address, sizeof(address)) == 4,
+        "send oversized guest datagram");
+  Check(receiver->WaitReadable(500), "oversized guest readiness");
+  Check(NetDll_recvfrom_entry(1, receiver->handle(), raw(1200), 3, 0, source, source_length) == uint32_t(-1),
+        "oversized guest datagram rejected");
+  Check(XThread::GetLastError() == 10040, "guest WSAEMSGSIZE");
+  Check(uint32_t(*source_length) == 16 && std::memcmp(source_before.data(), source.host_address(), 16) == 0,
+        "oversized guest source outputs unchanged");
+  Check(!receiver->WaitReadable(0), "oversized datagram retired");
   reads->fd_count = 65;
   Check(NetDll_select_entry(1, 0, reads, nullptr, nullptr, timeout) == -1 &&
         XThread::GetLastError() == 10022 && reads->fd_count == 65, "oversized fd set rejected");

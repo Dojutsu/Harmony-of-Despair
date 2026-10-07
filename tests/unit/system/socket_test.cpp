@@ -409,6 +409,24 @@ TEST_CASE("gameplay NAT control drain preserves queued guest datagrams",
   const uint32_t loopback = htonl(INADDR_LOOPBACK);
   const auto control = RegisteredPacket(loopback, 40000, loopback,
                                         ntohs(sender_address.sin_port));
+#if REX_PLATFORM_GNU_LINUX
+  std::vector<uint8_t> oversized_control(control.begin(), control.end());
+  oversized_control.push_back(0xA5);
+  REQUIRE(sendto(sender, oversized_control.data(), oversized_control.size(), 0,
+                 reinterpret_cast<const sockaddr*>(&receiver_address), sizeof(receiver_address)) == 57);
+  REQUIRE(receiver.WaitReadable(500));
+  CHECK_FALSE(receiver.PumpNatControl());
+  CHECK_FALSE(xam::NatProbePeer(receiver.native_handle(), false));
+  std::array<uint8_t, 56> rejected_prefix{};
+  N_XSOCKADDR_IN rejected_source{};
+  uint32_t rejected_source_length = 16;
+  CHECK(receiver.RecvFrom(rejected_prefix.data(), rejected_prefix.size(), 0,
+                          &rejected_source, &rejected_source_length) == -1);
+  CHECK(errno == EMSGSIZE);
+  CHECK_FALSE(xam::NatProbePeer(receiver.native_handle(), false));
+  CHECK_FALSE(receiver.WaitReadable(0));
+#endif
+
   constexpr std::array<uint8_t, 5> guest{'G', 'U', 'E', 'S', 'T'};
 
   // Control is processed without a guest receive and disappears from its view.

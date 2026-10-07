@@ -321,7 +321,17 @@ int XSocket::Shutdown(int how) {
 }
 
 int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
+#if REX_PLATFORM_GNU_LINUX
+  const int result = recv(native_handle(), reinterpret_cast<char*>(buf), buf_len,
+                           flags | (type_ == X_SOCK_DGRAM ? MSG_TRUNC : 0));
+  if (result > 0 && uint32_t(result) > buf_len) {
+    errno = EMSGSIZE;
+    return -1;
+  }
+  return result;
+#else
   return recv(native_handle(), reinterpret_cast<char*>(buf), buf_len, flags);
+#endif
 }
 
 int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* from,
@@ -354,8 +364,21 @@ retry_native_receive:
   xam::NatProbeTick(native_handle());
   sockaddr_in nfrom;
   socklen_t nfromlen = sizeof(sockaddr_in);
-  int ret = recvfrom(native_handle(), reinterpret_cast<char*>(buf), buf_len, flags,
+  int ret = recvfrom(native_handle(), reinterpret_cast<char*>(buf), buf_len,
+#if REX_PLATFORM_GNU_LINUX
+                     flags | (type_ == X_SOCK_DGRAM ? MSG_TRUNC : 0),
+#else
+                     flags,
+#endif
                      (sockaddr*)&nfrom, &nfromlen);
+#if REX_PLATFORM_GNU_LINUX
+  // Winsock rejects oversized UDP after copying the available prefix. Never
+  // authorize NAT/control state from that prefix or report it as game payload.
+  if (ret > 0 && uint32_t(ret) > buf_len) {
+    errno = EMSGSIZE;
+    return -1;
+  }
+#endif
   if (ret > 0 && xam::NatProbeConsume(native_handle(), buf, ret, nfrom.sin_addr.s_addr,
                                       ntohs(nfrom.sin_port))) {
     goto retry_native_receive;
@@ -398,7 +421,9 @@ bool XSocket::PumpNatControl() {
   std::lock_guard receive_lock(native_receive_mutex_);
   if (!WaitReadable(0)) return false;
 
-  std::array<uint8_t, 56> packet{};
+  // One extra byte distinguishes an exact control frame from a valid-looking
+  // prefix of an oversized datagram on both POSIX and Winsock peek paths.
+  std::array<uint8_t, 57> packet{};
   sockaddr_in source{};
   socklen_t source_length = sizeof(source);
   const int peeked = recvfrom(native_handle(), reinterpret_cast<char*>(packet.data()),

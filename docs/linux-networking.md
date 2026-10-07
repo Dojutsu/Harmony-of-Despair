@@ -19,7 +19,11 @@ Remote-input fixes reject oversized Linux discovery datagrams instead of
 accepting their copied prefix, reject wrong-type registration/heartbeat fields
 without throwing out of the directory worker, and publish terminal overlapped
 receive errors with zero bytes and one event signal. Guest receive errors keep
-source/query output buffers intact. Packets and HMAC domains are unchanged.
+source/query output buffers intact. The NAT control peek uses one extra byte to
+reject oversized frames, and Linux datagram receive reports guest WSAEMSGSIZE
+instead of treating a truncated control prefix as valid. This follows the
+[Winsock receive contract](https://learn.microsoft.com/en-us/windows/win32/api/winsock/nf-winsock-recvfrom).
+Packets and HMAC domains are unchanged.
 
 ## Reproduce in the isolated project
 
@@ -49,7 +53,7 @@ outputs. The integration HTTP and UDP services bind loopback only.
 
 ## Verified 2026-10-07
 
-- 71 network/directory cases, 2,788 assertions passed in Debug.
+- 71 network/directory cases, 2,796 assertions passed in Debug.
 - The portable real guest receive fixture passed pending/incomplete/completion,
   reused initiation storage, payload/source/event, synchronous receive,
   cancellation before/after queued data and a waiting query unblocked by close.
@@ -62,8 +66,9 @@ outputs. The integration HTTP and UDP services bind loopback only.
   behind one IPv4, and exchanged unchanged 39-byte synthetic payloads over all
   three bidirectional peer pairs. Clean teardown returned zero in every process.
 
-Receipts are under Full-Send-Comp `build/Debug/network-*.log` and
-`build/Debug/network-integration/validation.json`. These are transport tests,
+Receipts are under Full-Send-Comp `build/Debug/network-final-unit.log`,
+`build/Debug/network-truncation-{unit,recv}.log`, and
+`build/Debug/network-integration-final/validation.json`. These are transport tests,
 not title stage entry or synchronized game logic. Actual Harmony multiplayer
 stage/gameplay, controller/audio/render behavior and SteamOS hardware validation
 remain separate acceptance requirements. LAN identities and admission do not
