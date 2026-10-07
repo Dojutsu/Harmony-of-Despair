@@ -21,15 +21,17 @@ int RunMappedClassifierEquivalence(const char* mode);
 namespace {
 rex::guest::detail::FunctionMemoryConsumer* signal_scope=nullptr;
 const void* signal_address=nullptr;
-rex::runtime::MMIOHandler::DeferredTransaction* signal_transaction=nullptr;
-bool signal_private=false;
+std::atomic<rex::runtime::MMIOHandler::DeferredTransaction*> signal_transaction{nullptr};
+static_assert(decltype(signal_transaction)::is_always_lock_free);
+volatile sig_atomic_t signal_private=0;
 void CompletionSignal(int signal) {
   static constexpr char marker[]="transaction-bridge-signal-enter\n";
-  if(signal!=SIGUSR1||!signal_transaction)std::_Exit(96);
+  auto* transaction=signal_transaction.load(std::memory_order_relaxed);
+  if(signal!=SIGUSR1||!transaction)std::_Exit(96);
   (void)::write(STDERR_FILENO,marker,sizeof(marker)-1);
   rex::guest::EnterSignalContext();
-  if(signal_private)rex::guest::detail::DeferredTransactionBridge::CompleteNative(*signal_transaction);
-  else signal_transaction->CompleteNative();
+  if(signal_private)rex::guest::detail::DeferredTransactionBridge::CompleteNative(*transaction);
+  else transaction->CompleteNative();
   std::_Exit(97);
 }
 
@@ -45,8 +47,7 @@ void CachedSignalRead(int signal) {
   std::_Exit(97);
 }
 volatile sig_atomic_t signal_state_operation=0;
-std::atomic<rex::runtime::MMIOHandler::DeferredTransaction*> signal_transaction{nullptr};
-static_assert(decltype(signal_transaction)::is_always_lock_free);
+
 void CanonicalSignalCheck(int signal) {
   static constexpr char marker[]="canonical-access-state-signal-enter\n";
   if(signal!=SIGUSR1||!signal_state_operation)std::_Exit(96);
@@ -114,7 +115,7 @@ int main(int argc,char** argv) {
   if(std::strcmp(argv[1],"bridge-completion-signal")==0||std::strcmp(argv[1],"public-completion-signal")==0) {
     signal_private=std::strcmp(argv[1],"bridge-completion-signal")==0;
     auto transaction=signal_private?rex::guest::detail::DeferredTransactionBridge::Create():rex::runtime::MMIOHandler::DeferredTransaction{};
-    signal_transaction=&transaction;
+    signal_transaction.store(&transaction,std::memory_order_relaxed);
     struct sigaction action{};action.sa_handler=CompletionSignal;sigemptyset(&action.sa_mask);
     if(sigaction(SIGUSR1,&action,nullptr))return 95;
     std::fflush(stdout);if(raise(SIGUSR1))return 96;return 97;
