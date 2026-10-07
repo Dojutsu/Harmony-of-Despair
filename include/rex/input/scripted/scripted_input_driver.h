@@ -23,6 +23,7 @@ class ScriptedInputDriver final : public InputDriver {
   Timeline timeline_;
   std::mutex mutex_;
   bool started_ = false;
+  uint32_t logged_packet_ = UINT32_MAX;
   std::chrono::steady_clock::time_point started_at_;
 };
 

@@ -51,6 +51,12 @@ X_RESULT ScriptedInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out) {
   const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - started_at_).count();
   uint32_t packet;
   const auto state = timeline_.Sample(static_cast<uint64_t>(elapsed), &packet);
+  // At most one message per selected schedule row; never log every guest poll.
+  if (packet != logged_packet_) {
+    REXLOG_DEBUG("Offline controller transition: elapsed_ms={} packet={} buttons={:04X}",
+                 elapsed, packet, state.buttons);
+    logged_packet_ = packet;
+  }
   *out = {};
   out->packet_number = packet;
   out->gamepad.buttons = state.buttons;
