@@ -38,6 +38,7 @@ set(REXSYSTEM_SOURCES
     xam/private_lan_invitation.cpp
     xam/private_lan_payload.cpp
     xam/private_lan_authority.cpp
+    xam/private_lan_discovery_wire.cpp
     xam/online_status.cpp
     xam/session.cpp
     xam/session_arbitration.cpp

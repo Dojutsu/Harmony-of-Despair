@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <openssl/crypto.h>
 #include <openssl/hmac.h>
+#include <openssl/evp.h>
+#include <openssl/kdf.h>
 #endif
 
 namespace rex::system::xam {
@@ -176,6 +178,7 @@ std::optional<PrivateLanInvitation::Tag> PrivateLanInvitation::Proof(
     for (int shift = 24; shift >= 0; shift -= 8) bytes.push_back(uint8_t(size >> shift));
     bytes.insert(bytes.end(), transcript.begin(), transcript.end());
     std::array<uint8_t, EVP_MAX_MD_SIZE> digest{};
+    struct CleanDigest { decltype(digest)& bytes; ~CleanDigest() { OPENSSL_cleanse(bytes.data(), bytes.size()); } } cleanse{digest};
     unsigned length = 0;
     if (!HMAC(EVP_sha256(), grant->secret.data(), int(grant->secret.size()),
               bytes.data(), bytes.size(), digest.data(), &length) || length != 32) return std::nullopt;
@@ -186,6 +189,48 @@ std::optional<PrivateLanInvitation::Tag> PrivateLanInvitation::Proof(
 #else
   (void)client; (void)domain; (void)transcript;
   return std::nullopt;
+#endif
+}
+std::optional<PrivateLanInvitation::Tag> PrivateLanInvitation::Selector(uint64_t client) const {
+  if(!Current())return std::nullopt;
+  for(const auto& grant:grants_)if(grant.client==client)return grant.selector;
+  return std::nullopt;
+}
+std::optional<uint64_t> PrivateLanInvitation::ClientForSelector(std::span<const uint8_t> selector) const {
+#if REX_PLATFORM_GNU_LINUX
+  if(!Current()||selector.size()!=16)return std::nullopt;
+  std::optional<uint64_t> result;
+  for(const auto& grant:grants_)if(CRYPTO_memcmp(grant.selector.data(),selector.data(),16)==0)result=grant.client;
+  return result;
+#else
+  (void)selector;return std::nullopt;
+#endif
+}
+std::optional<std::array<uint8_t,32>> PrivateLanInvitation::DiscoveryKey(uint64_t client,bool reply) const {
+#if REX_PLATFORM_GNU_LINUX
+  if(!Current())return std::nullopt;
+  const auto grant=std::find_if(grants_.begin(),grants_.end(),[&](const auto& value){return value.client==client;});
+  if(grant==grants_.end())return std::nullopt;
+  try {
+    constexpr std::string_view domain="ReXGlue private LAN discovery encryption v1";
+    std::vector<uint8_t> info(domain.begin(),domain.end());info.push_back(reply?1:0);
+    Append64(info,host_xuid_);Append64(info,client);Append64(info,expires_);
+    info.insert(info.end(),grant->selector.begin(),grant->selector.end());
+    std::unique_ptr<EVP_PKEY_CTX,decltype(&EVP_PKEY_CTX_free)> context(EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF,nullptr),EVP_PKEY_CTX_free);
+    std::array<uint8_t,32> key{};
+    struct CleanKey {std::array<uint8_t,32>& key;~CleanKey(){OPENSSL_cleanse(key.data(),key.size());}} cleanse{key};
+    size_t size=key.size();
+    if(!context||EVP_PKEY_derive_init(context.get())!=1||
+       EVP_PKEY_CTX_set_hkdf_mode(context.get(),EVP_PKEY_HKDEF_MODE_EXTRACT_AND_EXPAND)!=1||
+       EVP_PKEY_CTX_set_hkdf_md(context.get(),EVP_sha256())!=1||
+       EVP_PKEY_CTX_set1_hkdf_salt(context.get(),grant->selector.data(),int(grant->selector.size()))!=1||
+       EVP_PKEY_CTX_set1_hkdf_key(context.get(),grant->secret.data(),int(grant->secret.size()))!=1||
+       EVP_PKEY_CTX_add1_hkdf_info(context.get(),info.data(),int(info.size()))!=1||
+       EVP_PKEY_derive(context.get(),key.data(),&size)!=1||size!=key.size()||!Nonzero(key))return std::nullopt;
+    return key;
+  }catch(...){return std::nullopt;}
+#else
+  (void)client;(void)reply;return std::nullopt;
 #endif
 }
 bool PrivateLanInvitation::Verify(uint64_t client, std::string_view domain,

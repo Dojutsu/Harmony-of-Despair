@@ -31,6 +31,13 @@ class PrivateLanInvitation final {
                    std::chrono::system_clock::now()) const noexcept;
   std::optional<Tag> Proof(uint64_t client, std::string_view domain,
                            std::span<const uint8_t> transcript) const;
+  // Opaque selector routes to one of at most five private per-client grants;
+  // neither host nor client XUID is exposed by the private discovery header.
+  std::optional<Tag> Selector(uint64_t client) const;
+  std::optional<uint64_t> ClientForSelector(std::span<const uint8_t> selector) const;
+  // HKDF-SHA256 from the private grant, with distinct request/reply domains and
+  // explicit host/client/expiry/selector context. Caller cleanses the key.
+  std::optional<std::array<uint8_t,32>> DiscoveryKey(uint64_t client,bool reply) const;
   bool Verify(uint64_t client, std::string_view domain,
               std::span<const uint8_t> transcript, std::span<const uint8_t> tag) const;
  private:
