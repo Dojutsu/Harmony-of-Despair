@@ -22,7 +22,31 @@ struct Scope {
   std::optional<uint64_t> socket;
   uint16_t guest_port = 0;
   bool closed = false;
+  std::unordered_map<std::string, std::shared_ptr<GameplayDatagramCipher>> ciphers;
+  std::unordered_set<std::string> retired_links;
 };
+bool SameTrafficKey(const GameplayTrafficKey& a, const GameplayTrafficKey& b) {
+  uint8_t difference = 0;
+  for (size_t i = 0; i < a.size(); ++i) difference |= a[i] ^ b[i];
+  return difference == 0;
+}
+std::optional<GameplayLinkId> ParseLink(std::string_view hex) {
+  if (hex.size() != 32) return std::nullopt;
+  GameplayLinkId result{};
+  auto digit = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+  };
+  uint8_t nonzero = 0;
+  for (size_t i = 0; i < result.size(); ++i) {
+    const int high = digit(hex[i * 2]), low = digit(hex[i * 2 + 1]);
+    if (high < 0 || low < 0) return std::nullopt;
+    result[i] = uint8_t((high << 4) | low); nonzero |= result[i];
+  }
+  if (!nonzero) return std::nullopt;
+  return result;
+}
 std::mutex gameplay_mutex;
 std::vector<Scope> scopes;
 struct SocketCandidate { uint64_t xuid, socket; uint16_t port; bool owned = false; };
@@ -215,6 +239,8 @@ bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
     if (peer.traversal.capability.size() != 32) return reject("invalid_peer_capability");
     if (peer.traversal.participant > 1) return reject("invalid_peer_participant");
     if (!links.insert(peer.traversal.attempt_id).second) return reject("duplicate_peer_attempt");
+    if (!ParseLink(peer.traversal.attempt_id)) return reject("invalid_crypto_link");
+    if (SameTrafficKey(peer.traffic_key, {})) return reject("missing_peer_traffic_key");
   }
   Scope candidate;
   candidate.session = session;
@@ -226,6 +252,38 @@ bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
   auto found = std::find_if(scopes.begin(), scopes.end(), [&](const auto& s) {
     return s.session.lock() == session && s.xuid == authorization.xuid;
   });
+  // Prepare all crypto state before changing authority or native routes.
+  if (found != scopes.end()) {
+    if (found->closed) return reject("scope_closed");
+    candidate.retired_links = found->retired_links;
+    for (const auto& old : found->authorization.peers)
+      if (!links.contains(old.traversal.attempt_id)) candidate.retired_links.insert(old.traversal.attempt_id);
+  }
+  if (candidate.retired_links.size() > 4096) return reject("retired_crypto_link_limit");
+  for (const auto& peer : authorization.peers) {
+    if (candidate.retired_links.contains(peer.traversal.attempt_id)) return reject("retired_crypto_link");
+    const GameplayPeerAuthorization* previous = nullptr;
+    if (found != scopes.end()) {
+      for (const auto& old : found->authorization.peers)
+        if (old.traversal.attempt_id == peer.traversal.attempt_id) previous = &old;
+    }
+    if (previous) {
+      if (previous->xuid != peer.xuid || previous->member_nonce != peer.member_nonce ||
+          previous->admission_attempt != peer.admission_attempt ||
+          previous->admission_generation != peer.admission_generation ||
+          previous->logical.ipv4 != peer.logical.ipv4 ||
+          previous->traversal.participant != peer.traversal.participant ||
+          !SameTrafficKey(previous->traffic_key, peer.traffic_key)) return reject("crypto_link_changed");
+      const auto state = found->ciphers.find(peer.traversal.attempt_id);
+      if (state == found->ciphers.end()) return reject("missing_existing_crypto_state");
+      candidate.ciphers.emplace(peer.traversal.attempt_id, state->second);
+    } else {
+      auto cipher = GameplayDatagramCipher::Create(peer.traffic_key, *ParseLink(peer.traversal.attempt_id),
+                                                   peer.traversal.participant);
+      if (!cipher) return reject("crypto_provider_unavailable");
+      candidate.ciphers.emplace(peer.traversal.attempt_id, std::move(cipher));
+    }
+  }
   if (found != scopes.end()) {
     if (found->closed) return reject("scope_closed");
     if (!found->authorization.member_nonce.empty() &&
@@ -245,8 +303,10 @@ bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
     // Preserve existing acknowledged link state; retire only omitted links.
     if (found->socket)
       for (const auto& old : found->authorization.peers)
-        if (!links.contains(old.traversal.attempt_id))
+        if (!links.contains(old.traversal.attempt_id)) {
+          candidate.retired_links.insert(old.traversal.attempt_id);
           NatProbeRemoveGameplayIdentity(*found->socket, old.traversal.attempt_id);
+        }
     *found = std::move(candidate);
   } else {
     scopes.push_back(std::move(candidate));
@@ -324,6 +384,7 @@ void CloseGameplaySocket(uint64_t socket) {
           !scope.authorization.member_nonce.empty());
       RemoveRoutes(scope);
       scope.closed = true;  // A recycled native handle cannot inherit this ticket.
+      scope.ciphers.clear();
       scope.socket.reset();
     }
   if (!associated)
@@ -336,6 +397,7 @@ void RevokeGameplayAuthorization(const std::shared_ptr<SessionRecord>& session, 
     if (scope.session.lock() == session && scope.xuid == local_xuid) {
       RemoveRoutes(scope);
       scope.closed = true;
+      scope.ciphers.clear();
     }
 }
 
@@ -390,6 +452,35 @@ std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress
     }
   }
   return std::nullopt;
+}
+
+std::optional<std::vector<uint8_t>> SealGameplayDatagram(
+    uint64_t socket, LanAddress logical, std::span<const uint8_t> plaintext) {
+  std::lock_guard lock(gameplay_mutex);
+  Reap();
+  for (auto& scope : scopes) {
+    if (scope.socket != socket || !Current(scope)) continue;
+    for (const auto& peer : scope.authorization.peers) {
+      if (peer.logical.ipv4 != logical.ipv4 || logical.port != scope.guest_port || !PeerCurrent(scope, peer)) continue;
+      const auto found = scope.ciphers.find(peer.traversal.attempt_id);
+      if (found != scope.ciphers.end()) return found->second->Seal(plaintext);
+    }
+  }
+  return std::nullopt;
+}
+bool OpenGameplayDatagram(uint64_t socket, LanAddress logical,
+    std::span<const uint8_t> packet, std::vector<uint8_t>& plaintext, bool consume) {
+  std::lock_guard lock(gameplay_mutex);
+  Reap();
+  for (auto& scope : scopes) {
+    if (scope.socket != socket || !Current(scope)) continue;
+    for (const auto& peer : scope.authorization.peers) {
+      if (peer.logical.ipv4 != logical.ipv4 || logical.port != scope.guest_port || !PeerCurrent(scope, peer)) continue;
+      const auto found = scope.ciphers.find(peer.traversal.attempt_id);
+      if (found != scope.ciphers.end()) return found->second->Open(packet, plaintext, consume);
+    }
+  }
+  return false;
 }
 
 std::optional<GameplayXnAddr> GameplayXnAddrToLogical(

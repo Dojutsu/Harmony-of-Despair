@@ -1538,6 +1538,12 @@ std::optional<GameplayAuthorization> ParseGameplayAuthorization(
       auto participant = link.at("participant").get<int>();
       if (participant < 0 || participant > 1 || !GameplayHexValid(peer.traversal.attempt_id, 32) ||
           !GameplayHexValid(peer.traversal.capability, 32)) return {};
+      const auto& datagram_protocol = link.at("datagram_protocol");
+      if (!datagram_protocol.is_number_integer() || datagram_protocol.get<int>() != 1) return {};
+      const auto traffic_key = link.at("traffic_key").get<std::string>();
+      if (!GameplayHexValid(traffic_key, 64)) return {};
+      for (size_t i = 0; i < peer.traffic_key.size(); ++i)
+        peer.traffic_key[i] = uint8_t(std::stoul(traffic_key.substr(i * 2, 2), nullptr, 16));
       peer.traversal.participant = uint8_t(participant);
       peer.traversal.server = server;
       peer.traversal.port = uint16_t(port);

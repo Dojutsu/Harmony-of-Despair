@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <rex/system/xam/nat_probe.h>
+#include <rex/system/xam/gameplay_datagram.h>
 
 namespace rex::system::xam {
 
@@ -16,6 +17,7 @@ struct GameplayPeerAuthorization {
   std::string admission_generation;
   LanAddress logical;
   NatProbeIdentity traversal;
+  GameplayTrafficKey traffic_key{};
 };
 
 struct GameplayAuthorization {
@@ -49,6 +51,13 @@ bool GameplayAuthorizationCurrent(const std::shared_ptr<SessionRecord>& session,
 bool IsAuthorizedGameplaySocket(uint64_t socket);
 // Returns an exact peer alias; an unknown/expired scoped destination has no route.
 std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress requested);
+
+// Protected transport admits an exact live peer under the same authority lock.
+// There is no raw scoped fallback. Cipher state survives ordinary ticket renewal.
+std::optional<std::vector<uint8_t>> SealGameplayDatagram(
+    uint64_t socket, LanAddress logical, std::span<const uint8_t> plaintext);
+bool OpenGameplayDatagram(uint64_t socket, LanAddress logical,
+    std::span<const uint8_t> packet, std::vector<uint8_t>& plaintext, bool consume);
 
 struct GameplayXnAddr {
   std::array<uint8_t, 8> session_id{};
