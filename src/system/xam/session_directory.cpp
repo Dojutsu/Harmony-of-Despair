@@ -2289,7 +2289,7 @@ class SessionDirectoryClient::Impl {
                             session_id);
               public_invite_code = *NormalizeInviteCode(candidate_invite_code);
               hosted->SetStatusInviteCode(public_invite_code);
-              REXSYS_INFO("Harmony invite code: {}", candidate_invite_code);
+              REXSYS_INFO("Session directory: invitation ready in lobby and private launcher state");
               if (auto path = ActiveInviteCodePath();
                   path && !WriteActiveInviteCodeFile(*path, candidate_invite_code))
                 REXSYS_WARN("Harmony invite code: could not publish launcher state");

@@ -30,6 +30,9 @@
 #include <rex/system/xam/nat_probe.h>
 #include <rex/system/xam/user_profile.h>
 #include <rex/cvar.h>
+#include <rex/logging.h>
+#include <rex/logging/sink.h>
+#include <memory>
 
 namespace rex::system::xam {
 
@@ -85,6 +88,12 @@ TEST_CASE("invite LAN proof binds attempt, domain, source and hosted tuple",
 #if REX_PLATFORM_GNU_LINUX
 TEST_CASE("Linux directory hosting retries hostile registration and heartbeat responses",
           "[session][directory][linux][security]") {
+  auto logs = std::make_shared<rex::LogCaptureSink>();
+  rex::AddSink(logs);
+  struct LogCleanup {
+    std::shared_ptr<rex::LogCaptureSink> sink;
+    ~LogCleanup() { rex::RemoveSink(sink); }
+  } log_cleanup{logs};
   const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
   REQUIRE(listener >= 0);
   struct ListenerCleanup { int fd; ~ListenerCleanup() { ::close(fd); } } cleanup{listener};
@@ -201,6 +210,16 @@ TEST_CASE("Linux directory hosting retries hostile registration and heartbeat re
   directory.StopHosting();
   server.request_stop();
   server.join();
+  std::vector<rex::LogEntry> entries;
+  logs->CopyEntries(entries);
+  bool invitation_ready_logged = false;
+  for (const auto& entry : entries) {
+    CHECK(entry.text.find("ABC234") == std::string::npos);
+    CHECK(entry.text.find("host-test-token") == std::string::npos);
+    invitation_ready_logged |= entry.text.find("invitation ready in lobby and private launcher state") != std::string::npos;
+  }
+  CHECK(invitation_ready_logged);
+
   CHECK(registrations.load() == 2);
   CHECK(heartbeats.load() >= 1);
   CHECK(polls.load() >= 1);
