@@ -337,6 +337,102 @@ void GuestTerminalAndCleanup() {
   Check(!owner.HasPendingFault() && !HasArmedAccessFrame(), "terminal_fault_owner_and_leaf_clean");
 }
 
+// Exercise the ordinary scalar backend that uses the private compact capture,
+// rather than only the public AccessAttempt entry points. Alternate success and
+// both hardware fault intents at every width: failed captures must publish a
+// complete immutable record, leave caller output/storage unchanged, and permit
+// the next operation only after the designated consumer has delivered the fault.
+template <class T> void ScalarBackendAlternation() {
+  Mapping ram(page_size), denied(page_size, PROT_NONE);
+  ExecutionActivation owner;
+  const T initial = static_cast<T>(0xCAFEBABE13579BDFull);
+  const T replacement = static_cast<T>(0x823456789ABCDEF1ull);
+  unsigned delivered = 0;
+  for (unsigned iteration = 0; iteration < 2; ++iteration) {
+    std::memcpy(ram.data, &initial, sizeof(initial));
+    auto read = TryRead<T>(ram.data);
+    Check(read.IsSuccess() && ValueOrThrow(std::move(read)) == initial,
+          "scalar_backend_success_exact_value");
+    Check(!owner.HasPendingFault() && !HasArmedAccessFrame(),
+          "scalar_backend_success_has_no_fault");
+
+    T output = initial;
+    auto bad_read = detail::TryReadBytes(denied.data, &output, sizeof(T));
+    Check(bad_read.Failed() && owner.HasPendingFault(),
+          "scalar_backend_read_publishes_fault");
+    Check(output == initial, "scalar_backend_read_fault_output_unchanged");
+    const auto read_snapshot = owner.PendingFault();
+    Check(read_snapshot.signal_number == SIGSEGV && read_snapshot.signal_code == SEGV_ACCERR &&
+              read_snapshot.address == reinterpret_cast<uintptr_t>(denied.data) &&
+              read_snapshot.access_intent == 0 && !(read_snapshot.page_fault_error & 2),
+          "scalar_backend_read_fault_metadata");
+    Check(read_snapshot.instruction_pointer != 0 &&
+              read_snapshot.stack_pointer == read_snapshot.integer_registers[4] &&
+              !HasArmedAccessFrame(), "scalar_backend_read_fault_native_snapshot");
+    try {
+      ValueOrThrow(std::move(bad_read));
+      Check(false, "scalar_backend_read_delivery_required");
+    } catch (const rex::SehException& exception) {
+      ++delivered;
+      Check(exception.code() == rex::SehException::ACCESS_VIOLATION &&
+                exception.address() == reinterpret_cast<uintptr_t>(denied.data),
+            "scalar_backend_read_delivery_preserves_av");
+    }
+    Check(!owner.HasPendingFault() && owner.published_faults() == delivered &&
+              owner.consumed_faults() == delivered,
+          "scalar_backend_read_fault_consumed_once");
+    Check(rex::platform::seh_thread_state().info[0] == 0,
+          "scalar_backend_read_delivery_intent");
+
+    ram.Protect(0, page_size, PROT_READ);
+    auto bad_write = TryWrite<T>(ram.data, replacement);
+    Check(bad_write.Failed() && owner.HasPendingFault(),
+          "scalar_backend_write_publishes_fault");
+    T unchanged{};
+    std::memcpy(&unchanged, ram.data, sizeof(T));
+    Check(unchanged == initial, "scalar_backend_write_fault_storage_unchanged");
+    const auto write_snapshot = owner.PendingFault();
+    Check(write_snapshot.signal_number == SIGSEGV && write_snapshot.signal_code == SEGV_ACCERR &&
+              write_snapshot.address == reinterpret_cast<uintptr_t>(ram.data) &&
+              write_snapshot.access_intent == 1 && (write_snapshot.page_fault_error & 2),
+          "scalar_backend_write_fault_metadata");
+    const uint64_t mask = sizeof(T) == 8 ? ~uint64_t(0)
+                                       : (~uint64_t(0) >> (64 - sizeof(T) * 8));
+    Check((write_snapshot.integer_registers[2] & mask) == static_cast<uint64_t>(replacement) &&
+              write_snapshot.instruction_pointer != 0 &&
+              write_snapshot.stack_pointer == write_snapshot.integer_registers[4] &&
+              !HasArmedAccessFrame(), "scalar_backend_write_fault_native_payload");
+    Check(read_snapshot.address == reinterpret_cast<uintptr_t>(denied.data) &&
+              read_snapshot.access_intent == 0,
+          "scalar_backend_previous_snapshot_immutable");
+    try {
+      ValueOrThrow(std::move(bad_write));
+      Check(false, "scalar_backend_write_delivery_required");
+    } catch (const rex::SehException& exception) {
+      ++delivered;
+      Check(exception.code() == rex::SehException::ACCESS_VIOLATION &&
+                exception.address() == reinterpret_cast<uintptr_t>(ram.data),
+            "scalar_backend_write_delivery_preserves_av");
+    }
+    Check(!owner.HasPendingFault() && owner.published_faults() == delivered &&
+              owner.consumed_faults() == delivered,
+          "scalar_backend_write_fault_consumed_once");
+    Check(rex::platform::seh_thread_state().info[0] == 1,
+          "scalar_backend_write_delivery_intent");
+
+    ram.Protect(0, page_size, PROT_READ | PROT_WRITE);
+    auto write = TryWrite<T>(ram.data, replacement);
+    Check(write.IsSuccess() && ValueOrThrow(std::move(write)),
+          "scalar_backend_write_success_after_fault");
+    auto reread = TryRead<T>(ram.data);
+    Check(reread.IsSuccess() && ValueOrThrow(std::move(reread)) == replacement,
+          "scalar_backend_read_success_after_fault");
+    Check(!owner.HasPendingFault() && owner.published_faults() == delivered &&
+              owner.consumed_faults() == delivered && !HasArmedAccessFrame(),
+          "scalar_backend_success_does_not_republish_stale_snapshot");
+  }
+}
+
 void HardwareTlsIsolation() {
   Mapping inaccessible(page_size, PROT_NONE);
   std::atomic<unsigned> errors{0}, completed{0};
@@ -569,6 +665,10 @@ int main(int argc, char** argv) {
   BulkProgress(false);
   BulkProgress(true);
   GuestTerminalAndCleanup();
+  ScalarBackendAlternation<uint8_t>();
+  ScalarBackendAlternation<uint16_t>();
+  ScalarBackendAlternation<uint32_t>();
+  ScalarBackendAlternation<uint64_t>();
   HardwareTlsIsolation();
   {
     ExecutionActivation owner;
