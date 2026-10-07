@@ -1,5 +1,6 @@
 #include <rex/platform/guest_memory.h>
 #include "guest_access_compact.h"
+#include "guest_mmio_classifier.h"
 #include <rex/exception_handler.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
@@ -117,8 +118,8 @@ bool CompleteMappedRead(const void* address, void* output, size_t width, bool un
                         MMIO::DeferredTransaction& transaction) noexcept {
   auto* handler=MMIO::global_handler();uint32_t guest_address=0;
   if(!handler)return false;
-  const bool mapped=handler->IsMappedAddress(address,&guest_address);
-  const bool overlaps=handler->IsMappedRange(address,width);
+  bool mapped=false;
+  const bool overlaps=detail::MappedAccessClassifier::Classify(*handler,address,width,guest_address,mapped);
   if(overlaps && (unsupported || width!=4))FaultContractFailure("unadmitted-mapped-data-access");
   if(!mapped){
     if(overlaps)FaultContractFailure("unadmitted-partial-mapped-scalar-access");
@@ -138,8 +139,8 @@ bool CompleteMappedWrite(void* address, const void* input, size_t width, bool un
                          MMIO::DeferredTransaction& transaction) noexcept {
   auto* handler=MMIO::global_handler();uint32_t guest_address=0;
   if(!handler)return false;
-  const bool mapped=handler->IsMappedAddress(address,&guest_address);
-  const bool overlaps=handler->IsMappedRange(address,width);
+  bool mapped=false;
+  const bool overlaps=detail::MappedAccessClassifier::Classify(*handler,address,width,guest_address,mapped);
   if(overlaps && (unsupported || width!=4))FaultContractFailure("unadmitted-mapped-data-access");
   if(!mapped){
     if(overlaps)FaultContractFailure("unadmitted-partial-mapped-scalar-access");

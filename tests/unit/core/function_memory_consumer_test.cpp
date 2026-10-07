@@ -13,6 +13,7 @@
 #include <sys/resource.h>
 #include <cerrno>
 #include <string>
+int RunMappedClassifierEquivalence(const char* mode);
 namespace {
 rex::guest::detail::FunctionMemoryConsumer* signal_scope=nullptr;
 const void* signal_address=nullptr;
@@ -48,13 +49,17 @@ bool Child(const char* executable,const char* mode,int expected,const char* mark
   close(descriptors[0]);int status=0;pid_t waited;
   do{waited=waitpid(child,&status,0);}while(waited<0&&errno==EINTR);
   const bool okay=waited==child&&WIFEXITED(status)&&WEXITSTATUS(status)==expected&&error.find(marker)!=std::string::npos;
-  std::printf("{\"kind\":\"function_consumer_child\",\"mode\":\"%s\",\"exit\":%d,\"signal\":%d,\"marker_present\":%s}\n",mode,WIFEXITED(status)?WEXITSTATUS(status):-1,WIFSIGNALED(status)?WTERMSIG(status):0,error.find(marker)!=std::string::npos?"true":"false");
+  const char* kind=std::strncmp(mode,"classifier-",11)?"function_consumer_child":"classifier_refusal_child";
+  std::printf("{\"kind\":\"%s\",\"mode\":\"%s\",\"exit\":%d,\"signal\":%d,\"marker_present\":%s}\n",kind,mode,WIFEXITED(status)?WEXITSTATUS(status):-1,WIFSIGNALED(status)?WTERMSIG(status):0,error.find(marker)!=std::string::npos?"true":"false");
   return okay;
 }
 }
 int main(int argc,char** argv) {
  const rlimit no_core{0,0};if(setrlimit(RLIMIT_CORE,&no_core))return 94;
  rex::InitLogging();
+ if(argc>1 && !std::strncmp(argv[1],"classifier-",11))
+  return RunMappedClassifierEquivalence(argv[1]+11);
+ if(argc==1 && RunMappedClassifierEquivalence(nullptr))return 100;
  Dl_info info{};if(!dladdr(reinterpret_cast<void*>(&rex::guest::detail::TryReadBytes),&info)||!info.dli_fname)return 95;
  std::printf("{\"kind\":\"loaded_runtime\",\"path\":\"%s\"}\n",info.dli_fname);
  rex::memory::Memory memory;if(!memory.Initialize())return 1;
@@ -155,6 +160,10 @@ int main(int argc,char** argv) {
  else{auto length=readlink("/proc/self/exe",executable,sizeof(executable)-1);if(length<=0)return 98;executable[length]=0;}
  if(!Child(executable,"cached-pending",86,"guest-continuation-with-pending-fault")||
     !Child(executable,"cached-adjudicating",86,"guest-access-during-adjudication")||
-    !Child(executable,"cached-signal",139,"function-memory-consumer-cached-signal-enter"))return 99;
+    !Child(executable,"cached-signal",139,"function-memory-consumer-cached-signal-enter")||
+    !Child(executable,"classifier-throw-point",86,"exception-classifying-mmio-address")||
+    !Child(executable,"classifier-throw-range",86,"exception-classifying-mmio-range")||
+    !Child(executable,"classifier-nonlinear",86,"nonlinear-mapped-admission-range")||
+    !Child(executable,"classifier-overflow",86,"mapped-admission-range-overflow"))return 99;
  return 0;
 }

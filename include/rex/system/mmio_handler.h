@@ -23,6 +23,8 @@ class Exception;
 class HostThreadContext;
 }  // namespace rex::arch
 
+namespace rex::guest::detail { struct MappedAccessClassifier; }
+
 namespace rex::runtime {
 
 typedef uint32_t (*MMIOReadCallback)(void* ppc_context, void* callback_context, uint32_t addr);
@@ -139,6 +141,15 @@ class MMIOHandler {
   rex::thread::global_critical_region global_critical_region_;
 
  private:
+#if REX_PLATFORM_LINUX
+  friend struct rex::guest::detail::MappedAccessClassifier;
+  // Fresh normal-context classification for checked scalar consumers. The
+  // translator is the same admitted deterministic runtime metadata translator
+  // used by IsMappedRange. No result survives this operation.
+  __attribute__((visibility("hidden")))
+  bool ClassifyMappedAccess(const void* host_address, size_t length,
+                            uint32_t* point_guest_address, bool* point_mapped) const noexcept;
+#endif
   struct DecodedLoadStore {
     // Matches the Xn/Wn register number for 0 reads and ignored writes in many
     // usage cases.

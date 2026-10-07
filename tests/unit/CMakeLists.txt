@@ -298,6 +298,7 @@ endif()
 # linking the shared runtime as well would create competing private TLS copies.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     add_executable(function_memory_consumer_test core/function_memory_consumer_test.cpp
+        system/mmio_classifier_equivalence_test.cpp
         $<TARGET_OBJECTS:rexruntime>)
     # The runtime finds curl in src/system; its imported target is scoped there.
     # This direct object consumer needs the same dependency in this directory.
