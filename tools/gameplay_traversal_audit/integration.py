@@ -86,9 +86,10 @@ def main():
                    'actual_title_gameplay_tested': False, 'native_binary': str(binary),
                    'process_returncodes': [p.returncode for p in processes],
                    'participants': 3, 'independent_endpoints': 3, 'pair_links': 3,
-                   'discovery_attempts_retired': True, 'payload_bytes': 39}
+                   'discovery_attempts_retired': True, 'payload_bytes': 39, 'gameplay_datagram_protocol': 1,
+                   'runtime_socket_send_and_receive': True}
         (output/'validation.json').write_text(json.dumps(receipt, indent=2) + '\n')
-        print('PASS: production discovery/admission/completion -> three distinct gameplay sockets, all peer pairs, unchanged 39-byte bidirectional payloads')
+        print('PASS: production discovery/admission/completion -> three distinct gameplay sockets, all peer pairs, authenticated unchanged 39-byte bidirectional payloads through actual XSocket')
         for i in (1,2,3): print(i,(output/f'{i}.ready').read_text())
         print(output)
     finally:
