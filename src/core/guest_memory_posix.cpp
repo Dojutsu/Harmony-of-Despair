@@ -17,30 +17,47 @@ namespace rex::guest {
 namespace {
 using MMIO = runtime::MMIOHandler;
 constexpr unsigned kRetryLimit = 8;
-// Only the observed non-atomic scalar16 RAM read is admitted. Stage both
-// bytes before publishing a value: a terminal second-byte fault cannot commit
-// a partial guest register, and the completed first byte is never replayed.
-// Physical aliases/watches, devices, reservations, SIMD and other widths keep
-// their independent admission guards. This is not an atomic snapshot contract.
-bool AdmitCrossPageRamRead16(const void* pointer) noexcept {
+// Ordinary virtual RAM has no physical write-watch/device callbacks. Retain
+// owner and mapping admission through one x86 MOVQ, including its epilogue.
+// A failing MOVQ publishes no bytes/output and is never split or replayed.
+// This is an unaligned scalar operation, not an atomic snapshot guarantee.
+std::optional<AccessAttempt> CaptureCrossPageRamScalar(const void* pointer,void* value,size_t width,bool write) noexcept {
   const auto address=reinterpret_cast<uintptr_t>(pointer);
-  if(address==std::numeric_limits<uintptr_t>::max() ||
-     address%memory::page_size()!=memory::page_size()-1)return false;
+  const auto page=memory::page_size();
+  if(address>std::numeric_limits<uintptr_t>::max()-width || address%page<=page-width)return std::nullopt;
   auto* thread=runtime::ThreadState::Get();
-  if(!thread || !thread->memory())return false;
-  auto* memory=thread->memory();
+  if(!thread)return std::nullopt;
+  memory::GuestMemoryAccessPin owner(thread->memory_access_control());
+  if(!owner.memory()) {
+    AccessAttempt denied{};denied.fault.address=address;denied.fault.access_intent=write;
+    return denied;
+  }
+  memory::MappingAccessLease lease;
+  auto* memory=owner.memory();
   const auto guest=memory->HostToGuestVirtual(pointer);
-  if(guest==UINT32_MAX || memory->TranslateVirtual(guest)!=pointer ||
-     memory->TranslateVirtual(guest+1)!=reinterpret_cast<const uint8_t*>(pointer)+1)return false;
-  auto* first=memory->LookupHeap(guest);auto* second=memory->LookupHeap(guest+1);
-  if(!first || first!=second || first->heap_type()!=memory::HeapType::kGuestVirtual)return false;
+  if(guest>UINT32_MAX-(width-1) || memory->TranslateVirtual(guest)!=pointer ||
+     memory->TranslateVirtual(guest+width-1)!=static_cast<const uint8_t*>(pointer)+width-1 ||
+     !memory->MatchesGuestBacking(pointer,guest,width))return std::nullopt;
+  auto* first=memory->LookupHeap(guest);auto* last=memory->LookupHeap(guest+width-1);
+  if(!first || first!=last || first->heap_type()!=memory::HeapType::kGuestVirtual)return std::nullopt;
+  if(auto* handler=MMIO::global_handler();handler && handler->IsMappedRange(pointer,width))return std::nullopt;
   memory::HeapAllocationInfo a{},b{};
-  if(!first->QueryRegionInfo(guest,&a) || !second->QueryRegionInfo(guest+1,&b) ||
-     !(a.state&memory::kMemoryAllocationCommit) || !(b.state&memory::kMemoryAllocationCommit) ||
-     !(a.protect&memory::kMemoryProtectRead) || !(b.protect&memory::kMemoryProtectRead) ||
-     a.allocation_base!=b.allocation_base || a.allocation_size!=b.allocation_size)return false;
-  auto* handler=MMIO::global_handler();
-  return !handler || !handler->IsMappedRange(pointer,2);
+  if(!first->QueryRegionInfo(guest,&a) || !last->QueryRegionInfo(guest+width-1,&b) ||
+     a.allocation_base!=b.allocation_base || a.allocation_size!=b.allocation_size)return std::nullopt;
+  const unsigned permissions=memory::kMemoryProtectRead|(write?memory::kMemoryProtectWrite:0);
+  const bool first_admitted=(a.state&memory::kMemoryAllocationCommit) && (a.protect&permissions)==permissions;
+  const bool last_admitted=(b.state&memory::kMemoryAllocationCommit) && (b.protect&permissions)==permissions;
+  if(!first_admitted || !last_admitted) {
+    AccessAttempt denied{};
+    denied.fault.address=first_admitted?address+page-address%page:address;
+    denied.fault.access_intent=write;
+    return denied;
+  }
+  if(write)return CaptureWrite(const_cast<void*>(pointer),value,width);
+  uint64_t staged=0;
+  auto captured=CaptureRead(pointer,&staged,width);
+  if(captured.success)std::memcpy(value,&staged,width);
+  return captured;
 }
 void DiagnoseCrossPage(const void* pointer,size_t width,bool atomic,bool vector,bool write) noexcept {
   const auto address=reinterpret_cast<uintptr_t>(pointer);
@@ -201,18 +218,11 @@ void RequireFillRange(void* destination,size_t length) noexcept {
 }
 AccessResult<bool> TryReadBytes(const void* address,void* output,size_t width,bool vector,bool reservation) noexcept {
   RequireAccess();
-  if(width==2 && !vector && !reservation && AdmitCrossPageRamRead16(address)) {
-    unsigned char staged[2]{};
-    for(unsigned i=0;i<2;++i) {
-      auto part=TryReadBytes(static_cast<const unsigned char*>(address)+i,staged+i,1);
-      if(part.Failed())return part.Forward();
+  if((width==8 || width==2) && !vector && !reservation) {
+    if(auto captured=CaptureCrossPageRamScalar(address,output,width,false)) {
+      if(captured->success)return AccessResult<bool>::Success(true);
+      return Terminal<bool>(captured->fault);
     }
-    std::memcpy(output,staged,2);
-    // Bounded normal-context qualification evidence; never log guest contents.
-    static thread_local unsigned observations=0;
-    if(observations++<2)REXLOG_DEBUG("GUEST_CROSS_PAGE_READ16_COMPLETE address={:016X} width=2 completed=2 thread={}",
-      reinterpret_cast<uintptr_t>(address),gettid());
-    return AccessResult<bool>::Success(true);
   }
   ValidateRange(address,width,reservation,vector);
   if(reservation)RejectMappedAtomic(address,width);
@@ -234,7 +244,14 @@ AccessResult<bool> TryReadBytes(const void* address,void* output,size_t width,bo
   FaultContractFailure("read-retry-budget-exhausted");
 }
 AccessResult<bool> TryWriteBytes(void* address,const void* value,size_t width,bool vector) noexcept {
-  RequireAccess();ValidateRange(address,width,false,vector,true);MMIO::DeferredTransaction transaction;
+  RequireAccess();
+  if(width==8 && !vector) {
+    if(auto captured=CaptureCrossPageRamScalar(address,const_cast<void*>(value),width,true)) {
+      if(captured->success)return AccessResult<bool>::Success(true);
+      return Terminal<bool>(captured->fault);
+    }
+  }
+  ValidateRange(address,width,false,vector,true);MMIO::DeferredTransaction transaction;
   if(CompleteMappedWrite(address,value,width,vector,transaction))return AccessResult<bool>::Success(true);
   for(unsigned attempt=0;attempt<kRetryLimit;++attempt){
     auto captured=vector?CaptureVectorWrite(address,value):CaptureWrite(address,value,width);

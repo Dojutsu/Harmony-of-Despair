@@ -266,6 +266,11 @@ void Runtime::Shutdown() {
     return;
   }
 
+#if REX_PLATFORM_GNU_LINUX
+  // Drain the short checked cross-page leaves before destroying their callback
+  // and memory owners. This wait runs without global or mapping locks.
+  if (memory_) memory_->CloseGuestAccessAndDrain();
+#endif
   if (instance_ == this) {
     instance_ = nullptr;
   }

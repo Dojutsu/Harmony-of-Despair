@@ -28,6 +28,7 @@
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/mmio_handler.h>
 #include <rex/system/xmemory.h>
+#include <rex/memory/mapping_lease.h>
 #include <rex/thread.h>
 
 // TODO(benvanik): move xbox.h out
@@ -100,6 +101,9 @@ void CrashDump() {
 }
 
 Memory::Memory() {
+#if REX_PLATFORM_GNU_LINUX
+  access_control_ = std::make_shared<GuestMemoryAccessControl>(this);
+#endif
   system_page_size_ = uint32_t(rex::memory::page_size());
   system_allocation_granularity_ = uint32_t(rex::memory::allocation_granularity());
   assert_zero(active_memory_);
@@ -107,6 +111,11 @@ Memory::Memory() {
 }
 
 Memory::~Memory() {
+#if REX_PLATFORM_GNU_LINUX
+  // Admission must close before taking locks that a retained operation needs.
+  CloseGuestAccessAndDrain();
+#endif
+  REX_MAPPING_OWNER_MUTATION();
   assert_true(active_memory_ == this);
   active_memory_ = nullptr;
 
@@ -139,6 +148,7 @@ Memory::~Memory() {
 }
 
 bool Memory::Initialize() {
+  REX_MAPPING_OWNER_MUTATION();
   file_name_ = fmt::format("xenia_memory_{}", chrono::Clock::QueryHostTickCount());
 
   // Create main page file-backed mapping. This is all reserved but
@@ -154,6 +164,9 @@ bool Memory::Initialize() {
     assert_always();
     return false;
   }
+#if REX_PLATFORM_GNU_LINUX
+  backing_identity_ = MappingHandleIdentity(static_cast<int>(mapping_));
+#endif
 
 #if REX_PLATFORM_MAC
   // On macOS, reserve a contiguous host range first, then carve guest views
@@ -366,6 +379,7 @@ int Memory::MapViewsMac() {
 #endif  // REX_PLATFORM_MAC
 
 int Memory::MapViews(uint8_t* mapping_base) {
+  REX_MAPPING_OWNER_MUTATION();
   assert_true(rex::countof(map_info) == rex::countof(views_.all_views));
   // 0xE0000000 4 KB offset is emulated via host_address_offset and on the CPU
   // side if system allocation granularity is bigger than 4 KB.
@@ -385,6 +399,7 @@ int Memory::MapViews(uint8_t* mapping_base) {
 }
 
 void Memory::UnmapViews() {
+  REX_MAPPING_OWNER_MUTATION();
   for (size_t n = 0; n < rex::countof(views_.all_views); n++) {
     if (views_.all_views[n]) {
       size_t length = map_info[n].virtual_address_end - map_info[n].virtual_address_start + 1;
@@ -394,6 +409,7 @@ void Memory::UnmapViews() {
 }
 
 void Memory::Reset() {
+  REX_MAPPING_OWNER_MUTATION();
   heaps_.v00000000.Reset();
   heaps_.v40000000.Reset();
   heaps_.v80000000.Reset();
@@ -510,6 +526,7 @@ uint32_t Memory::SearchAligned(uint32_t start, uint32_t end, const uint32_t* val
 bool Memory::AddVirtualMappedRange(uint32_t virtual_address, uint32_t mask, uint32_t size,
                                    void* context, runtime::MMIOReadCallback read_callback,
                                    runtime::MMIOWriteCallback write_callback) {
+  REX_MAPPING_OWNER_MUTATION();
   // AllocFixed rejects requests that don't cover whole host pages, so that a
   // guest heap can never widen an mprotect over a neighbouring guest page that
   // shares the host page. An MMIO window has no such neighbours - it owns its
@@ -781,6 +798,7 @@ void Memory::DumpMap() {
 }
 
 bool Memory::Save(stream::ByteStream* stream) {
+  REX_MAPPING_OWNER_MUTATION();
   REXSYS_DEBUG("Serializing memory...");
   heaps_.v00000000.Save(stream);
   heaps_.v40000000.Save(stream);
@@ -792,6 +810,7 @@ bool Memory::Save(stream::ByteStream* stream) {
 }
 
 bool Memory::Restore(stream::ByteStream* stream) {
+  REX_MAPPING_OWNER_MUTATION();
   REXSYS_DEBUG("Restoring memory...");
   heaps_.v00000000.Restore(stream);
   heaps_.v40000000.Restore(stream);
@@ -1051,6 +1070,7 @@ bool BaseHeap::SyncHostPageAccess(uint32_t start_page_number, uint32_t end_page_
 void BaseHeap::Initialize(memory::Memory* memory, uint8_t* membase, HeapType heap_type,
                           uint32_t heap_base, uint32_t heap_size, uint32_t page_size,
                           uint32_t host_address_offset) {
+  REX_MAPPING_OWNER_MUTATION();
   memory_ = memory;
   membase_ = membase;
   heap_type_ = heap_type;
@@ -1065,6 +1085,7 @@ void BaseHeap::Initialize(memory::Memory* memory, uint8_t* membase, HeapType hea
 }
 
 void BaseHeap::Dispose() {
+  REX_MAPPING_OWNER_MUTATION();
   // Walk table and release all regions.
   for (uint32_t page_number = 0; page_number < page_table_.size(); ++page_number) {
     auto& page_entry = page_table_[page_number];
@@ -1157,6 +1178,7 @@ uint32_t BaseHeap::GetUnreservedPageCount() {
 }
 
 bool BaseHeap::Save(stream::ByteStream* stream) {
+  REX_MAPPING_OWNER_MUTATION();
   REXSYS_DEBUG("Heap {:08X}-{:08X}", heap_base_, heap_base_ + (heap_size_ - 1));
 
   for (size_t i = 0; i < page_table_.size(); i++) {
@@ -1184,6 +1206,7 @@ bool BaseHeap::Save(stream::ByteStream* stream) {
 }
 
 bool BaseHeap::Restore(stream::ByteStream* stream) {
+  REX_MAPPING_OWNER_MUTATION();
   REXSYS_DEBUG("Heap {:08X}-{:08X}", heap_base_, heap_base_ + (heap_size_ - 1));
 
   const uint32_t host_page_size = memory_->system_page_size_;
@@ -1261,6 +1284,7 @@ bool BaseHeap::Restore(stream::ByteStream* stream) {
 }
 
 void BaseHeap::Reset() {
+  REX_MAPPING_OWNER_MUTATION();
   // TODO(DrChat): protect pages.
   std::memset(page_table_.data(), 0, sizeof(PageEntry) * page_table_.size());
   // TODO(Triang3l): Remove access callbacks from pages if this is a physical
@@ -1306,6 +1330,7 @@ bool BaseHeap::AllocSystemHeap(uint32_t size, uint32_t alignment, uint32_t alloc
 
 bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignment,
                           uint32_t allocation_type, uint32_t protect) {
+  REX_MAPPING_OWNER_MUTATION();
   alignment = rex::round_up(alignment, page_size_);
   if (base_address % alignment != 0) {
     if (base_address % page_size_ != 0) {
@@ -1409,6 +1434,7 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignme
 bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t size,
                           uint32_t alignment, uint32_t allocation_type, uint32_t protect,
                           bool top_down, uint32_t* out_address) {
+  REX_MAPPING_OWNER_MUTATION();
   *out_address = 0;
 
   alignment = rex::round_up(alignment, page_size_);
@@ -1568,6 +1594,7 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t 
 }
 
 bool BaseHeap::Decommit(uint32_t address, uint32_t size) {
+  REX_MAPPING_OWNER_MUTATION();
   uint32_t page_count = get_page_count(size, page_size_, page_size_shift_);
   uint32_t start_page_number = (address - heap_base_) >> page_size_shift_;
   uint32_t end_page_number = start_page_number + page_count - 1;
@@ -1604,6 +1631,7 @@ bool BaseHeap::Decommit(uint32_t address, uint32_t size) {
 }
 
 bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
+  REX_MAPPING_OWNER_MUTATION();
   // Global critical region before heap_mutex_ - see
   // AcquireHostPageReconcileLock for why the order matters.
   auto global_lock = AcquireHostPageReconcileLock();
@@ -1666,6 +1694,7 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
 }
 
 bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect, uint32_t* old_protect) {
+  REX_MAPPING_OWNER_MUTATION();
   if (!size) {
     REXSYS_ERROR("BaseHeap::Protect failed due to zero size");
     return false;
@@ -1893,6 +1922,7 @@ PhysicalHeap::~PhysicalHeap() = default;
 void PhysicalHeap::Initialize(memory::Memory* memory, uint8_t* membase, HeapType heap_type,
                               uint32_t heap_base, uint32_t heap_size, uint32_t page_size,
                               VirtualHeap* parent_heap) {
+  REX_MAPPING_OWNER_MUTATION();
   uint32_t host_address_offset;
   if (heap_base >= 0xE0000000 && rex::memory::allocation_granularity() > 0x1000) {
     host_address_offset = 0x1000;
@@ -1925,6 +1955,7 @@ bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment, uint32_t allocation_
   // Global critical region before heap_mutex_ - see
   // AcquireHostPageReconcileLock for why the order matters.
   auto global_lock = AcquireHostPageReconcileLock();
+  REX_MAPPING_OWNER_MUTATION();
   std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
 
   // Allocate from parent heap (gets our physical address in 0-512mb).
@@ -1958,6 +1989,7 @@ bool PhysicalHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t ali
   // Global critical region before heap_mutex_ - see
   // AcquireHostPageReconcileLock for why the order matters.
   auto global_lock = AcquireHostPageReconcileLock();
+  REX_MAPPING_OWNER_MUTATION();
   std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
 
   // Allocate from parent heap (gets our physical address in 0-512mb).
@@ -1994,6 +2026,7 @@ bool PhysicalHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint3
   // Global critical region before heap_mutex_ - see
   // AcquireHostPageReconcileLock for why the order matters.
   auto global_lock = AcquireHostPageReconcileLock();
+  REX_MAPPING_OWNER_MUTATION();
   std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
 
   // Allocate from parent heap (gets our physical address in 0-512mb).
@@ -2122,6 +2155,7 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
   uint8_t* protect_base = membase_ + heap_base_;
   uint32_t protect_system_page_first = UINT32_MAX;
   auto global_lock = global_critical_region_.Acquire();
+  REX_MAPPING_MUTATION();
   for (uint32_t i = system_page_first; i <= system_page_last; ++i) {
     // Check if need to enable callbacks for the page and raise its protection.
     //
@@ -2196,6 +2230,7 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
 bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
                                     uint32_t virtual_address, uint32_t length, bool is_write,
                                     bool unwatch_exact_range, bool unprotect) {
+  REX_MAPPING_MUTATION();
   // TODO(Triang3l): Support read watches.
   assert_true(is_write);
   if (!is_write) {

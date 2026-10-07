@@ -26,6 +26,9 @@ class ThreadState {
   ~ThreadState();
 
   memory::Memory* memory() const { return memory_; }
+#if REX_PLATFORM_GNU_LINUX
+  const std::shared_ptr<memory::GuestMemoryAccessControl>& memory_access_control() const { return memory_access_control_; }
+#endif
   ::PPCContext* context() const { return context_; }
   uint32_t thread_id() const { return thread_id_; }
 
@@ -35,6 +38,9 @@ class ThreadState {
 
  private:
   memory::Memory* memory_;
+#if REX_PLATFORM_GNU_LINUX
+  std::shared_ptr<memory::GuestMemoryAccessControl> memory_access_control_;
+#endif
 
   uint32_t pcr_address_ = 0;
   uint32_t thread_id_ = 0;

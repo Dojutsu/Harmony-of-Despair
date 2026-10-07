@@ -22,7 +22,7 @@ not successful guest recovery.
 
 | Route | Contract |
 | --- | --- |
-| Scalar 1/2/4/8-byte RAM | Page-contained checked read/write; no failed output/store commit |
+| Scalar 1/2/4/8-byte RAM | Page-contained checked read/write; ordinary virtual-RAM cross-page scalar64 uses one MOVQ under owner/mapping lease; no failed output/store commit |
 | Generated vector access | Aligned 16-byte/page-contained checked load/store; preserves original SIMD value |
 | Reservation load / aligned 32/64-bit CAS | Native RAM operation; mapped devices rejected before access; access failure distinct from compare mismatch |
 | Forward nonoverlapping bulk | REP MOVSB remaining cursor; completed prefix retained; source and destination ownership declared separately |
@@ -68,7 +68,7 @@ refused before effects. Native callback faults chain without overwriting the
 original record; a callback exception/ambiguous completion is terminal and is
 never replayed. Failed explicit MMIO suboperations do not restart prior words.
 
-Overlap memmove, arbitrary cross-page scalar/vector accesses, backward bulk,
+Overlap memmove, cross-page scalar widths other than the admitted scalar16 read and scalar64 virtual RAM, cross-page vectors, backward bulk,
 split/unaligned/device atomics, physical read watches/providers and arbitrary
 libc recovery are excluded. If title execution requires one, stop and establish
 its separate progress/lifetime contract before admitting it.
@@ -87,3 +87,25 @@ specific. Only registered startup-loaded runtime DSOs are admitted; late TLS/DSO
 unload is not a supported fault boundary. Runtime imports are eagerly bound.
 Linux ARM64 and Android need separately tested context/leaf mechanisms and
 libc/loader/signal rules, without changing the higher-level contract.
+
+## Cross-page scalar64 virtual RAM
+
+Linux x86-64 admits all seven split offsets for an eight-byte ordinary virtual
+RAM load/store. Both endpoints must be canonical translations in the same
+committed allocation with the required guest permissions and the original
+Memory backing identity/file offset; physical aliases,
+MMIO overlaps, reservations and vectors remain excluded. A retained independent
+Memory control closes fresh admission before shutdown and drains active leaves
+before owner teardown. Global critical region → mapping gate → heap metadata
+lock is the common order, including direct platform VM mutators. The global guard
+remains held through the short native leaf and epilogue, preventing guest
+suspension while holding the gate. No decoder, callback or C++ exception executes
+in signal context. A store is exactly one unaligned MOVQ; a read stages its result
+before output publication. Native/guest permission failure releases all guards
+and publishes a terminal fault once; it never splits, rolls back or retries the
+operation. This route has no device/write-watch repair ownership and makes no
+single-copy atomicity promise for an unaligned doubleword. The existing two-byte
+cross-page read uses the same retained single-instruction route. Cooperative
+mapping-view records distinguish preexisting replacement and reused file handles;
+raw mmap/munmap outside the SDK VM API remains outside the supported ownership
+contract.

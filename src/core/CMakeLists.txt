@@ -76,6 +76,10 @@ elseif(UNIX)
     )
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(rexcore PRIVATE mapping_lease_posix.cpp)
+endif()
+
 # The admitted Linux data-fault backend is x86-64 only. Other OS/architecture
 # backends keep their existing independent source selection.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")

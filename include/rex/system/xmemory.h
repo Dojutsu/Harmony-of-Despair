@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <rex/memory/utils.h>
+#include <rex/memory/mapping_lease.h>
 #include <rex/ppc/func.h>  // PPCFunc type
 #include <rex/system/mmio_handler.h>
 #include <rex/thread/mutex.h>
@@ -361,9 +362,20 @@ class PhysicalHeap : public BaseHeap {
 // VirtualHeap or PhysicalHeap depending on type. Heaps model the page tables
 // and can handle reservation and committing of requested pages.
 class Memory {
+#if REX_PLATFORM_GNU_LINUX
+  std::shared_ptr<GuestMemoryAccessControl> access_control_;
+  uint64_t backing_identity_ = 0;
+#endif
  public:
   Memory();
   ~Memory();
+#if REX_PLATFORM_GNU_LINUX
+  std::shared_ptr<GuestMemoryAccessControl> access_control() const { return access_control_; }
+  void CloseGuestAccessAndDrain() { access_control_->CloseAndDrain(); }
+  bool MatchesGuestBacking(const void* pointer,uint32_t guest,size_t length) const {
+    return MappingViewMatches(pointer,length,backing_identity_,guest);
+  }
+#endif
 
   // Initializes the memory system.
   // This may fail if the host address space could not be reserved or the

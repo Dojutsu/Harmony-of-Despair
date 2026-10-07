@@ -98,6 +98,41 @@ void ScalarAndVectorIntent() {
   Check(!std::memcmp(write.fault.xmm_registers[0], payload.data(), 16), "simd_fault_payload_snapshot");
 }
 
+void Scalar64SplitFaults() {
+  Mapping ram(page_size*2);
+  for(unsigned first_bytes=1;first_bytes<8;++first_bytes) {
+    auto* cell=ram.data+page_size-first_bytes;
+    for(unsigned denied=0;denied<4;++denied) {
+      bool store_ok=true,read_ok=true,sentinels_ok=true,intent_ok=true;
+      for(unsigned repeat=0;repeat<100;++repeat) {
+        std::memset(cell-1,0xA5,10);
+        ram.Protect(0,page_size,denied&1?PROT_READ:PROT_READ|PROT_WRITE);
+        ram.Protect(page_size,page_size,denied&2?PROT_READ:PROT_READ|PROT_WRITE);
+        uint64_t payload=0x00001A3E0080503FULL;
+        auto write=CaptureWrite(cell,&payload,8);
+        intent_ok &= write.success || write.fault.access_intent==1;
+        ram.Protect(0,ram.size,PROT_READ|PROT_WRITE);
+        store_ok &= write.success==(denied==0);
+        store_ok &= !std::memcmp(cell,denied?"\xA5\xA5\xA5\xA5\xA5\xA5\xA5\xA5":"\x3F\x50\x80\x00\x3E\x1A\x00\x00",8);
+        sentinels_ok &= cell[-1]==0xA5 && cell[8]==0xA5;
+        ram.Protect(0,page_size,denied&1?PROT_NONE:PROT_READ|PROT_WRITE);
+        ram.Protect(page_size,page_size,denied&2?PROT_NONE:PROT_READ|PROT_WRITE);
+        uint64_t output=0xDEADBEEFCAFEBABEULL;
+        auto read=CaptureRead(cell,&output,8);
+        read_ok &= read.success==(denied==0);
+        read_ok &= output==(denied?0xDEADBEEFCAFEBABEULL:payload);
+        intent_ok &= read.success || read.fault.access_intent==0;
+        ram.Protect(0,ram.size,PROT_READ|PROT_WRITE);
+      }
+      Check(store_ok,"split_movq_store_single_commit_or_unchanged");
+      Check(read_ok,"split_movq_read_staged_output");
+      Check(sentinels_ok,"split_movq_surrounding_bytes_unchanged");
+      Check(intent_ok,"split_movq_fault_intent");
+      Check(!HasArmedAccessFrame(),"split_movq_access_frame_disarmed");
+    }
+  }
+}
+
 void AtomicIntentAndCompletion() {
   Mapping ram(page_size);
   auto* value64 = reinterpret_cast<uint64_t*>(ram.data);
@@ -440,6 +475,7 @@ int main(int argc, char** argv) {
   RunChild(executable, "adjudication-low-zero", 86);
   rex::initialize_seh();
   ScalarAndVectorIntent();
+  Scalar64SplitFaults();
   AtomicIntentAndCompletion();
   BulkProgress(false);
   BulkProgress(true);

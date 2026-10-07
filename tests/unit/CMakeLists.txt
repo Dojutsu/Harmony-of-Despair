@@ -92,12 +92,21 @@ set_target_properties(online_status_lifecycle PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
 
 include(Catch)
-if(WIN32)
+if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(recvfrom_lifetime_test kernel/recvfrom_lifetime_test.cpp)
     target_include_directories(recvfrom_lifetime_test PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/thirdparty)
-    target_link_libraries(recvfrom_lifetime_test PRIVATE rexruntime ws2_32)
-    set_target_properties(recvfrom_lifetime_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
+    target_link_libraries(recvfrom_lifetime_test PRIVATE rexruntime)
+    if(WIN32)
+        target_link_libraries(recvfrom_lifetime_test PRIVATE ws2_32)
+    endif()
+    set_target_properties(recvfrom_lifetime_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set_target_properties(recvfrom_lifetime_test PROPERTIES
+            INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
+    endif()
     add_test(NAME recvfrom_lifetime COMMAND recvfrom_lifetime_test)
+    set_tests_properties(recvfrom_lifetime PROPERTIES LABELS "network;guest_socket" TIMEOUT 60)
 endif()
 catch_discover_tests(unit_tests
     TEST_PREFIX "unit."
@@ -161,3 +170,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
             --compiler "${CMAKE_CXX_COMPILER}")
     set_tests_properties(guest_access_template_compile PROPERTIES LABELS "linux;guest_fault;codegen" TIMEOUT 60)
 endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(unit_tests PRIVATE core/mapping_lease_test.cpp)
+endif()
+
+# Local opt-in scripted controller regression for unattended title validation.
+target_sources(unit_tests PRIVATE input/scripted_input_test.cpp)

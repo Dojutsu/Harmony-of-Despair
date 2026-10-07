@@ -23,6 +23,7 @@
 #include <rex/platform/guest_fault_state.h>
 #endif
 #include <rex/system/mmio_handler.h>
+#include <rex/memory/mapping_lease.h>
 #include <rex/types.h>
 
 using namespace rex::arch;
@@ -41,6 +42,7 @@ std::unique_ptr<MMIOHandler> MMIOHandler::Install(uint8_t* virtual_membase,
                                                   const void* host_to_guest_virtual_context,
                                                   AccessViolationCallback access_violation_callback,
                                                   void* access_violation_callback_context) {
+  REX_MAPPING_OWNER_MUTATION();
   // There can be only one handler at a time.
   assert_null(global_handler_);
   if (global_handler_) {
@@ -77,6 +79,7 @@ MMIOHandler::MMIOHandler(uint8_t* virtual_membase, uint8_t* physical_membase, ui
       access_violation_callback_context_(access_violation_callback_context) {}
 
 MMIOHandler::~MMIOHandler() {
+  REX_MAPPING_OWNER_MUTATION();
 #if !REX_PLATFORM_LINUX
   arch::ExceptionHandler::Uninstall(ExceptionCallbackThunk, this);
 #endif
@@ -91,6 +94,7 @@ MMIOHandler::~MMIOHandler() {
 bool MMIOHandler::RegisterRange(uint32_t virtual_address, uint32_t mask, uint32_t size,
                                 void* context, MMIOReadCallback read_callback,
                                 MMIOWriteCallback write_callback) {
+  REX_MAPPING_OWNER_MUTATION();
   mapped_ranges_.push_back({
       virtual_address,
       mask,

@@ -31,6 +31,7 @@
 
 #include <rex/logging.h>
 #include <rex/math.h>
+#include <rex/memory/mapping_lease.h>
 #include <rex/memory/utils.h>
 #include <rex/platform.h>
 #include <rex/string.h>
@@ -239,6 +240,7 @@ static PageAccess PermsToPageAccess(const char perms[5]) {
 
 void* AllocFixed(void* base_address, size_t length, AllocationType allocation_type,
                  PageAccess access) {
+  REX_MAPPING_MUTATION();
   // Emulates Windows VirtualAlloc behavior:
   // - Reserve: create PROT_NONE mapping to hold address space
   // - Commit on existing reservation: mprotect to enable access (EEXIST path)
@@ -317,6 +319,7 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
 }
 
 bool DeallocFixed(void* base_address, size_t length, DeallocationType deallocation_type) {
+  REX_MAPPING_MUTATION();
   switch (deallocation_type) {
     case DeallocationType::kDecommit: {
       // Decommit: remove access first, then release physical pages
@@ -329,7 +332,11 @@ bool DeallocFixed(void* base_address, size_t length, DeallocationType deallocati
       return true;
     }
     case DeallocationType::kRelease: {
-      return munmap(base_address, length) == 0;
+      const bool result=munmap(base_address,length)==0;
+#if REX_PLATFORM_GNU_LINUX
+      if(result)ForgetMappingViews(base_address,length);
+#endif
+      return result;
     }
     default:
       // how we get here? :(
@@ -339,6 +346,7 @@ bool DeallocFixed(void* base_address, size_t length, DeallocationType deallocati
 }
 
 bool Protect(void* base_address, size_t length, PageAccess access, PageAccess* out_old_access) {
+  REX_MAPPING_MUTATION();
   if (out_old_access) {
     *out_old_access = PageAccess::kNoAccess;
   }
@@ -431,6 +439,7 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
 
 FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, size_t length,
                                           PageAccess access, bool commit) {
+  REX_MAPPING_MUTATION();
 #if REX_PLATFORM_ANDROID
   // TODO(Triang3l): Check if memfd can be used instead on API 30+.
   if (android_ASharedMemory_create_) {
@@ -488,6 +497,10 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
 }
 
 void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::path& path) {
+  REX_MAPPING_MUTATION();
+#if REX_PLATFORM_GNU_LINUX
+  ForgetMappingHandle(static_cast<int>(handle));
+#endif
   close(static_cast<int>(handle));
 #if !REX_PLATFORM_ANDROID
   auto full_path = MakeShmName(path);
@@ -497,6 +510,7 @@ void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::pat
 
 void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, PageAccess access,
                   size_t file_offset) {
+  REX_MAPPING_MUTATION();
   // file_offset must be page-aligned
   const size_t page = page_size();
   if (file_offset % page != 0) {
@@ -525,11 +539,19 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, P
     return nullptr;
   }
 
+#if REX_PLATFORM_GNU_LINUX
+  RecordMappingView(result,length,MappingHandleIdentity(static_cast<int>(handle)),file_offset);
+#endif
   return result;
 }
 
 bool UnmapFileView(FileMappingHandle handle, void* base_address, size_t length) {
-  return munmap(base_address, length) == 0;
+  REX_MAPPING_MUTATION();
+  const bool result=munmap(base_address,length)==0;
+#if REX_PLATFORM_GNU_LINUX
+  if(result)ForgetMappingViews(base_address,length);
+#endif
+  return result;
 }
 
 }  // namespace memory

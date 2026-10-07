@@ -24,6 +24,9 @@ thread_local ThreadState* thread_state_ = nullptr;
 ThreadState::ThreadState(uint32_t thread_id, uint32_t stack_base, uint32_t pcr_address,
                          memory::Memory* memory)
     : memory_(memory), pcr_address_(pcr_address), thread_id_(thread_id) {
+#if REX_PLATFORM_GNU_LINUX
+  if (memory_) memory_access_control_ = memory_->access_control();
+#endif
   if (thread_id_ == UINT_MAX) {
     // System thread. Assign the system thread ID with a high bit
     // set so people know what's up.
