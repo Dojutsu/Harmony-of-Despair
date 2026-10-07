@@ -11,6 +11,7 @@
 #include <rex/memory.h>
 #include <rex/platform/guest_fault_state.h>
 #include <rex/platform/guest_memory.h>
+#include "../../../src/system/guest_deferred_transaction.h"
 #include <rex/system/mmio_handler.h>
 #include <rex/system/thread_state.h>
 #include <rex/types.h>
@@ -619,6 +620,8 @@ TEST_CASE("Linux real PhysicalHeap write watch defers notification and retries o
 
 TEST_CASE("Linux physical watch repair excludes a concurrent rewatch until native completion",
           "[linux][guest-fault][mmio][physical-watch][repair-race]") {
+  for(bool private_bridge:{false,true}) {
+    CAPTURE(private_bridge);
   auto& memory=rex::testing::GetTestMemory();
   auto* heap=memory.LookupHeapByType(true,65536);
   REQUIRE(heap!=nullptr);
@@ -638,7 +641,7 @@ TEST_CASE("Linux physical watch repair excludes a concurrent rewatch until nativ
   auto captured=rex::guest::CaptureWrite(pointer,&value,4);
   REQUIRE_FALSE(captured.success);
   REQUIRE(captured.fault.access_intent==1);
-  Handler::DeferredTransaction transaction;
+  auto transaction=private_bridge?rex::guest::detail::DeferredTransactionBridge::Create():Handler::DeferredTransaction{};
   REQUIRE(ResolveCaptured(captured.fault,Kind::kScalar32,transaction)==Recovery::kRetry);
   bool rewatch_admitted=false;
   std::thread gpu([&]{
@@ -659,7 +662,7 @@ TEST_CASE("Linux physical watch repair excludes a concurrent rewatch until nativ
   auto completion=rex::guest::CaptureWrite(pointer,&value,4);
   CHECK(completion.success);
   if(completion.success) {
-    REQUIRE(transaction.CompleteNative());
+    REQUIRE((private_bridge?rex::guest::detail::DeferredTransactionBridge::CompleteNative(transaction):transaction.CompleteNative()));
     CHECK(*pointer==value);
   }
   // Completion must release the watch lock, allowing a new legitimate watch.
@@ -679,6 +682,7 @@ TEST_CASE("Linux physical watch repair excludes a concurrent rewatch until nativ
     auto second=rex::guest::TryWrite<uint32_t>(pointer,0x77889900);
     REQUIRE(second.IsSuccess());CHECK(second.Value());CHECK(*pointer==0x77889900);
     CHECK(watch.notifications==2);CHECK(watch.incorrect_phase==0);
+  }
   }
 }
 
@@ -812,4 +816,55 @@ TEST_CASE("Linux cross-page admission keeps physical watches and non-scalar16 cl
     REQUIRE(rex::memory::QueryProtect(pages,length,access));CHECK(access==rex::memory::PageAccess::kReadOnly);
   }
 }
+TEST_CASE("Linux private native transaction completion retains one-shot phase and current owner",
+          "[linux][guest-fault][mmio][private-transaction]") {
+  rex::guest::ExecutionActivation owner;
+  for(bool private_bridge:{false,true}) {
+    CAPTURE(private_bridge);
+    auto transaction=private_bridge?rex::guest::detail::DeferredTransactionBridge::Create():Handler::DeferredTransaction{};
+    CHECK(transaction.phase()==Phase::kUnstarted);
+    CHECK_FALSE(transaction.BeginRetry());
+    auto complete=[&]{return private_bridge?rex::guest::detail::DeferredTransactionBridge::CompleteNative(transaction):transaction.CompleteNative();};
+    CHECK(complete());CHECK(transaction.phase()==Phase::kCompleted);
+    CHECK_FALSE(complete());CHECK_FALSE(transaction.BeginRetry());
+    CHECK(owner.published_faults()==0);CHECK(owner.consumed_faults()==0);
+    CHECK_FALSE(owner.HasPendingFault());
+  }
+}
+
+TEST_CASE("Linux private and public transaction entry points reject stale owners and completed bad phases",
+          "[linux][guest-fault][mmio][private-transaction][negative-control]") {
+  REQUIRE(rex::guest::ExecutionActivation::Current()==nullptr);
+  for(bool private_bridge:{false,true})for(unsigned mode=0;mode<6;++mode) {
+    CAPTURE(private_bridge,mode);
+    int fd[2];REQUIRE(pipe(fd)==0);auto child=fork();REQUIRE(child>=0);
+    if(!child) {
+      close(fd[0]);if(dup2(fd[1],STDERR_FILENO)<0)_exit(92);close(fd[1]);alarm(5);
+      if(mode==0) {
+        auto transaction=private_bridge?rex::guest::detail::DeferredTransactionBridge::Create():Handler::DeferredTransaction{};
+        (void)transaction;_exit(94);
+      }
+      rex::guest::ExecutionActivation owner;
+      auto transaction=private_bridge?rex::guest::detail::DeferredTransactionBridge::Create():Handler::DeferredTransaction{};
+      auto complete=[&]{return private_bridge?rex::guest::detail::DeferredTransactionBridge::CompleteNative(transaction):transaction.CompleteNative();};
+      rex::guest::CapturedFault fault{};
+      if(mode==1){rex::guest::ExecutionActivation other;complete();_exit(94);}
+      if(mode==4||mode==5){if(!complete())_exit(93);}
+      if(mode==2||mode==4){owner.Publish(fault);complete();_exit(94);}
+      if(mode==3||mode==5){rex::guest::AdjudicationScope guard(fault);complete();_exit(94);}
+
+      _exit(94);
+    }
+    close(fd[1]);std::string diagnostic;char bytes[1024];ssize_t count;
+    while((count=read(fd[0],bytes,sizeof(bytes)))>0)diagnostic.append(bytes,count);
+    close(fd[0]);int status=0;pid_t waited;
+    do{waited=waitpid(child,&status,0);}while(waited<0&&errno==EINTR);
+    REQUIRE(waited==child);REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status)==rex::guest::kFaultContractFailureExitCode);
+    const char* marker=mode==0?"mmio-transaction-without-owner":mode==1?"mmio-transaction-wrong-owner":
+      mode==2||mode==4?"guest-continuation-with-pending-fault":"guest-access-during-adjudication";
+    CHECK(diagnostic.find(marker)!=std::string::npos);
+  }
+}
+
 #endif

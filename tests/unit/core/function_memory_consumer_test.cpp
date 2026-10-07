@@ -1,5 +1,6 @@
 #include <rex/system/mmio_handler.h>
 #include <rex/platform/function_memory_consumer.h>
+#include "../../../src/system/guest_deferred_transaction.h"
 #include <rex/system/xmemory.h>
 #include <rex/platform/exceptions.h>
 #include <rex/logging.h>
@@ -17,6 +18,18 @@ int RunMappedClassifierEquivalence(const char* mode);
 namespace {
 rex::guest::detail::FunctionMemoryConsumer* signal_scope=nullptr;
 const void* signal_address=nullptr;
+rex::runtime::MMIOHandler::DeferredTransaction* signal_transaction=nullptr;
+bool signal_private=false;
+void CompletionSignal(int signal) {
+  static constexpr char marker[]="transaction-bridge-signal-enter\n";
+  if(signal!=SIGUSR1||!signal_transaction)std::_Exit(96);
+  (void)::write(STDERR_FILENO,marker,sizeof(marker)-1);
+  rex::guest::EnterSignalContext();
+  if(signal_private)rex::guest::detail::DeferredTransactionBridge::CompleteNative(*signal_transaction);
+  else signal_transaction->CompleteNative();
+  std::_Exit(97);
+}
+
 void CachedSignalRead(int signal) {
   static constexpr char marker[]="function-memory-consumer-cached-signal-enter\n";
   if(signal!=SIGUSR1||!signal_scope||!signal_address)std::_Exit(96);
@@ -71,6 +84,14 @@ int main(int argc,char** argv) {
   rex::guest::detail::FunctionMemoryConsumer scope;
   if(scope.Read<uint32_t>(p)!=seed)return 3;
   rex::guest::CapturedFault fault{};
+  if(std::strcmp(argv[1],"bridge-completion-signal")==0||std::strcmp(argv[1],"public-completion-signal")==0) {
+    signal_private=std::strcmp(argv[1],"bridge-completion-signal")==0;
+    auto transaction=signal_private?rex::guest::detail::DeferredTransactionBridge::Create():rex::runtime::MMIOHandler::DeferredTransaction{};
+    signal_transaction=&transaction;
+    struct sigaction action{};action.sa_handler=CompletionSignal;sigemptyset(&action.sa_mask);
+    if(sigaction(SIGUSR1,&action,nullptr))return 95;
+    std::fflush(stdout);if(raise(SIGUSR1))return 96;return 97;
+  }
   if(std::strcmp(argv[1],"cached-signal")==0){
    signal_scope=&scope;signal_address=p;
    struct sigaction action{};action.sa_handler=CachedSignalRead;sigemptyset(&action.sa_mask);
@@ -161,6 +182,8 @@ int main(int argc,char** argv) {
  if(!Child(executable,"cached-pending",86,"guest-continuation-with-pending-fault")||
     !Child(executable,"cached-adjudicating",86,"guest-access-during-adjudication")||
     !Child(executable,"cached-signal",139,"function-memory-consumer-cached-signal-enter")||
+    !Child(executable,"bridge-completion-signal",139,"transaction-bridge-signal-enter")||
+    !Child(executable,"public-completion-signal",139,"transaction-bridge-signal-enter")||
     !Child(executable,"classifier-throw-point",86,"exception-classifying-mmio-address")||
     !Child(executable,"classifier-throw-range",86,"exception-classifying-mmio-range")||
     !Child(executable,"classifier-nonlinear",86,"nonlinear-mapped-admission-range")||

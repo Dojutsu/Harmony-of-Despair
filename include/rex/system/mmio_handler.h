@@ -23,7 +23,10 @@ class Exception;
 class HostThreadContext;
 }  // namespace rex::arch
 
-namespace rex::guest::detail { struct MappedAccessClassifier; }
+namespace rex::guest::detail {
+struct MappedAccessClassifier;
+struct DeferredTransactionBridge;
+}
 
 namespace rex::runtime {
 
@@ -103,6 +106,11 @@ class MMIOHandler {
 
    private:
     friend class MMIOHandler;
+    friend struct rex::guest::detail::DeferredTransactionBridge;
+    struct InlineAdmission {};
+    __attribute__((visibility("hidden")))
+    DeferredTransaction(InlineAdmission, uint64_t owner_id) noexcept
+        : owner_id_(owner_id) {}
     const uint64_t owner_id_;
     Phase phase_ = Phase::kUnstarted;
     // Linux registered RAM/watch repair must remain protected from a new GPU

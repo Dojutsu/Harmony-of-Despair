@@ -22,6 +22,7 @@
 #include <rex/platform.h>
 #if REX_PLATFORM_LINUX
 #include <rex/platform/guest_fault_state.h>
+#include "guest_deferred_transaction.h"
 #endif
 #include <rex/system/mmio_handler.h>
 #include <rex/memory/mapping_lease.h>
@@ -292,11 +293,7 @@ bool MMIOHandler::ClassifyMappedAccess(const void* host_address, size_t length,
 }
 
 MMIOHandler::DeferredTransaction::DeferredTransaction()
-    : owner_id_([] {
-        const auto* owner = rex::guest::ExecutionActivation::Current();
-        if (!owner) rex::guest::FaultContractFailure("mmio-transaction-without-owner");
-        return owner->id();
-      }()) {}
+    : DeferredTransaction(InlineAdmission{}, rex::guest::detail::DeferredTransactionBridge::OwnerId()) {}
 
 bool MMIOHandler::DeferredTransaction::BeginRetry() {
   const auto* owner = rex::guest::ExecutionActivation::Current();
@@ -309,14 +306,7 @@ bool MMIOHandler::DeferredTransaction::BeginRetry() {
 }
 
 bool MMIOHandler::DeferredTransaction::CompleteNative() {
-  const auto* owner = rex::guest::ExecutionActivation::Current();
-  if (!owner || owner->id() != owner_id_)
-    rex::guest::FaultContractFailure("mmio-transaction-wrong-owner");
-  rex::guest::RequireAccess();
-  if (phase_ != Phase::kUnstarted) return false;
-  phase_ = Phase::kCompleted;
-  if (retry_lock_.owns_lock()) retry_lock_.unlock();
-  return true;
+  return rex::guest::detail::DeferredTransactionBridge::CompleteNative(*this);
 }
 
 bool MMIOHandler::DeferredTransaction::CompleteExplicit() {
