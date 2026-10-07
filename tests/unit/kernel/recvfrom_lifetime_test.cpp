@@ -6,6 +6,10 @@
 #include <stdexcept>
 #include <array>
 #include <future>
+#if REX_PLATFORM_GNU_LINUX
+#include <fcntl.h>
+#include <sys/resource.h>
+#endif
 
 using namespace rex;
 using namespace rex::system;
@@ -55,8 +59,14 @@ static void Run(KernelState* kernel, bool expect_stale, bool cancel_ready = fals
   addr.sin_port = 0;
   Check(XSUCCEEDED(receiver->Bind(&addr, sizeof(addr))), "bind loopback");
   sockaddr_in native{};
+#if REX_PLATFORM_WIN32
   int native_size = sizeof(native);
-  Check(getsockname(SOCKET(receiver->native_handle()), reinterpret_cast<sockaddr*>(&native),
+  const auto native_receiver = static_cast<SOCKET>(receiver->native_handle());
+#else
+  socklen_t native_size = sizeof(native);
+  const auto native_receiver = static_cast<int>(receiver->native_handle());
+#endif
+  Check(getsockname(native_receiver, reinterpret_cast<sockaddr*>(&native),
                     &native_size) == 0,
         "getsockname");
   addr.sin_port = ntohs(native.sin_port);
@@ -217,10 +227,172 @@ static void Run(KernelState* kernel, bool expect_stale, bool cancel_ready = fals
   pending_recv_pump_running = false;
 }
 
+#if REX_PLATFORM_GNU_LINUX
+static void RunLinuxFatalReceive(KernelState* kernel) {
+  pending_recv_pump_running = true;
+  auto* mem = kernel->memory();
+  const auto guest = mem->SystemHeapAlloc(4096);
+  Check(guest != 0, "fatal receive allocation");
+  auto ptr = [&]<typename T>(uint32_t offset) {
+    return ppc_ptr_t<T>(mem->TranslateVirtual<T*>(guest + offset), guest + offset);
+  };
+  auto buffer = ptr.operator()<XWSABUF>(0);
+  auto overlapped = ptr.operator()<XWSAOVERLAPPED>(32);
+  auto bytes = ptr.operator()<be_u32>(96);
+  auto flags = ptr.operator()<be_u32>(100);
+  auto query_bytes = ptr.operator()<be_u32>(112);
+  auto query_flags = ptr.operator()<be_u32>(116);
+  buffer->len = 64; buffer->buf_ptr = guest + 256;
+  auto receiver = make_object<XSocket>(kernel);
+  Check(XSUCCEEDED(receiver->Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM,
+                                         XSocket::X_IPPROTO_UDP)), "fatal receiver");
+  auto event = make_object<XEvent>(kernel); event->Initialize(true, false);
+  std::memset(overlapped.host_address(), 0, sizeof(XWSAOVERLAPPED));
+  overlapped->event_handle = event->handle();
+  *bytes = 0; *flags = 0;
+  Check(NetDll_WSARecvFrom_entry(1, receiver->handle(), buffer, 1, bytes, flags, nullptr,
+                                 nullptr, overlapped, nullptr) == uint32_t(-1), "fatal pending return");
+  Check(XThread::GetLastError() == 997, "fatal initially pending");
+  // Simulate underlying transport loss while the guest object and operation
+  // remain live. Explicit guest closesocket has a separate cancellation path.
+  Check(XSUCCEEDED(receiver->Close()), "retire native transport");
+  PumpPendingRecvFrom();
+  Check(uint32_t(overlapped->internal) == X_STATUS_UNSUCCESSFUL &&
+        uint32_t(overlapped->internal_high) == 0, "fatal overlapped state");
+  uint32_t type = 0, state = 0;
+  event->Query(&type, &state); Check(state == 1, "fatal completion event");
+  event->Reset(); PumpPendingRecvFrom(); event->Query(&type, &state);
+  Check(state == 0, "fatal event not signaled twice");
+  *query_bytes = 99; *query_flags = 99;
+  Check(NetDll_WSAGetOverlappedResult_entry(1, receiver->handle(), overlapped, query_bytes,
+                                           0, query_flags) == 0, "fatal query fails");
+  Check(XThread::GetLastError() == 10038, "fatal guest WSAENOTSOCK");
+  Check(uint32_t(*query_bytes) == 99 && uint32_t(*query_flags) == 99, "fatal query outputs unchanged");
+  Check(pending_recvs.empty(), "fatal query consumes completion");
+  receiver->Close(); receiver->ReleaseHandle(); event->ReleaseHandle();
+  mem->SystemHeapFree(guest); pending_recv_pump_running = false;
+  std::cout << "Linux terminal receive-error completion/event checks passed\n";
+}
+
+static void RunLinuxSocketAbi(KernelState* kernel) {
+  // Enter real guest APIs with Xbox constants, BE fields and kernel handles.
+  auto* mem = kernel->memory();
+  const auto guest = mem->SystemHeapAlloc(4096);
+  Check(guest != 0, "ABI guest allocation");
+  auto ptr = [&]<typename T>(uint32_t offset) {
+    return ppc_ptr_t<T>(mem->TranslateVirtual<T*>(guest + offset), guest + offset);
+  };
+  auto raw = [&](uint32_t offset) { return mapped_void(mem->TranslateVirtual(guest + offset), guest + offset); };
+  auto reads = ptr.operator()<x_fd_set>(0);
+  auto writes = ptr.operator()<x_fd_set>(288);
+  auto exceptions = ptr.operator()<x_fd_set>(576);
+  auto option = ptr.operator()<be_u32>(864);
+  auto timeout = raw(872);
+  auto source = ptr.operator()<XSOCKADDR_IN>(896);
+  auto source_length = ptr.operator()<be_u32>(916);
+  struct DescriptorPool {
+    std::vector<int> handles;
+    ~DescriptorPool() { for (int fd : handles) ::close(fd); }
+  } pool;
+  rlimit limits{};
+  Check(getrlimit(RLIMIT_NOFILE, &limits) == 0, "descriptor limit");
+  if (limits.rlim_cur > FD_SETSIZE + 16) {
+    for (;;) {
+      const int fd = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+      Check(fd >= 0, "allocate high socket descriptor");
+      pool.handles.push_back(fd);
+      if (fd >= FD_SETSIZE) break;
+    }
+  }
+  auto receiver = make_object<XSocket>(kernel);
+  auto sender = make_object<XSocket>(kernel);
+  Check(XSUCCEEDED(receiver->Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM,
+                                         XSocket::X_IPPROTO_UDP)), "ABI receiver");
+  Check(XSUCCEEDED(sender->Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM,
+                                       XSocket::X_IPPROTO_UDP)), "ABI sender");
+  if (!pool.handles.empty()) Check(receiver->native_handle() > FD_SETSIZE, "high guest fd");
+  N_XSOCKADDR_IN address{};
+  address.sin_family = AF_INET;
+  address.sin_addr = INADDR_LOOPBACK;
+  Check(XSUCCEEDED(receiver->Bind(&address, sizeof(address))), "ABI loopback bind");
+  sockaddr_in native{};
+  socklen_t native_length = sizeof(native);
+  Check(getsockname(receiver->native_handle(), reinterpret_cast<sockaddr*>(&native),
+                    &native_length) == 0, "ABI getsockname");
+  address.sin_port = ntohs(native.sin_port);
+  *option = 1;
+  Check(NetDll_setsockopt_entry(1, receiver->handle(), 0xFFFF, 0x0020, raw(864), 4) == 0,
+        "guest SO_BROADCAST");
+  int broadcast = 0;
+  native_length = sizeof(broadcast);
+  Check(getsockopt(receiver->native_handle(), SOL_SOCKET, SO_BROADCAST,
+                    &broadcast, &native_length) == 0 && broadcast == 1, "native SO_BROADCAST");
+  Check(NetDll_ioctlsocket_entry(1, receiver->handle(), 0x8004667E, raw(864)) == 0,
+        "guest FIONBIO");
+  Check(fcntl(receiver->native_handle(), F_GETFL) & O_NONBLOCK, "native nonblocking");
+  Check(NetDll_setsockopt_entry(1, receiver->handle(), 0xFFFF, 0xFFFF, raw(864), 4) == uint32_t(-1),
+        "unsupported option");
+  Check(XThread::GetLastError() == 10042, "guest WSAENOPROTOOPT");
+  Check(NetDll_setsockopt_entry(1, receiver->handle(), 0xFFFF, 0x0020, raw(864), 3) == uint32_t(-1),
+        "option size validation");
+  Check(XThread::GetLastError() == 10022, "guest WSAEINVAL");
+  timeout.as_array<int32_t>()[0] = 0;
+  timeout.as_array<int32_t>()[1] = 50000;
+  const std::array<uint8_t, 8> timeout_before = [] (mapped_void value) {
+    std::array<uint8_t, 8> copy{}; std::memcpy(copy.data(), value.host_address(), copy.size()); return copy;
+  }(timeout);
+  reads->fd_count = 1;
+  reads->fd_array[0] = receiver->handle();
+  const auto began = std::chrono::steady_clock::now();
+  Check(NetDll_select_entry(1, 0, reads, nullptr, nullptr, timeout) == 0, "guest select timeout");
+  Check(std::chrono::steady_clock::now() - began >= std::chrono::milliseconds(20), "BE timeout respected");
+  Check(reads->fd_count == 0 && std::memcmp(timeout_before.data(), timeout.host_address(), 8) == 0,
+        "select timeout outputs and untouched input");
+  std::array<uint8_t, 4> payload{1, 2, 3, 4};
+  Check(sender->SendTo(payload.data(), payload.size(), 0, &address, sizeof(address)) == 4, "ABI send");
+  reads->fd_count = 1; reads->fd_array[0] = receiver->handle();
+  writes->fd_count = 1; writes->fd_array[0] = sender->handle();
+  exceptions->fd_count = 1; exceptions->fd_array[0] = receiver->handle();
+  Check(NetDll_select_entry(1, 0, reads, writes, exceptions, timeout) == 2, "guest select read/write count");
+  Check(reads->fd_count == 1 && reads->fd_array[0] == receiver->handle() &&
+        writes->fd_count == 1 && writes->fd_array[0] == sender->handle() && exceptions->fd_count == 0,
+        "guest selected handle arrays");
+  *option = 99;
+  Check(NetDll_ioctlsocket_entry(1, receiver->handle(), 0x4004667F, raw(864)) == 0 && uint32_t(*option) == 4,
+        "guest FIONREAD BE output");
+  *source_length = 16;
+  Check(NetDll_recvfrom_entry(1, receiver->handle(), raw(1200), 64, 0, source, source_length) == 4,
+        "guest synchronous receive");
+  std::array<uint8_t, sizeof(XSOCKADDR_IN)> source_before{};
+  std::memcpy(source_before.data(), source.host_address(), source_before.size());
+  Check(NetDll_recvfrom_entry(1, receiver->handle(), raw(1200), 64, 0, source, source_length) == uint32_t(-1),
+        "empty nonblocking receive");
+  Check(XThread::GetLastError() == 10035, "guest WSAEWOULDBLOCK");
+  Check(uint32_t(*source_length) == 16 && std::memcmp(source_before.data(), source.host_address(), 16) == 0,
+        "receive error output unchanged");
+  reads->fd_count = 65;
+  Check(NetDll_select_entry(1, 0, reads, nullptr, nullptr, timeout) == -1 &&
+        XThread::GetLastError() == 10022 && reads->fd_count == 65, "oversized fd set rejected");
+  reads->fd_count = 1; reads->fd_array[0] = 0xFFFFFFFF;
+  Check(NetDll_select_entry(1, 0, reads, nullptr, nullptr, timeout) == -1 &&
+        XThread::GetLastError() == 10038, "invalid socket set rejected");
+  writes->fd_count = 64;
+  for (auto& handle : writes->fd_array) handle = sender->handle();
+  Check(NetDll_select_entry(1, 0, nullptr, writes, nullptr, timeout) == 1 && writes->fd_count == 1,
+        "full fd set and duplicate semantics");
+  receiver->Close(); receiver->ReleaseHandle();
+  sender->Close(); sender->ReleaseHandle();
+  mem->SystemHeapFree(guest);
+  std::cout << "Linux guest options/ioctl/error/select ABI checks passed\n";
+}
+#endif
+
 int main(int argc, char** argv) {
+#if REX_PLATFORM_WIN32
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa))
     return 4;
+#endif
   InitLogging();
   Runtime runtime("");
   RuntimeConfig config;
@@ -236,6 +408,12 @@ int main(int argc, char** argv) {
         Run(runtime.kernel_state(), false, true);
       if (!stale)
         Run(runtime.kernel_state(), false, false, true);
+#if REX_PLATFORM_GNU_LINUX
+      if (!stale) {
+        RunLinuxSocketAbi(runtime.kernel_state());
+        RunLinuxFatalReceive(runtime.kernel_state());
+      }
+#endif
     } catch (const std::exception& e) {
       std::cerr << e.what() << '\n';
       result = 1;

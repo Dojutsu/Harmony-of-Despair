@@ -2,6 +2,8 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <vector>
 #include <ranges>
 #include <span>
 
@@ -14,6 +16,9 @@
 #include <WinSock2.h>
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -115,6 +120,131 @@ Selector7IntroductionResult ModelSelector7Introduction(
 }
 
 }  // namespace
+
+#if REX_PLATFORM_GNU_LINUX
+TEST_CASE("XSocket close cannot close a reused Linux descriptor", "[network][socket][linux]") {
+  auto original = std::make_unique<XSocket>(nullptr);
+  REQUIRE(original->Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM,
+                               XSocket::X_IPPROTO_UDP) == X_STATUS_SUCCESS);
+  const int retired = static_cast<int>(original->native_handle());
+  REQUIRE(original->Close() == X_STATUS_SUCCESS);
+  CHECK(original->native_handle() == uint64_t(-1));
+  CHECK_FALSE(original->WaitReadable(0));
+  const int replacement = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  REQUIRE(replacement >= 0);
+  struct Cleanup { int fd; ~Cleanup() { ::close(fd); } } cleanup{replacement};
+  REQUIRE(replacement == retired);
+  REQUIRE(original->Close() == X_STATUS_SUCCESS);
+  original.reset();
+  CHECK(fcntl(replacement, F_GETFD) >= 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  REQUIRE(::bind(replacement, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0);
+}
+
+TEST_CASE("XSocket translates Xbox options and BE32 ioctl values on Linux",
+          "[network][socket][linux]") {
+  XSocket receiver(nullptr);
+  REQUIRE(receiver.Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM,
+                              XSocket::X_IPPROTO_UDP) == X_STATUS_SUCCESS);
+  const int handle = static_cast<int>(receiver.native_handle());
+  rex::be<uint32_t> value = 1;
+  REQUIRE(receiver.SetOption(0xFFFF, 0x0020, &value, sizeof(value)) == X_STATUS_SUCCESS);
+  int actual = 0;
+  socklen_t length = sizeof(actual);
+  REQUIRE(getsockopt(handle, SOL_SOCKET, SO_BROADCAST, &actual, &length) == 0);
+  CHECK(actual == 1);
+  value = 0;
+  REQUIRE(receiver.SetOption(0xFFFF, 0x0020, &value, sizeof(value)) == X_STATUS_SUCCESS);
+  REQUIRE(getsockopt(handle, SOL_SOCKET, SO_BROADCAST, &actual, &length) == 0);
+  CHECK(actual == 0);
+  value = 65536;
+  REQUIRE(receiver.SetOption(0xFFFF, 0x1002, &value, sizeof(value)) == X_STATUS_SUCCESS);
+  REQUIRE(getsockopt(handle, SOL_SOCKET, SO_RCVBUF, &actual, &length) == 0);
+  CHECK(actual >= 65536);
+  value = 1250;
+  REQUIRE(receiver.SetOption(0xFFFF, 0x1006, &value, sizeof(value)) == X_STATUS_SUCCESS);
+  timeval timeout{};
+  length = sizeof(timeout);
+  REQUIRE(getsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, &timeout, &length) == 0);
+  CHECK(timeout.tv_sec == 1);
+  CHECK(timeout.tv_usec == 250000);
+  std::array<rex::be<uint16_t>, 2> guest_linger{1, 3};
+  REQUIRE(receiver.SetOption(0xFFFF, 0x0080, guest_linger.data(), 4) == X_STATUS_SUCCESS);
+  linger native_linger{};
+  length = sizeof(native_linger);
+  REQUIRE(getsockopt(handle, SOL_SOCKET, SO_LINGER, &native_linger, &length) == 0);
+  CHECK(native_linger.l_onoff == 1);
+  CHECK(native_linger.l_linger == 3);
+  CHECK(receiver.SetOption(0xFFFF, 0x1002, &value, 3) == X_STATUS_UNSUCCESSFUL);
+  CHECK(receiver.SetOption(0xFFFF, 0xFFFF, &value, 4) == X_STATUS_UNSUCCESSFUL);
+  CHECK(receiver.SetOption(0xFFFF, 0x0020, nullptr, 4) == X_STATUS_UNSUCCESSFUL);
+
+  N_XSOCKADDR_IN address{};
+  address.sin_family = AF_INET;
+  address.sin_addr = INADDR_LOOPBACK;
+  REQUIRE(receiver.Bind(&address, sizeof(address)) == X_STATUS_SUCCESS);
+  value = 1;
+  REQUIRE(receiver.IOControl(0x8004667E, reinterpret_cast<uint8_t*>(&value)) == X_STATUS_SUCCESS);
+  CHECK((fcntl(handle, F_GETFL) & O_NONBLOCK) != 0);
+  value = 0;
+  REQUIRE(receiver.IOControl(0x8004667E, reinterpret_cast<uint8_t*>(&value)) == X_STATUS_SUCCESS);
+  CHECK((fcntl(handle, F_GETFL) & O_NONBLOCK) == 0);
+  sockaddr_in endpoint{};
+  length = sizeof(endpoint);
+  REQUIRE(getsockname(handle, reinterpret_cast<sockaddr*>(&endpoint), &length) == 0);
+  const std::array<uint8_t, 4> payload{'B', 'E', '3', '2'};
+  REQUIRE(sendto(handle, payload.data(), payload.size(), 0,
+                 reinterpret_cast<const sockaddr*>(&endpoint), sizeof(endpoint)) == 4);
+  REQUIRE(receiver.WaitReadable(500));
+  value = 0xFFFFFFFF;
+  REQUIRE(receiver.IOControl(0x4004667F, reinterpret_cast<uint8_t*>(&value)) == X_STATUS_SUCCESS);
+  CHECK(uint32_t(value) == 4);
+  CHECK(receiver.IOControl(0x4004667F, nullptr) == X_STATUS_UNSUCCESSFUL);
+  CHECK(receiver.IOControl(0x12345678, reinterpret_cast<uint8_t*>(&value)) == X_STATUS_UNSUCCESSFUL);
+}
+
+TEST_CASE("XSocket Linux readiness supports descriptors above FD_SETSIZE",
+          "[network][socket][linux]") {
+  rlimit limits{};
+  REQUIRE(getrlimit(RLIMIT_NOFILE, &limits) == 0);
+  if (limits.rlim_cur < FD_SETSIZE + 16)
+    SKIP("process descriptor limit does not permit a high descriptor regression");
+  struct DescriptorPool {
+    std::vector<int> handles;
+    ~DescriptorPool() { for (int handle : handles) ::close(handle); }
+  } pool;
+  for (;;) {
+    const int handle = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+    REQUIRE(handle >= 0);
+    pool.handles.push_back(handle);
+    if (handle >= FD_SETSIZE)
+      break;
+  }
+  XSocket receiver(nullptr);
+  REQUIRE(receiver.Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM,
+                              XSocket::X_IPPROTO_UDP) == X_STATUS_SUCCESS);
+  CHECK(receiver.native_handle() > FD_SETSIZE);
+  N_XSOCKADDR_IN address{};
+  address.sin_family = AF_INET;
+  address.sin_addr = INADDR_LOOPBACK;
+  REQUIRE(receiver.Bind(&address, sizeof(address)) == X_STATUS_SUCCESS);
+  CHECK_FALSE(receiver.WaitReadable(0));
+  sockaddr_in endpoint{};
+  socklen_t length = sizeof(endpoint);
+  const int handle = static_cast<int>(receiver.native_handle());
+  REQUIRE(getsockname(handle, reinterpret_cast<sockaddr*>(&endpoint), &length) == 0);
+  const std::array<uint8_t, 1> payload{0xA5};
+  REQUIRE(sendto(handle, payload.data(), payload.size(), 0,
+                 reinterpret_cast<const sockaddr*>(&endpoint), sizeof(endpoint)) == 1);
+  REQUIRE(receiver.WaitReadable(500));
+  std::array<uint8_t, 1> received{};
+  REQUIRE(receiver.RecvFrom(received.data(), received.size(), 0, nullptr, nullptr) == 1);
+  CHECK(received == payload);
+  CHECK_FALSE(receiver.WaitReadable(0));
+}
+#endif
 
 TEST_CASE("XNet address handles preserve distinct peer mappings and network byte order",
           "[network][xnet]") {

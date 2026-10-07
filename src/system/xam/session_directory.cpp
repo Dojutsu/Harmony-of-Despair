@@ -1494,8 +1494,8 @@ class SessionDirectoryClient::Impl {
           "candidates are required");
       return;
     }
-#if !REX_PLATFORM_WIN32
-    REXSYS_WARN("Session directory: hosting is currently Windows-only");
+#if !REX_PLATFORM_WIN32 && !REX_PLATFORM_GNU_LINUX
+    REXSYS_WARN("Session directory: hosting is unavailable on this platform");
     return;
 #endif
     hosted = std::move(value);
@@ -2158,10 +2158,16 @@ class SessionDirectoryClient::Impl {
         bool accepted = false;
         if (response && (response->status == 200 || response->status == 201)) {
           auto document = nlohmann::json::parse(response->body, nullptr, false);
-          if (document.is_object()) {
-            auto candidate_session_id = document.value("session_id", "");
-            auto candidate_token = document.value("registration_token", "");
-            auto candidate_invite_code = document.value("invite_code", "");
+          // JSON syntax validation alone is insufficient: value<string> throws
+          // on an attacker-controlled numeric/object field inside this worker.
+          // Reject those responses through the ordinary bounded retry path.
+          if (document.is_object() && document.contains("session_id") &&
+              document["session_id"].is_string() && document.contains("registration_token") &&
+              document["registration_token"].is_string() && document.contains("invite_code") &&
+              document["invite_code"].is_string()) {
+            auto candidate_session_id = document["session_id"].get<std::string>();
+            auto candidate_token = document["registration_token"].get<std::string>();
+            auto candidate_invite_code = document["invite_code"].get<std::string>();
             if (IsUrlToken(candidate_session_id, 64) && IsUrlToken(candidate_token, 128) &&
                 NormalizeInviteCode(candidate_invite_code)) {
               bool changed = !session_id.empty() && candidate_session_id != session_id;
@@ -2208,7 +2214,9 @@ class SessionDirectoryClient::Impl {
         bool valid_session_id = false;
         if (response && response->status == 200) {
           auto document = nlohmann::json::parse(response->body, nullptr, false);
-          valid_session_id = document.is_object() && document.value("session_id", "") == session_id;
+          valid_session_id = document.is_object() && document.contains("session_id") &&
+                             document["session_id"].is_string() &&
+                             document["session_id"].get_ref<const std::string&>() == session_id;
         }
         auto disposition = ClassifyDirectoryHeartbeatResponse(
             response ? std::optional<uint32_t>(response->status) : std::nullopt, valid_session_id);

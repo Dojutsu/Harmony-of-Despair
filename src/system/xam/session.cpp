@@ -339,6 +339,22 @@ void CloseSocket(SOCKET value) {
   close(value);
 #endif
 }
+int ReceiveDatagram(SOCKET socket, char* buffer, size_t size, int flags,
+                    sockaddr* source, socket_len_t* source_length) {
+#if REX_PLATFORM_GNU_LINUX
+  // Linux otherwise reports the copied prefix length for oversized UDP. That
+  // prefix can look exactly like a valid discovery packet. Preserve Winsock's
+  // rejection of an oversized datagram instead of parsing a truncated frame.
+  const auto received = recvfrom(socket, buffer, size, flags | MSG_TRUNC, source, source_length);
+  if (received > static_cast<decltype(received)>(size)) {
+    errno = EMSGSIZE;
+    return -1;
+  }
+  return static_cast<int>(received);
+#else
+  return recvfrom(socket, buffer, static_cast<int>(size), flags, source, source_length);
+#endif
+}
 bool SetNonBlocking(SOCKET value) {
 #if REX_PLATFORM_WIN32
   u_long enabled = 1;
@@ -486,7 +502,7 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
     sockaddr_in source{};
     socket_len_t length = sizeof(source);
     DiscoveryPacket response{};
-    int count = recvfrom(socket, reinterpret_cast<char*>(&response), sizeof(response), 0,
+    int count = ReceiveDatagram(socket, reinterpret_cast<char*>(&response), sizeof(response), 0,
                          reinterpret_cast<sockaddr*>(&source), &length);
     if (count > 0 && NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&response), count,
                                      source.sin_addr.s_addr, ntohs(source.sin_port))) {
@@ -893,7 +909,7 @@ class LanDiscoveryService::Impl {
         sockaddr_in source{};
         socket_len_t length = sizeof(source);
         std::array<uint8_t, sizeof(DiscoveryPacket)> packet{};
-        int count = recvfrom(client_socket, reinterpret_cast<char*>(packet.data()),
+        int count = ReceiveDatagram(client_socket, reinterpret_cast<char*>(packet.data()),
                              int(packet.size()), 0, reinterpret_cast<sockaddr*>(&source), &length);
         if (count > 0)
           NatProbeConsume(client_socket, packet.data(), count, source.sin_addr.s_addr,
@@ -908,7 +924,7 @@ class LanDiscoveryService::Impl {
       sockaddr_in source{};
       socket_len_t length = sizeof(source);
       DiscoveryPacket query{};
-      int count = recvfrom(socket, reinterpret_cast<char*>(&query), sizeof(query), 0,
+      int count = ReceiveDatagram(socket, reinterpret_cast<char*>(&query), sizeof(query), 0,
                            reinterpret_cast<sockaddr*>(&source), &length);
       if (count > 0)
         REXSYS_INFO("NAT_DIAG discovery listener datagram socket={} source={:08X}:{} bytes={}",
@@ -1342,7 +1358,7 @@ LanDiscoveryService::DiscoverConfiguredInvite(
     sockaddr_in source{};
     socket_len_t length = sizeof(source);
     DiscoveryPacket response{};
-    int count = recvfrom(socket, reinterpret_cast<char*>(&response),
+    int count = ReceiveDatagram(socket, reinterpret_cast<char*>(&response),
                          sizeof(response), 0,
                          reinterpret_cast<sockaddr*>(&source), &length);
     if (count > 0 && NatProbeConsume(
@@ -1570,7 +1586,7 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
       sockaddr_in source{};
       socket_len_t source_length = sizeof(source);
       std::array<uint8_t, sizeof(DiscoveryPacket)> packet{};
-      int count = recvfrom(socket, reinterpret_cast<char*>(packet.data()), int(packet.size()), 0,
+      int count = ReceiveDatagram(socket, reinterpret_cast<char*>(packet.data()), int(packet.size()), 0,
                            reinterpret_cast<sockaddr*>(&source), &source_length);
       if (count > 0)
         NatProbeConsume(socket, packet.data(), count, source.sin_addr.s_addr,
@@ -1687,7 +1703,7 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
     sockaddr_in source{};
     socket_len_t length = sizeof(source);
     DiscoveryPacket response{};
-    int count = recvfrom(socket, reinterpret_cast<char*>(&response), sizeof(response), 0,
+    int count = ReceiveDatagram(socket, reinterpret_cast<char*>(&response), sizeof(response), 0,
                          reinterpret_cast<sockaddr*>(&source), &length);
     bool consumed_probe =
         count > 0 && NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&response), count,

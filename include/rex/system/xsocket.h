@@ -10,6 +10,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <atomic>
 #include <cstring>
 #include <queue>
 
@@ -93,7 +94,7 @@ class XSocket : public XObject {
   XSocket(KernelState* kernel_state);
   ~XSocket();
 
-  uint64_t native_handle() const { return native_handle_; }
+  uint64_t native_handle() const { return native_handle_.load(std::memory_order_acquire); }
   uint16_t bound_port() const { return bound_port_; }
   void ConfigurePortTranslation(uint16_t guest_port, uint16_t native_port) {
     guest_port_ = guest_port;
@@ -136,7 +137,7 @@ class XSocket : public XObject {
 
  private:
   XSocket(KernelState* kernel_state, uint64_t native_handle);
-  uint64_t native_handle_ = -1;
+  std::atomic<uint64_t> native_handle_{uint64_t(-1)};
 
   AddressFamily af_;    // Address family
   Type type_;           // Type (DGRAM/Stream/etc)

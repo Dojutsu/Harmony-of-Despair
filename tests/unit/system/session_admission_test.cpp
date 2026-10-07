@@ -3,6 +3,7 @@
 #include <array>
 #include <barrier>
 #include <thread>
+#include <vector>
 
 namespace rex::system::xam {
 TEST_CASE("member reclassification cannot overfill a destination pool", "[session][admission]") {
@@ -306,7 +307,7 @@ TEST_CASE("advertisement decode rejects duplicate and impossible rosters",
   std::memcpy(valid.data()+20, session->info.key.data(), 16);
   Put(valid,36,1,8); Put(valid,48,3074,2); Put(valid,56,4); Put(valid,60,2); Put(valid,64,2);
   Put(valid,84,1,8); Put(valid,112,2,8);
-  for (int variant=0; variant<8; ++variant) {
+  for (int variant=0; variant<9; ++variant) {
     INFO("variant=" << variant);
     Packet response=valid;
     if(variant==1) Put(response,112,1,8); // Duplicate XUID.
@@ -328,9 +329,12 @@ TEST_CASE("advertisement decode rejects duplicate and impossible rosters",
     target.discovery_address={htonl(INADDR_LOOPBACK),ntohs(addr.sin_port)};
     std::jthread reply([&] {
       sockaddr_in source{};
-      if(Receive(server.fd,source,1000))
-        sendto(server.fd,reinterpret_cast<const char*>(response.data()),int(response.size()),0,
+      if(Receive(server.fd,source,1000)) {
+        std::vector<uint8_t> wire(response.begin(), response.end());
+        if (variant == 8) wire.push_back(0xA5); // Valid prefix, oversized frame.
+        sendto(server.fd,reinterpret_cast<const char*>(wire.data()),int(wire.size()),0,
                reinterpret_cast<sockaddr*>(&source),sizeof(source));
+      }
     });
     LanDiscoveryService client(title, 39058);
     auto result=client.Join(target,Member(2),100);

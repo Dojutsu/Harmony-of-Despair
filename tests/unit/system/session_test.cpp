@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <mutex>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -78,6 +80,137 @@ TEST_CASE("invite LAN proof binds attempt, domain, source and hosted tuple",
 }
 
 #if REX_PLATFORM_GNU_LINUX
+TEST_CASE("Linux directory hosting retries hostile registration and heartbeat responses",
+          "[session][directory][linux][security]") {
+  const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+  REQUIRE(listener >= 0);
+  struct ListenerCleanup { int fd; ~ListenerCleanup() { ::close(fd); } } cleanup{listener};
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  REQUIRE(::bind(listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0);
+  REQUIRE(::listen(listener, 4) == 0);
+  socklen_t address_size = sizeof(address);
+  REQUIRE(::getsockname(listener, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+  std::atomic<unsigned> registrations{0}, heartbeats{0}, polls{0}, deletions{0};
+  std::vector<std::string> registration_bodies;
+  std::mutex requests_mutex;
+  std::jthread server([&](std::stop_token stop) {
+    while (!stop.stop_requested()) {
+      pollfd pending{listener, POLLIN, 0};
+      if (::poll(&pending, 1, 25) <= 0) continue;
+      const int connection = ::accept(listener, nullptr, nullptr);
+      if (connection < 0) continue;
+      timeval bounded_wait{0, 500000};
+      ::setsockopt(connection, SOL_SOCKET, SO_RCVTIMEO, &bounded_wait, sizeof(bounded_wait));
+      std::string request;
+      std::array<char, 2048> buffer{};
+      size_t header_end = std::string::npos;
+      size_t content_length = 0;
+      while (request.size() < 8192 && (header_end == std::string::npos ||
+             request.size() < header_end + 4 + content_length)) {
+        const ssize_t count = ::recv(connection, buffer.data(), buffer.size(), 0);
+        if (count <= 0) break;
+        request.append(buffer.data(), static_cast<size_t>(count));
+        if (header_end == std::string::npos) {
+          header_end = request.find("\r\n\r\n");
+          if (header_end != std::string::npos) {
+            const auto length_header = request.find("Content-Length:");
+            if (length_header != std::string::npos && length_header < header_end) {
+              const auto value_start = request.find_first_not_of(' ', length_header + 15);
+              if (value_start != std::string::npos && value_start < header_end) {
+                try { content_length = std::stoul(request.substr(value_start)); }
+                catch (...) { break; }
+                if (content_length > 4096) break;
+              }
+            }
+          }
+        }
+      }
+      std::string status = "503 Service Unavailable";
+      std::string body = "{}";
+      if (request.starts_with("POST /sessions ")) {
+        const auto registration_number = ++registrations;
+        {
+          std::lock_guard lock(requests_mutex);
+          registration_bodies.push_back(header_end == std::string::npos ? "" :
+                                         request.substr(header_end + 4));
+        }
+        status = "201 Created";
+        body = registration_number == 1
+            ? R"({"session_id":42,"registration_token":{},"invite_code":[]})"
+            : R"({"session_id":"linux-host-session","registration_token":"host-test-token","invite_code":"ABC234"})";
+      } else if (request.starts_with("POST /sessions/linux-host-session/heartbeat ")) {
+        ++heartbeats;
+        status = "200 OK";
+        body = R"({"session_id":{"wrong":"type"}})";
+      } else if (request.starts_with("POST /sessions/linux-host-session/join-attempts/poll ")) {
+        ++polls;
+        status = "200 OK";
+        body = R"({"attempts":[]})";
+      } else if (request.starts_with("DELETE /sessions/linux-host-session ")) {
+        ++deletions;
+        status = "204 No Content";
+        body.clear();
+      }
+      const std::string response = "HTTP/1.1 " + status +
+          "\r\nContent-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) +
+          "\r\nConnection: close\r\n\r\n" + body;
+      size_t sent = 0;
+      while (sent < response.size()) {
+        const ssize_t count = ::send(connection, response.data() + sent, response.size() - sent,
+                                     MSG_NOSIGNAL);
+        if (count <= 0) break;
+        sent += static_cast<size_t>(count);
+      }
+      ::close(connection);
+    }
+  });
+  struct CvarRestore {
+    std::string url = REXCVAR_GET(session_directory_url);
+    std::string build = REXCVAR_GET(session_directory_build_id);
+    std::string candidate = REXCVAR_GET(session_directory_candidate_type);
+    std::string publish = REXCVAR_GET(session_directory_publish_address);
+    ~CvarRestore() {
+      REXCVAR_SET(session_directory_url, url);
+      REXCVAR_SET(session_directory_build_id, build);
+      REXCVAR_SET(session_directory_candidate_type, candidate);
+      REXCVAR_SET(session_directory_publish_address, publish);
+    }
+  } restore;
+  REXCVAR_SET(session_directory_url, "http://127.0.0.1:" + std::to_string(ntohs(address.sin_port)));
+  REXCVAR_SET(session_directory_build_id, "harmony-test");
+  REXCVAR_SET(session_directory_candidate_type, "public");
+  REXCVAR_SET(session_directory_publish_address, "");
+  SessionRegistry registry;
+  auto hosted = registry.Create(0x1001, "LinuxHost", {htonl(INADDR_LOOPBACK), 30742}, 1, 6, 0);
+  SessionDirectoryClient directory;
+  directory.StartHosting(hosted, 0x58410A7A, 30741);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  while (heartbeats.load() == 0 && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  // A wrong-type heartbeat must preserve the established lobby and retry it.
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  {
+    std::lock_guard lock(*hosted->mutex);
+    CHECK(hosted->status_invite_code == "ABC234");
+  }
+  directory.StopHosting();
+  server.request_stop();
+  server.join();
+  CHECK(registrations.load() == 2);
+  CHECK(heartbeats.load() >= 1);
+  CHECK(polls.load() >= 1);
+  CHECK(deletions.load() == 1);
+  REQUIRE(registration_bodies.size() == 2);
+  CHECK(registration_bodies[0] == registration_bodies[1]);
+  CHECK(registration_bodies[0].find("\"host_instance_token\":\"") != std::string::npos);
+  {
+    std::lock_guard lock(*hosted->mutex);
+    CHECK(hosted->status_invite_code.empty());
+  }
+}
+
 TEST_CASE("Linux session directory resolves and claims an invite over loopback HTTP",
           "[session][directory][linux]") {
   constexpr std::string_view session_json =

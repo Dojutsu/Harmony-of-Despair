@@ -50,6 +50,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#include <poll.h>
 #include <sys/socket.h>
 #endif
 
@@ -234,16 +235,68 @@ uint32_t LastSocketError() {
 #if REX_PLATFORM_WIN32
   return WSAGetLastError();
 #else
-  return errno;
+  // Preserve the guest Winsock ABI. Linux errno values are not WSA errors.
+  switch (errno) {
+    case 0: return 0;
+    case EINTR: return 10004;
+    case EACCES: return 10013;
+    case EFAULT: return 10014;
+    case EINVAL: return 10022;
+    case EMFILE: return 10024;
+    case EAGAIN: return 10035;
+#if EWOULDBLOCK != EAGAIN
+    case EWOULDBLOCK: return 10035;
 #endif
+    case EINPROGRESS: return 10036;
+    case EALREADY: return 10037;
+    case EBADF:
+    case ENOTSOCK: return 10038;
+    case EDESTADDRREQ: return 10039;
+    case EMSGSIZE: return 10040;
+    case EPROTOTYPE: return 10041;
+    case ENOPROTOOPT: return 10042;
+    case EPROTONOSUPPORT: return 10043;
+    case EOPNOTSUPP: return 10045;
+    case EAFNOSUPPORT: return 10047;
+    case EADDRINUSE: return 10048;
+    case EADDRNOTAVAIL: return 10049;
+    case ENETDOWN: return 10050;
+    case ENETUNREACH: return 10051;
+    case ENETRESET: return 10052;
+    case ECONNABORTED: return 10053;
+    case ECONNRESET: return 10054;
+    case ENOBUFS: return 10055;
+    case EISCONN: return 10056;
+    case ENOTCONN: return 10057;
+    case EPIPE: return 10058;
+    case ETIMEDOUT: return 10060;
+    case ECONNREFUSED: return 10061;
+    case EHOSTUNREACH: return 10065;
+    default: return 10022;
+  }
+#endif
+}
+
+void CompleteRecvFromError(PendingRecvFrom& pending, uint32_t error) {
+  pending.error = error;
+  pending.transferred = 0;
+  pending.completion_flags = 0;
+  auto* overlapped = REX_KERNEL_MEMORY()->TranslateVirtual<XWSAOVERLAPPED*>(pending.overlapped_ptr);
+  overlapped->internal = X_STATUS_UNSUCCESSFUL;
+  overlapped->internal_high = 0;
+  if (overlapped->event_handle) {
+    auto event = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(overlapped->event_handle);
+    if (event) event->Set(0, false);
+  }
+  pending.complete = true;
+  pending_recv_changed.notify_all();
 }
 
 bool TryCompleteRecvFrom(PendingRecvFrom& pending, bool wait) {
   constexpr uint32_t kWsaNotSocket = 0x2736;
   auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(pending.socket_handle);
   if (!socket) {
-    pending.error = kWsaNotSocket;
-    pending.complete = true;
+    CompleteRecvFromError(pending, kWsaNotSocket);
     return true;
   }
 
@@ -278,20 +331,14 @@ bool TryCompleteRecvFrom(PendingRecvFrom& pending, bool wait) {
                                 pending.from_ptr ? &native_from_length : nullptr);
   if (result < 0) {
     const uint32_t error = LastSocketError();
-#if REX_PLATFORM_WIN32
-    if (error == WSAEWOULDBLOCK)
+    if (error == 10035 || error == 10004)  // WSAEWOULDBLOCK / WSAEINTR
       return false;
-#else
-    if (error == EAGAIN || error == EWOULDBLOCK)
-      return false;
-#endif
     REXKRNL_ERROR(
         "NetDll_WSARecvFrom: native receive failed socket={:08X} native={} error={} "
         "flags={:#x} overlapped={:08X}",
         pending.socket_handle, socket->native_handle(), error, pending.flags,
         pending.overlapped_ptr);
-    pending.error = error;
-    pending.complete = true;
+    CompleteRecvFromError(pending, error);
     return true;
   }
 
@@ -555,11 +602,7 @@ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_
       REX_KERNEL_MEMORY()->TranslateVirtual(buffers_ptr[0].buf_ptr), buffers_ptr[0].len, flags,
       from_addr ? &native_from : nullptr, from_addr ? &native_from_length : nullptr);
   if (result < 0) {
-#if REX_PLATFORM_WIN32
-    XThread::SetLastError(WSAGetLastError());
-#else
-    XThread::SetLastError(errno);
-#endif
+    XThread::SetLastError(LastSocketError());
     return -1;
   }
   if (num_bytes_recv)
@@ -1137,12 +1180,7 @@ i32 NetDll_shutdown_entry(u32 caller, u32 socket_handle, i32 how) {
 
   auto ret = socket->Shutdown(how);
   if (ret == -1) {
-#if REX_PLATFORM_WIN32
-    uint32_t error_code = WSAGetLastError();
-    XThread::SetLastError(error_code);
-#else
-    XThread::SetLastError(0x0);
-#endif
+    XThread::SetLastError(LastSocketError());
   }
   return ret;
 }
@@ -1157,7 +1195,11 @@ u32 NetDll_setsockopt_entry(u32 caller, u32 socket_handle, u32 level, u32 optnam
   }
 
   X_STATUS status = socket->SetOption(level, optname, optval_ptr, optlen);
-  return XSUCCEEDED(status) ? 0 : -1;
+  if (XFAILED(status)) {
+    XThread::SetLastError(LastSocketError());
+    return -1;
+  }
+  return 0;
 }
 
 u32 NetDll_ioctlsocket_entry(u32 caller, u32 socket_handle, u32 cmd, mapped_void arg_ptr) {
@@ -1170,11 +1212,9 @@ u32 NetDll_ioctlsocket_entry(u32 caller, u32 socket_handle, u32 cmd, mapped_void
 
   X_STATUS status = socket->IOControl(cmd, arg_ptr);
   if (XFAILED(status)) {
-    XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
+    XThread::SetLastError(LastSocketError());
     return -1;
   }
-
-  // TODO
   return 0;
 }
 
@@ -1198,7 +1238,7 @@ u32 NetDll_bind_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> nam
   }
   X_STATUS status = socket->Bind(&native_name, namelen);
   if (XFAILED(status)) {
-    XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
+    XThread::SetLastError(LastSocketError());
     return -1;
   }
   uint16_t bound_port = ntohs(socket->bound_port());
@@ -1224,7 +1264,7 @@ u32 NetDll_connect_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR> nam
   N_XSOCKADDR native_name(name);
   X_STATUS status = socket->Connect(&native_name, namelen);
   if (XFAILED(status)) {
-    XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
+    XThread::SetLastError(LastSocketError());
     return -1;
   }
 
@@ -1241,7 +1281,7 @@ u32 NetDll_listen_entry(u32 caller, u32 socket_handle, i32 backlog) {
 
   X_STATUS status = socket->Listen(backlog);
   if (XFAILED(status)) {
-    XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
+    XThread::SetLastError(LastSocketError());
     return -1;
   }
 
@@ -1286,20 +1326,27 @@ struct host_set {
   uint32_t count;
   object_ref<XSocket> sockets[64];
 
-  void Load(const x_fd_set* guest_set) {
-    assert_true(guest_set->fd_count < 64);
-    this->count = guest_set->fd_count;
-    for (uint32_t i = 0; i < this->count; ++i) {
-      auto socket_handle = static_cast<X_HANDLE>(guest_set->fd_array[i]);
-      if (socket_handle == -1) {
-        this->count = i;
-        break;
-      }
-      // Convert from Xenia -> native
-      auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
-      assert_not_null(socket);
-      this->sockets[i] = socket;
+  bool Load(const x_fd_set* guest_set) {
+    const uint32_t supplied = guest_set->fd_count;
+    if (supplied > 64) {
+      XThread::SetLastError(10022);
+      return false;
     }
+    this->count = 0;
+    for (uint32_t i = 0; i < supplied; ++i) {
+      const auto socket_handle = static_cast<X_HANDLE>(guest_set->fd_array[i]);
+      auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
+      if (!socket || socket->native_handle() == uint64_t(-1)) {
+        XThread::SetLastError(10038);
+        return false;
+      }
+      bool duplicate = false;
+      for (uint32_t j = 0; j < this->count; ++j)
+        duplicate |= this->sockets[j]->handle() == socket_handle;
+      if (!duplicate)
+        this->sockets[this->count++] = socket;
+    }
+    return true;
   }
 
   void Store(x_fd_set* guest_set) {
@@ -1332,50 +1379,90 @@ struct host_set {
 i32 NetDll_select_entry(i32 caller, i32 nfds, ppc_ptr_t<x_fd_set> readfds,
                         ppc_ptr_t<x_fd_set> writefds, ppc_ptr_t<x_fd_set> exceptfds,
                         mapped_void timeout_ptr) {
-  host_set host_readfds = {};
-  fd_set native_readfds = {};
-  if (readfds) {
-    host_readfds.Load(readfds);
-    host_readfds.Store(&native_readfds);
+  host_set host_readfds = {}, host_writefds = {}, host_exceptfds = {};
+  if ((readfds && !host_readfds.Load(readfds)) ||
+      (writefds && !host_writefds.Load(writefds)) ||
+      (exceptfds && !host_exceptfds.Load(exceptfds)))
+    return -1;
+  if (!host_readfds.count && !host_writefds.count && !host_exceptfds.count) {
+    XThread::SetLastError(10022);
+    return -1;
   }
-  host_set host_writefds = {};
-  fd_set native_writefds = {};
-  if (writefds) {
-    host_writefds.Load(writefds);
-    host_writefds.Store(&native_writefds);
-  }
-  host_set host_exceptfds = {};
-  fd_set native_exceptfds = {};
-  if (exceptfds) {
-    host_exceptfds.Load(exceptfds);
-    host_exceptfds.Store(&native_exceptfds);
-  }
-  timeval* timeout_in = nullptr;
-  timeval timeout;
+  // Guest timeval fields are BE32 even where native long is 64 bits. Scale
+  // actual int32 locals; casting native timeval fields to int32* corrupts them.
+  int32_t seconds = 0, microseconds = 0;
   if (timeout_ptr) {
-    timeout = {static_cast<int32_t>(timeout_ptr.as_array<int32_t>()[0]),
-               static_cast<int32_t>(timeout_ptr.as_array<int32_t>()[1])};
-    chrono::Clock::ScaleGuestDurationTimeval(reinterpret_cast<int32_t*>(&timeout.tv_sec),
-                                             reinterpret_cast<int32_t*>(&timeout.tv_usec));
-    timeout_in = &timeout;
+    seconds = timeout_ptr.as_array<int32_t>()[0];
+    microseconds = timeout_ptr.as_array<int32_t>()[1];
+    if (seconds < 0 || microseconds < 0 || microseconds >= 1000000) {
+      XThread::SetLastError(10022);
+      return -1;
+    }
+    chrono::Clock::ScaleGuestDurationTimeval(&seconds, &microseconds);
   }
+#if REX_PLATFORM_GNU_LINUX
+  // poll preserves Winsock's ignored nfds argument and guest handle arrays,
+  // while avoiding Linux select's FD_SETSIZE stack-overflow limit.
+  std::vector<pollfd> descriptors;
+  auto append = [&](const host_set& set, short events) {
+    for (uint32_t i = 0; i < set.count; ++i) {
+      const int descriptor = static_cast<int>(set.sockets[i]->native_handle());
+      auto found = std::find_if(descriptors.begin(), descriptors.end(),
+                               [&](const auto& value) { return value.fd == descriptor; });
+      if (found == descriptors.end()) descriptors.push_back({descriptor, events, 0});
+      else found->events |= events;
+    }
+  };
+  append(host_readfds, POLLIN);
+  append(host_writefds, POLLOUT);
+  append(host_exceptfds, POLLPRI);
+  timespec timeout{seconds, static_cast<long>(microseconds) * 1000};
+  const int result = ppoll(descriptors.data(), descriptors.size(),
+                           timeout_ptr ? &timeout : nullptr, nullptr);
+  if (result < 0) {
+    XThread::SetLastError(LastSocketError());
+    return -1;
+  }
+  if (std::any_of(descriptors.begin(), descriptors.end(),
+                  [](const auto& value) { return value.revents & POLLNVAL; })) {
+    XThread::SetLastError(10038);
+    return -1;
+  }
+  auto update = [&](host_set& set, short ready) {
+    uint32_t new_count = 0;
+    for (uint32_t i = 0; i < set.count; ++i) {
+      const int descriptor = static_cast<int>(set.sockets[i]->native_handle());
+      const auto found = std::find_if(descriptors.begin(), descriptors.end(),
+                               [&](const auto& value) { return value.fd == descriptor; });
+      if (found != descriptors.end() && (found->revents & ready))
+        set.sockets[new_count++] = set.sockets[i];
+    }
+    set.count = new_count;
+  };
+  update(host_readfds, POLLIN | POLLHUP | POLLERR);
+  update(host_writefds, POLLOUT | POLLERR);
+  update(host_exceptfds, POLLPRI);
+  if (readfds) host_readfds.Store(readfds);
+  if (writefds) host_writefds.Store(writefds);
+  if (exceptfds) host_exceptfds.Store(exceptfds);
+  return host_readfds.count + host_writefds.count + host_exceptfds.count;
+#else
+  fd_set native_readfds{}, native_writefds{}, native_exceptfds{};
+  if (readfds) host_readfds.Store(&native_readfds);
+  if (writefds) host_writefds.Store(&native_writefds);
+  if (exceptfds) host_exceptfds.Store(&native_exceptfds);
+  timeval timeout{seconds, microseconds};
   int ret = select(nfds, readfds ? &native_readfds : nullptr, writefds ? &native_writefds : nullptr,
-                   exceptfds ? &native_exceptfds : nullptr, timeout_in);
-  if (readfds) {
-    host_readfds.UpdateFrom(&native_readfds);
-    host_readfds.Store(readfds);
+                   exceptfds ? &native_exceptfds : nullptr, timeout_ptr ? &timeout : nullptr);
+  if (ret < 0) {
+    XThread::SetLastError(LastSocketError());
+    return -1;
   }
-  if (writefds) {
-    host_writefds.UpdateFrom(&native_writefds);
-    host_writefds.Store(writefds);
-  }
-  if (exceptfds) {
-    host_exceptfds.UpdateFrom(&native_exceptfds);
-    host_exceptfds.Store(exceptfds);
-  }
-
-  // TODO(gibbed): modify ret to be what's actually copied to the guest fd_sets?
+  if (readfds) { host_readfds.UpdateFrom(&native_readfds); host_readfds.Store(readfds); }
+  if (writefds) { host_writefds.UpdateFrom(&native_writefds); host_writefds.Store(writefds); }
+  if (exceptfds) { host_exceptfds.UpdateFrom(&native_exceptfds); host_exceptfds.Store(exceptfds); }
   return ret;
+#endif
 }
 
 u32 NetDll_recv_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 buf_len, u32 flags) {
@@ -1386,7 +1473,9 @@ u32 NetDll_recv_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 bu
     return -1;
   }
 
-  return socket->Recv(buf_ptr, buf_len, flags);
+  const int result = socket->Recv(buf_ptr, buf_len, flags);
+  if (result < 0) XThread::SetLastError(LastSocketError());
+  return result;
 }
 
 u32 NetDll_recvfrom_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 buf_len,
@@ -1398,7 +1487,7 @@ u32 NetDll_recvfrom_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u3
     return -1;
   }
 
-  N_XSOCKADDR_IN native_from;
+  N_XSOCKADDR_IN native_from{};
   if (from_ptr) {
     native_from = *from_ptr;
   }
@@ -1406,24 +1495,19 @@ u32 NetDll_recvfrom_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u3
   int ret =
       socket->RecvFrom(buf_ptr, buf_len, flags, &native_from, fromlen_ptr ? &native_fromlen : 0);
 
-  if (from_ptr) {
+  if (ret >= 0 && from_ptr) {
     from_ptr->sin_family = native_from.sin_family;
     from_ptr->sin_port = native_from.sin_port;
     from_ptr->sin_addr = native_from.sin_addr;
     std::memset(from_ptr->x_sin_zero, 0, sizeof(from_ptr->x_sin_zero));
   }
-  if (fromlen_ptr) {
+  if (ret >= 0 && fromlen_ptr) {
     *fromlen_ptr = native_fromlen;
   }
 
   if (ret == -1) {
 // TODO: Better way of getting the error code
-#if REX_PLATFORM_WIN32
-    uint32_t error_code = WSAGetLastError();
-    XThread::SetLastError(error_code);
-#else
-    XThread::SetLastError(0x0);
-#endif
+    XThread::SetLastError(LastSocketError());
   }
 
   return ret;
@@ -1437,7 +1521,9 @@ u32 NetDll_send_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 bu
     return -1;
   }
 
-  return socket->Send(buf_ptr, buf_len, flags);
+  const int result = socket->Send(buf_ptr, buf_len, flags);
+  if (result < 0) XThread::SetLastError(LastSocketError());
+  return result;
 }
 
 u32 NetDll_sendto_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 buf_len, u32 flags,
@@ -1450,7 +1536,9 @@ u32 NetDll_sendto_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 
   }
 
   N_XSOCKADDR_IN native_to(to_ptr);
-  return socket->SendTo(buf_ptr, buf_len, flags, &native_to, to_len);
+  const int result = socket->SendTo(buf_ptr, buf_len, flags, &native_to, to_len);
+  if (result < 0) XThread::SetLastError(LastSocketError());
+  return result;
 }
 
 u32 NetDll___WSAFDIsSet_entry(u32 socket_handle, ppc_ptr_t<x_fd_set> fd_set) {
