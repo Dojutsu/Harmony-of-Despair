@@ -299,6 +299,11 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     add_executable(function_memory_consumer_test core/function_memory_consumer_test.cpp
         $<TARGET_OBJECTS:rexruntime>)
+    # The runtime finds curl in src/system; its imported target is scoped there.
+    # This direct object consumer needs the same dependency in this directory.
+    if(NOT TARGET CURL::libcurl)
+        find_package(CURL REQUIRED)
+    endif()
     get_target_property(_function_consumer_runtime_libraries rexruntime LINK_LIBRARIES)
     get_target_property(_function_consumer_runtime_includes rexruntime INCLUDE_DIRECTORIES)
     target_link_libraries(function_memory_consumer_test PRIVATE ${_function_consumer_runtime_libraries})
