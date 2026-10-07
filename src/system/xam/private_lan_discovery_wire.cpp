@@ -31,7 +31,7 @@ bool Shape(std::span<const uint8_t> body,uint64_t host,uint64_t client,uint32_t 
   const auto members=Number(body.subspan(64,4));if(members>8)return false;
   for(size_t i=0;i<8;++i)if(!Zero(body.subspan(84+i*44+42,2)))return false;
   if(request&&type==3) {if(!Nonzero(body.subspan(kClaim,16)))return false;}
-  else if(!Zero(body.subspan(kClaim,16)))return false;
+  else if(!(request&&type==4)&&!Zero(body.subspan(kClaim,16)))return false;
   const size_t length=size_t(Number(body.subspan(kLength,2)));
   if(length>kPrivateLanDiscoveryMaximumPayload||!Zero(body.subspan(kCiphertext+length)))return false;
   if(length) {

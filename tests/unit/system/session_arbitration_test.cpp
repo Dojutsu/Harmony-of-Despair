@@ -266,3 +266,17 @@ TEST_CASE("expiry receipt storage never evicts its bounded retired challenges", 
   CHECK(fixture.authority.CheckAdmission(original,{}).status==ArbitrationStatus::kRetiredAttempt);
   CHECK(fixture.authority.ExpiredJoinCredentialForVerification(fixture.identity,original)==Token(128));
 }
+
+TEST_CASE("Prepared encrypted arbitration replies fail without publishing registration", "[session][arbitration][security]") {
+  Fixture fixture;fixture.Admit();const auto before=fixture.authority.Snapshot();REQUIRE(before);
+  size_t calls=0;
+  CHECK_FALSE(fixture.authority.RegisterFromVerifiedEndpointIf(fixture.Request(),[&](const auto& snapshot){
+    ++calls;CHECK(snapshot.registrants.size()==1);CHECK(snapshot.revision>before->revision);return false;}));
+  CHECK(calls==1);CHECK(fixture.authority.Snapshot()->registrants.empty());CHECK(fixture.authority.Snapshot()->revision==before->revision);
+  CHECK_FALSE(fixture.authority.RegisterFromVerifiedEndpointIf(fixture.Request(),[](const auto&)->bool {throw std::bad_alloc{};}));
+  CHECK(fixture.authority.Snapshot()->registrants.empty());CHECK(fixture.authority.Snapshot()->revision==before->revision);
+  const auto committed=fixture.authority.RegisterFromVerifiedEndpointIf(fixture.Request(),[](const auto&){return true;});
+  REQUIRE(committed);CHECK(committed->registrants.size()==1);CHECK(fixture.authority.Snapshot()->revision==committed->revision);
+  auto wrong=fixture.Request();++wrong.endpoint.port;
+  CHECK_FALSE(fixture.authority.RegisterFromVerifiedEndpointIf(wrong,[&](const auto&){++calls;return true;}));CHECK(calls==1);
+}

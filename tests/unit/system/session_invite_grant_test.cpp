@@ -1,3 +1,4 @@
+#include "legacy_lan_diagnostics_scope.h"
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
@@ -722,6 +723,7 @@ TEST_CASE("public discovery cannot spend private capacity from a wire flag",
   SessionRegistry registry;
   auto session = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 3074}, 1, 1, 2);
   {
+    LegacyLanDiagnosticsScope legacy_lan_diagnostics_0;
     LanDiscoveryService host(title_id, port);
     REQUIRE(host.Advertise(session));
     SocketFixture peer;
@@ -751,6 +753,7 @@ TEST_CASE("authenticated grant drives the complete host admission path",
     auto session = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 3074}, 1, 1, 1);
     auto grants = std::make_shared<HostAdmissionGrantStore>();
     NatFixture nat;
+    LegacyLanDiagnosticsScope legacy_lan_diagnostics_1;
     LanDiscoveryService host(title_id, port, grants);
     REQUIRE(host.Advertise(session));
     nat.Add(kAttemptA);
@@ -773,6 +776,7 @@ TEST_CASE("authenticated grant drives the complete host admission path",
     session->members.push_back(Member(2, true));
     auto grants = std::make_shared<HostAdmissionGrantStore>();
     NatFixture nat;
+    LegacyLanDiagnosticsScope legacy_lan_diagnostics_2;
     LanDiscoveryService host(title_id, port, grants);
     REQUIRE(host.Advertise(session));
     nat.Add(kAttemptA);
@@ -793,6 +797,7 @@ TEST_CASE("authenticated grant drives the complete host admission path",
     auto session = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 3074}, 1, 1, 0);
     auto grants = std::make_shared<HostAdmissionGrantStore>();
     NatFixture nat;
+    LegacyLanDiagnosticsScope legacy_lan_diagnostics_3;
     LanDiscoveryService host(title_id, port, grants);
     REQUIRE(host.Advertise(session));
     nat.Add(kAttemptA);
@@ -816,6 +821,7 @@ TEST_CASE("authenticated grant drives the complete host admission path",
     auto session = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 3074}, 1, 1, 2);
     auto grants = std::make_shared<HostAdmissionGrantStore>();
     NatFixture nat;
+    LegacyLanDiagnosticsScope legacy_lan_diagnostics_4;
     LanDiscoveryService host(title_id, port, grants);
     REQUIRE(host.Advertise(session));
     nat.Add(kAttemptA);

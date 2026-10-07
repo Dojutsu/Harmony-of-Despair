@@ -1,4 +1,5 @@
 #include <rex/system/xam/session.h>
+#include <rex/system/xam/private_lan_discovery.h>
 #include <rex/system/xam/session_arbitration_crypto.h>
 
 #include <algorithm>
@@ -78,6 +79,13 @@ std::optional<LanAddress> LateTraversalQueryState::TakeAcknowledgedPeer(
   queried_peer_ = acknowledged_peer;
   return acknowledged_peer;
 }
+
+REXCVAR_DEFINE_STRING(private_lan_invitation_file,"","Network",
+    "Absolute private per-client LAN invitation file; secret bytes are never configuration values")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(private_lan_allow_legacy_diagnostics,false,"Network",
+    "Explicit diagnostic opt-in for unauthenticated legacy LAN control and raw LAN gameplay")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 REXCVAR_DEFINE_STRING(lan_bind_address, "", "Network",
                       "Physical IPv4 address used for LAN discovery and gameplay traffic")
@@ -170,6 +178,9 @@ bool ApplyMemberBatch(SessionRecord& session, std::span<const SessionMember> mem
     return reject("DELETED_EMPTY_OR_INVALID_ROSTER");
   if (source == MemberUpdateSource::kInviteGrant && members.size() != 1)
     return reject("INVALID_GRANT_BATCH");
+  if(session.private_lan_invitation&&source==MemberUpdateSource::kTitleAllocatedPool&&
+     std::any_of(members.begin(),members.end(),[&](const auto& incoming){return
+       std::none_of(session.members.begin(),session.members.end(),[&](const auto& current){return current.xuid==incoming.xuid;});}))return false;
   auto candidate = session.members;
   std::unordered_set<uint64_t> batch_ids;
   for (auto member : members) {
@@ -1037,6 +1048,10 @@ bool SessionRegistry::Leave(const std::array<uint8_t, 8>& id, uint64_t xuid) {
   if (!session)
     return false;
   std::lock_guard lock(*session->mutex);
+  if(session->private_lan_authority&&xuid!=session->host_xuid)return false;
+  if(session->private_lan_client&&session->private_lan_client->xuid()==xuid) {
+    session->private_lan_client.reset();session->private_lan_gameplay.reset();
+  }
   size_t before = session->members.size();
   std::erase_if(session->members, [&](const auto& m) { return m.xuid == xuid; });
   if (session->arbitration) session->arbitration->Remove(xuid);
@@ -1082,7 +1097,7 @@ std::shared_ptr<SessionRecord> SessionRegistry::UpsertDiscovered(SessionRecord r
   // Public discovery can create a fresh observation after a user leaves.
   // A joined/pending binding must instead publish through the exact retained
   // record commit, so late joined output can never create or revive a record.
-  if (record.arbitration_client) return nullptr;
+  if (record.arbitration_client || record.private_lan_client || record.private_lan_gameplay || record.private_lan_authority) return nullptr;
   auto session = std::make_shared<SessionRecord>(std::move(record));
   {
     std::lock_guard lock(mutex_);
@@ -1097,7 +1112,7 @@ std::shared_ptr<SessionRecord> SessionRegistry::UpsertDiscovered(SessionRecord r
       if (!existing->second->traversal_attempt_id.empty() &&
           session->traversal_attempt_id.empty())
         return existing->second;
-      if (existing->second->arbitration_client && !session->arbitration_client) {
+      if (existing->second->arbitration_client || existing->second->private_lan_client) {
         if (RecordIdentity(*existing->second) != RecordIdentity(*session)) return nullptr;
         return existing->second;
       }
@@ -1111,6 +1126,24 @@ std::shared_ptr<SessionRecord> SessionRegistry::UpsertDiscovered(SessionRecord r
 
 bool SessionRegistry::CommitJoinedRecord(const std::shared_ptr<SessionRecord>& expected,
     SessionRecord updated, const std::function<bool()>& object_current) {
+  if(updated.private_lan_invitation) {
+    if(!expected||!object_current||!updated.private_lan_client||!updated.private_lan_client->Confirmed()||!updated.private_lan_gameplay)return false;
+    auto global_lock=rex::thread::global_critical_region::AcquireDirect();std::lock_guard registry_lock(mutex_);
+    const auto found=sessions_.find(IdKey(expected->info.id));if(found==sessions_.end()||found->second!=expected)return false;
+    struct Commit {SessionRecord* expected;SessionRecord* updated;const std::function<bool()>* object_current;bool accounting;};
+    Commit commit{expected.get(),&updated,&object_current,ValidMemberAccounting(updated.members,updated.max_public_slots,updated.max_private_slots)};const auto authorization=updated.private_lan_gameplay;
+    const bool okay=CommitPrivateLanGameplayAuthorization(expected,*authorization,std::move(updated.members),[](void* context) noexcept {
+      auto& c=*static_cast<Commit*>(context);auto& e=*c.expected;auto& u=*c.updated;
+      e.info=u.info;e.discovery_address=u.discovery_address;e.host_name=std::move(u.host_name);e.flags=u.flags;
+      e.max_public_slots=u.max_public_slots;e.max_private_slots=u.max_private_slots;e.private_lan_invitation=std::move(u.private_lan_invitation);
+      e.private_lan_gameplay=std::move(u.private_lan_gameplay);e.arbitration_revision=0;return true;
+    },&commit,[](void* context) noexcept {try {
+      auto& c=*static_cast<Commit*>(context);return c.expected->state!=SessionState::kDeleted&&!c.expected->arbitration&&
+        RecordIdentity(*c.expected)==RecordIdentity(*c.updated)&&c.expected->private_lan_client==c.updated->private_lan_client&&
+        (*c.object_current)()&&c.accounting;
+      }catch(...){return false;}});
+    if(okay)expected->NotifyStatus();return okay;
+  }
   if (!expected || !object_current || !updated.arbitration_client || !updated.arbitration_client->confirmed) return false;
   auto global_lock = rex::thread::global_critical_region::AcquireDirect();
   std::lock_guard registry_lock(mutex_);
@@ -1187,9 +1220,16 @@ class LanDiscoveryService::Impl {
  public:
   Impl(uint32_t title_id, uint16_t port,
        std::shared_ptr<HostAdmissionGrantStore> admission_grants)
-      : title_id(title_id), port(port), admission_grants(std::move(admission_grants)) {}
+      : title_id(title_id), port(port), admission_grants(std::move(admission_grants)) {
+    private_configured=!REXCVAR_GET(private_lan_invitation_file).empty();
+    legacy_diagnostics=REXCVAR_GET(private_lan_allow_legacy_diagnostics);
+    if(private_configured){auto invitation=PrivateLanInvitation::Load(REXCVAR_GET(private_lan_invitation_file));
+      if(invitation)private_adapter=std::make_unique<PrivateLanDiscoveryAdapter>(title_id,port,machine_id,std::move(invitation));}
+  }
   ~Impl() { Stop(); }
   bool Start(std::shared_ptr<SessionRecord> value) {
+    if(private_configured)return private_adapter&&private_adapter->Start(value);
+    if(!legacy_diagnostics&&REXCVAR_GET(session_directory_url).empty())return false;
     Stop();
     if (!EnsureSocketRuntime())
       return false;
@@ -1240,6 +1280,7 @@ class LanDiscoveryService::Impl {
     return true;
   }
   void Stop() {
+    if(private_adapter)private_adapter->Stop();
     running = false;
     if (thread.joinable())
       thread.join();
@@ -1251,6 +1292,7 @@ class LanDiscoveryService::Impl {
     StopClient();
   }
   void StopClient() {
+    if(private_adapter)private_adapter->StopClient();
     client_running = false;
     if (client_thread.joinable())
       client_thread.join();
@@ -1608,6 +1650,8 @@ class LanDiscoveryService::Impl {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
   }
+  bool private_configured=false,legacy_diagnostics=false;
+  std::unique_ptr<PrivateLanDiscoveryAdapter> private_adapter;
   uint64_t machine_id = NewArbitrationMachineId().value_or(0);
   uint32_t title_id;
   uint16_t port;
@@ -1640,10 +1684,11 @@ LanDiscoveryService::LanDiscoveryService(
                  std::move(invite_join_attempt_transport),
                  std::move(join_attempt_completion_transport)) {}
 LanDiscoveryService::~LanDiscoveryService() = default;
-void LanDiscoveryService::SetArbitrationMachineId(uint64_t machine_id) { impl_->machine_id = machine_id; }
+void LanDiscoveryService::SetArbitrationMachineId(uint64_t machine_id) { impl_->machine_id = machine_id;if(impl_->private_adapter)impl_->private_adapter->SetMachine(machine_id); }
 void LanDiscoveryService::SetTitleId(uint32_t title_id) {
   directory_.SetClientAdmissionTitle(title_id);
   impl_->title_id = title_id;
+  if(impl_->private_adapter)impl_->private_adapter->SetTitle(title_id);
 }
 void LanDiscoveryService::SetLocalUserIdentity(uint32_t local_user_index,
                                                std::optional<uint64_t> xuid) {
@@ -1677,13 +1722,17 @@ void LanDiscoveryService::QueueGameplayAdmission(const std::shared_ptr<SessionRe
     const std::string& generation) {
   directory_.QueueGameplayAdmission(session, user_index, xuid, attempt, generation);
 }
+bool LanDiscoveryService::ActivatePrivateLanGameplay(const std::shared_ptr<SessionRecord>& session,uint64_t xuid) {
+  return impl_->private_configured&&impl_->private_adapter&&impl_->private_adapter->Activate(session,xuid);
+}
 void LanDiscoveryService::StopAllClientAdmissions() {
+  if(impl_->private_adapter)impl_->private_adapter->StopClient();
   directory_.StopAllClientAdmissions();
 }
 bool LanDiscoveryService::Advertise(const std::shared_ptr<SessionRecord>& session) {
   if (!impl_->Start(session))
     return false;
-  directory_.StartHosting(session, impl_->title_id, impl_->port, admission_grants_);
+  if(!impl_->private_configured)directory_.StartHosting(session, impl_->title_id, impl_->port, admission_grants_);
   return true;
 }
 void LanDiscoveryService::StopAdvertising() {
@@ -1691,7 +1740,7 @@ void LanDiscoveryService::StopAdvertising() {
   impl_->Stop();
 }
 bool LanDiscoveryService::IsAdvertising() const {
-  return impl_->running;
+  return impl_->private_configured?(impl_->private_adapter&&impl_->private_adapter->IsAdvertising()):bool(impl_->running);
 }
 std::optional<DirectoryInviteJoinAttempt>
 LanDiscoveryService::IssueConfiguredInviteAttempt(std::string_view code,
@@ -1985,6 +2034,8 @@ LanDiscoveryService::DiscoverConfiguredInvite(
 std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint32_t max_results,
                                                        uint32_t local_user_index) {
   (void)local_user_index;
+  if(impl_->private_configured)return impl_->private_adapter?impl_->private_adapter->Search(timeout_ms,max_results):std::vector<SessionRecord>{};
+  if(!impl_->legacy_diagnostics&&REXCVAR_GET(session_directory_url).empty())return {};
   static std::atomic<uint64_t> next_search_attempt{0};
   const uint64_t search_attempt = ++next_search_attempt;
   const auto search_started = std::chrono::steady_clock::now();
@@ -2356,6 +2407,8 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
 std::optional<SessionRecord> LanDiscoveryService::Join(const SessionRecord& session,
                                                        const SessionMember& member,
                                                        uint32_t timeout_ms) {
+  if(impl_->private_configured)return impl_->private_adapter?impl_->private_adapter->Join(session,member,timeout_ms):std::nullopt;
+  if(!impl_->legacy_diagnostics&&REXCVAR_GET(session_directory_url).empty())return std::nullopt;
   auto admission_lease = directory_.AcquireClientAdmissionSocket(member.user_index, session);
   if (!admission_lease && directory_.HasClientAdmission(member.user_index)) return std::nullopt;
   if (!admission_lease) impl_->client_exchange = true;
@@ -2424,6 +2477,8 @@ std::optional<SessionRecord> LanDiscoveryService::Join(const SessionRecord& sess
 }
 std::optional<ArbitrationSnapshot> LanDiscoveryService::RegisterArbitration(
     const std::shared_ptr<SessionRecord>& session, uint64_t local_xuid, uint64_t nonce) {
+  if(impl_->private_configured&&session&&session->host_xuid!=local_xuid)
+    return impl_->private_adapter?impl_->private_adapter->RegisterArbitration(session,local_xuid,nonce):std::nullopt;
   if (!session || !local_xuid || !nonce) return std::nullopt;
   std::shared_ptr<ArbitrationClientBinding> binding;
   DiscoveryPacket packet{};
@@ -2516,6 +2571,8 @@ std::optional<ArbitrationSnapshot> LanDiscoveryService::RegisterArbitration(
 
 std::optional<SessionRecord> LanDiscoveryService::Leave(const SessionRecord& session, uint64_t xuid,
                                                         uint32_t timeout_ms) {
+  if(impl_->private_configured)return impl_->private_adapter?impl_->private_adapter->Leave(session,xuid,timeout_ms):std::nullopt;
+  if(!impl_->legacy_diagnostics&&REXCVAR_GET(session_directory_url).empty())return std::nullopt;
   SessionMember member;
   member.xuid = xuid;
   impl_->client_exchange = true;
@@ -2582,6 +2639,8 @@ LanDiscoveryService::ReadyAcceptedSession(uint32_t local_user_index) {
   return directory_.ReadyClientAdmission(local_user_index);
 }
 uint32_t LanDiscoveryService::DetermineLanIpv4() {
+  if(!REXCVAR_GET(private_lan_invitation_file).empty()&&REXCVAR_GET(lan_bind_address).empty())return htonl(INADDR_LOOPBACK);
+
   const auto& configured = REXCVAR_GET(lan_bind_address);
   if (!configured.empty()) {
     in_addr address{};
@@ -3043,6 +3102,7 @@ SessionManager::GetAcceptedInviteRecord(uint32_t local_user_index,
 bool SessionManager::CompleteAcceptedInviteJoin(
     uint32_t local_user_index, uint64_t local_xuid,
     const std::shared_ptr<SessionRecord>& session) {
+  if(session&&session->private_lan_invitation)return discovery_.ActivatePrivateLanGameplay(session,local_xuid);
   std::lock_guard lock(configured_invite_mutex_);
   auto operation = configured_invite_operation_;
   size_t member_count = 0;

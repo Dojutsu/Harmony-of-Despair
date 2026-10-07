@@ -107,9 +107,11 @@ PrivateLanAuthority::~PrivateLanAuthority() {std::lock_guard lock(state_->mutex)
 struct PrivateLanAuthority::Admission::Draft {
   std::shared_ptr<State> owner;uint64_t base_revision=0;bool committed=false;
   std::map<uint64_t,Member> members;std::map<std::pair<uint64_t,uint64_t>,Pair> pairs;
+  std::set<std::pair<uint64_t,std::string>> retired;std::vector<uint64_t> removed;
 };
 PrivateLanAuthority::Admission::Admission(std::unique_ptr<Draft> draft):draft_(std::move(draft)){}
 PrivateLanAuthority::Admission::~Admission()=default;
+const std::vector<uint64_t>& PrivateLanAuthority::Admission::RemovedMembers() const noexcept {return draft_->removed;}
 bool PrivateLanAuthority::Admission::Commit() noexcept {
   return CommitIf([]() noexcept {return true;});
 }
@@ -119,7 +121,7 @@ bool PrivateLanAuthority::Admission::CommitIfRaw(bool (*publish)(void*) noexcept
     auto& owner=*draft_->owner;std::lock_guard lock(owner.mutex);
     if(!owner.active||!owner.invitation->Current()||owner.revision!=draft_->base_revision||owner.revision==UINT64_MAX)return false;
     if(!publish(context))return false;
-    owner.members.swap(draft_->members);owner.pairs.swap(draft_->pairs);++owner.revision;
+    owner.members.swap(draft_->members);owner.pairs.swap(draft_->pairs);owner.retired.swap(draft_->retired);++owner.revision;
     draft_->committed=true;return true;
   }catch(...){return false;}
 }
@@ -144,28 +146,42 @@ std::unique_ptr<PrivateLanAuthority> PrivateLanAuthority::Create(uint32_t title,
 }
 std::unique_ptr<PrivateLanAuthority::Admission> PrivateLanAuthority::Prepare(
     const PrivateLanJoinClaim& claim,std::span<const uint8_t> proof,Clock::time_point now) {
+  return PrepareImpl(claim,proof,now,false);
+}
+std::unique_ptr<PrivateLanAuthority::Admission> PrivateLanAuthority::PrepareDeparture(
+    const PrivateLanJoinClaim& claim,std::span<const uint8_t> proof,Clock::time_point now) {
+  return PrepareImpl(claim,proof,now,true);
+}
+std::unique_ptr<PrivateLanAuthority::Admission> PrivateLanAuthority::PrepareImpl(
+    const PrivateLanJoinClaim& claim,std::span<const uint8_t> proof,Clock::time_point now,bool departure) {
 #if REX_PLATFORM_GNU_LINUX
   if(!claim.xuid||claim.xuid==state_->identity.host_xuid||!claim.machine_id||!PrivateEndpoint(claim.endpoint)||
       !Nonzero(claim.challenge)||!Nonzero(std::span(claim.request_id).first(8))||
       !Get(claim.request_id.data()+8,8)||!Nonzero(claim.client_public_key))return {};
   try {
     auto transcript=PrivateLanJoinTranscript(state_->title,state_->identity,claim);
-    if(!state_->invitation->Verify(claim.xuid,"lan-private-join-claim-v1",transcript,proof))return {};
+    if(!state_->invitation->Verify(claim.xuid,departure?"lan-private-departure-claim-v1":"lan-private-join-claim-v1",transcript,proof))return {};
     auto draft=std::make_unique<Admission::Draft>();draft->owner=state_;
     {
       std::lock_guard lock(state_->mutex);
       if(!state_->active||state_->revision==UINT64_MAX)return {};
-      draft->base_revision=state_->revision;draft->members=state_->members;draft->pairs=state_->pairs;
+      draft->base_revision=state_->revision;draft->members=state_->members;draft->pairs=state_->pairs;draft->retired=state_->retired;
       if(auto old=draft->members.find(claim.xuid);old!=draft->members.end()) {
         auto& member=old->second;
         if(!SameAdmission(member,claim)||!std::equal(claim.request_id.begin(),claim.request_id.begin()+8,member.join.request_id.begin())||
             now-member.last_fresh_rpc>=std::chrono::seconds(60))return {};
         const auto previous=Get(member.join.request_id.data()+8,8),sequence=Get(claim.request_id.data()+8,8);
         if(sequence<previous)return {};
+        if(departure) {
+          if(sequence<=previous||draft->retired.size()>=256)return {};
+          draft->retired.emplace(claim.xuid,Hex(member.join.challenge));draft->members.erase(old);
+          std::erase_if(draft->pairs,[&](const auto& pair){return pair.first.first==claim.xuid||pair.first.second==claim.xuid;});
+          draft->removed.push_back(claim.xuid);return std::unique_ptr<Admission>(new Admission(std::move(draft)));
+        }
         if(sequence>previous) {member.join.request_id=claim.request_id;member.last_fresh_rpc=now;}
         return std::unique_ptr<Admission>(new Admission(std::move(draft)));
       }
-      if(state_->members.size()>=6||state_->retired.size()+state_->members.size()-1>=256||
+      if(departure||state_->members.size()>=6||state_->retired.size()+state_->members.size()-1>=256||
           state_->retired.contains({claim.xuid,Hex(claim.challenge)}))return {};
     }
     // Fresh provider work and all allocations precede publication. The exact
@@ -185,8 +201,22 @@ std::unique_ptr<PrivateLanAuthority::Admission> PrivateLanAuthority::Prepare(
     draft->members.emplace(claim.xuid,member);return std::unique_ptr<Admission>(new Admission(std::move(draft)));
   }catch(...){return {};}
 #else
-  (void)claim;(void)proof;(void)now;return {};
+  (void)claim;(void)proof;(void)now;(void)departure;return {};
 #endif
+}
+std::unique_ptr<PrivateLanAuthority::Admission> PrivateLanAuthority::PrepareExpiration(Clock::time_point now) {
+  try {
+    auto draft=std::make_unique<Admission::Draft>();draft->owner=state_;
+    std::lock_guard lock(state_->mutex);
+    if(!state_->active||state_->revision==UINT64_MAX)return {};
+    draft->base_revision=state_->revision;draft->members=state_->members;draft->pairs=state_->pairs;draft->retired=state_->retired;
+    for(const auto& [xuid,member]:draft->members)
+      if(xuid!=state_->identity.host_xuid&&now-member.last_fresh_rpc>=std::chrono::seconds(60))draft->removed.push_back(xuid);
+    for(auto xuid:draft->removed){draft->retired.emplace(xuid,Hex(draft->members.at(xuid).join.challenge));draft->members.erase(xuid);
+      std::erase_if(draft->pairs,[&](const auto& pair){return pair.first.first==xuid||pair.first.second==xuid;});}
+    if(draft->retired.size()>256)return {};
+    return std::unique_ptr<Admission>(new Admission(std::move(draft)));
+  }catch(...){return {};}
 }
 bool PrivateLanAuthority::Admit(const PrivateLanJoinClaim& claim,std::span<const uint8_t> proof,Clock::time_point now) {
   auto admission=Prepare(claim,proof,now);return admission&&admission->Commit();

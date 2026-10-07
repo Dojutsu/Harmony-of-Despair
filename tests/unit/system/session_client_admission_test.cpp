@@ -1,3 +1,4 @@
+#include "legacy_lan_diagnostics_scope.h"
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -615,6 +616,7 @@ TEST_CASE("configured invite LAN candidate works without public traversal ACK",
   auto advertised = CorrelatedSession(issued, {htonl(INADDR_LOOPBACK), peer_port});
   ConfiguredInviteNetworkFixture network(rendezvous_port, peer_port, advertised,
                                          true, false, true);
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_0;
   LanDiscoveryService discovery(kTitle, peer_port + 1);
   auto result = discovery.DiscoverConfiguredInvite(
       issued, 800, [] { return true; }, {},
@@ -649,6 +651,7 @@ TEST_CASE("configured invite LAN proof rejects altered host tuple",
     auto advertised = CorrelatedSession(issued, {htonl(INADDR_LOOPBACK), peer_port});
     ConfiguredInviteNetworkFixture network(rendezvous_port, peer_port, advertised,
                                            true, false, true, tamper_fields[i]);
+    LegacyLanDiagnosticsScope legacy_lan_diagnostics_1;
     LanDiscoveryService discovery(kTitle, uint16_t(39370 + i));
     auto result = discovery.DiscoverConfiguredInvite(
         issued, 250, [] { return true; }, {},
@@ -668,6 +671,7 @@ TEST_CASE("configured invite LAN ignores forged response before valid one",
   auto advertised = CorrelatedSession(issued, {htonl(INADDR_LOOPBACK), peer_port});
   ConfiguredInviteNetworkFixture network(rendezvous_port, peer_port, advertised,
                                          true, false, true, InviteLanTamper::kNone, true);
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_2;
   LanDiscoveryService discovery(kTitle, peer_port + 1);
   auto result = discovery.DiscoverConfiguredInvite(
       issued, 800, [] { return true; }, {},
@@ -689,6 +693,7 @@ TEST_CASE("host LAN listener answers only server-issued private invite attempts"
   constexpr uint16_t host_port = 39348;
   auto issued = ConfiguredAttempt(39349, host_port);
   auto advertised = CorrelatedSession(issued, {htonl(INADDR_LOOPBACK), host_port});
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_3;
   LanDiscoveryService host(kTitle, host_port);
   REQUIRE(host.Advertise(std::make_shared<SessionRecord>(advertised)));
 #if REX_PLATFORM_WIN32
@@ -1640,6 +1645,7 @@ TEST_CASE("production public Search leaves invite admission isolated",
   constexpr uint64_t socket = 53351;
   nat.Bind(socket, attempt, exact->discovery_address);
   std::vector<ClientAdmissionTransportRequest> requests;
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_4;
   LanDiscoveryService discovery(
       kTitle, discovery_port, {},
       [](uint32_t user) -> std::optional<uint64_t> {
@@ -1686,6 +1692,7 @@ TEST_CASE("production public Search leaves invite admission isolated",
   auto public_host = public_host_registry.Create(
       0xB13E000000000099ull, "PublicHost",
       {LanDiscoveryService::DetermineLanIpv4(), 30742}, 1, 4, 0);
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_5;
   LanDiscoveryService public_host_discovery(kTitle, discovery_port);
   REQUIRE(public_host_discovery.Advertise(public_host));
   const auto public_results = discovery.Search(500, 1, 0);

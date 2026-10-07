@@ -1,3 +1,4 @@
+#include "legacy_lan_diagnostics_scope.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <rex/platform.h>
@@ -279,6 +280,7 @@ TEST_CASE("production admission to independent gameplay sockets fixture", "[.gam
   SessionRegistry registry;
   // Match production: configured-invite code owns admission polling. After
   // readiness below, no caller polls again; gameplay must have its own lifetime.
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_0;
   LanDiscoveryService discovery(0x58410A7A,discovery_port,{},[local](uint32_t){return std::optional<uint64_t>(local);},{},false);
   discovery.SetTitleId(0x58410A7A);
   discovery.SetLocalUserIdentity(0,local);

@@ -1,3 +1,4 @@
+#include "legacy_lan_diagnostics_scope.h"
 #include <catch2/catch_test_macros.hpp>
 #include <rex/system/xam/session.h>
 #include <rex/system/xam/session_directory.h>
@@ -128,6 +129,7 @@ TEST_CASE("real LAN registration collects only peers that registered and revokes
   constexpr uint32_t title = 0x58410A7A;
   SessionRegistry host_registry, client_registry;
   const auto port = UnusedPort();
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_0;
   LanDiscoveryService host(title, port), client(title, port);
   host.SetArbitrationMachineId(host_registry.local_machine_id());
   client.SetArbitrationMachineId(client_registry.local_machine_id());
@@ -311,6 +313,7 @@ struct ExpiryTransportFixture {
   LocalConfig config;
   SessionRegistry host_registry, client_registry;
   uint16_t port = UnusedPort();
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_1;
   LanDiscoveryService host{0x58410A7A, port}, client{0x58410A7A, port};
   std::shared_ptr<SessionRecord> hosted, actual;
   ExpiredJoinRelay relay{port};

@@ -1,3 +1,4 @@
+#include "legacy_lan_diagnostics_scope.h"
 #include <catch2/catch_test_macros.hpp>
 #include <rex/system/xam/session.h>
 #include <rex/system/xam/session_arbitration_crypto.h>
@@ -253,6 +254,7 @@ TEST_CASE("discovery admission validates identity and ignores private wire claim
   constexpr uint16_t port = 39057;
   SessionRegistry registry;
   auto r = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 3074}, 1, 4, 2);
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_0;
   LanDiscoveryService host(title, port);
   REQUIRE(host.Advertise(r));
   Socket socket;
@@ -358,6 +360,7 @@ TEST_CASE("advertisement decode rejects duplicate and impossible rosters",
         responded=true;
       }
     });
+    LegacyLanDiagnosticsScope legacy_lan_diagnostics_1;
     LanDiscoveryService client(title, ntohs(addr.sin_port));
     // Discovery observations are display metadata; they cannot create a
     // private joined binding. Authenticated exact-session join/retry is

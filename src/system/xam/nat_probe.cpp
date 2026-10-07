@@ -632,9 +632,13 @@ bool NatProbeIsClient() {
 
 bool NatProbeIsGameplayPort(uint16_t port) {
   const uint32_t configured = REXCVAR_GET(lan_gameplay_port);
-  return port == (configured ? configured : 30742);
+  return configured?port==configured:(port==3074||port==30742);
 }
 
+bool NatProbeIsGameplaySocket(uint64_t socket) {
+  std::lock_guard lock(state_mutex);const auto found=states.find(socket);
+  return found!=states.end()&&found->second.role==NatProbeRole::kGameplay;
+}
 void NatProbeAttach(uint64_t socket, NatProbeRole role, LanAddress local,
                     XSocket* socket_object) {
   bool start_gameplay_pump = false;
@@ -653,9 +657,9 @@ void NatProbeAttach(uint64_t socket, NatProbeRole role, LanAddress local,
       attempt.attached_at = std::chrono::steady_clock::now();
       state.attempts.emplace(identity.key, std::move(attempt));
     };
-    if (auto manual = ManualIdentity()) add(*manual);
+    if(REXCVAR_GET(private_lan_invitation_file).empty()&&(role!=NatProbeRole::kGameplay||REXCVAR_GET(private_lan_allow_legacy_diagnostics)))if (auto manual = ManualIdentity()) add(*manual);
     for (const auto& [key, identity] : automatic_identities)
-      if (!(identity.invite_lan_eligible && role == NatProbeRole::kGameplay) &&
+      if (REXCVAR_GET(private_lan_invitation_file).empty()&&!(identity.invite_lan_eligible && role == NatProbeRole::kGameplay) &&
           (!identity.owner_socket || identity.owner_socket == socket) &&
           !ExpiredAttempts(role).contains(key))
         add(identity);
@@ -772,6 +776,8 @@ void NatProbeTick(uint64_t socket) {
 }
 
 void NatProbeTickAt(uint64_t socket, std::chrono::steady_clock::time_point now) {
+  if(!REXCVAR_GET(private_lan_invitation_file).empty())return;
+
   std::lock_guard lock(state_mutex);
   auto found = states.find(socket);
   if (found == states.end()) return;

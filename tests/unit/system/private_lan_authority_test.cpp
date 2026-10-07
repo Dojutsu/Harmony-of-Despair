@@ -182,6 +182,22 @@ void Run(){
   third.request_id[15]=2;prepared=renewal->Prepare(third,proof(*invitations.third,third),started+std::chrono::seconds(59));
   Check(bool(prepared),"fresh renewal can preflight without publication");prepared.reset();
   Check(renewal->Expire(started+std::chrono::seconds(60))==std::vector<uint64_t>{3},"discarded renewal cannot refresh host membership");
+  auto departing=PrivateLanAuthority::Create(title,identity,{htonl(INADDR_LOOPBACK),30001},invitations.host);
+  second.request_id[15]=1;Check(departing->Admit(second,proof(*invitations.second,second)),"staged departure fixture");
+  second.request_id[15]=2;auto departure_proof=invitations.second->Proof(2,"lan-private-departure-claim-v1",PrivateLanJoinTranscript(title,identity,second));
+  Check(bool(departure_proof),"fresh operation-bound departure proof");
+  Check(!departing->PrepareDeparture(second,proof(*invitations.second,second)),"join proof cannot authorize departure");
+  auto departure=departing->PrepareDeparture(second,*departure_proof);Check(bool(departure),"private departure staged before publication");
+  Check(departure->RemovedMembers()==std::vector<uint64_t>{2}&&!departure->Ticket(2)&&bool(departing->Ticket(2)),"draft removal does not affect live membership");
+  Check(!departure->CommitIf([]() noexcept {return false;})&&bool(departing->Ticket(2)),"failed roster-route departure publication preserves authority");
+  Check(departure->Commit()&&!departing->Ticket(2),"staged departure commits member keys and tombstone together");
+  Check(!departing->Admit(second,proof(*invitations.second,second)),"departed challenge stays retired");
+  auto expiring=PrivateLanAuthority::Create(title,identity,{htonl(INADDR_LOOPBACK),30001},invitations.host);
+  third.request_id[15]=1;Check(expiring->Admit(third,proof(*invitations.third,third),started),"staged expiry fixture");
+  auto expiration=expiring->PrepareExpiration(started+std::chrono::seconds(60));Check(bool(expiration),"all expired members stage atomically");
+  Check(expiration->RemovedMembers()==std::vector<uint64_t>{3}&&bool(expiring->Ticket(3)),"expiry draft preserves current roster before commit");
+  Check(!expiration->CommitIf([]() noexcept {return false;})&&bool(expiring->Ticket(3)),"failed expiry publication preserves authority and keys");
+  Check(expiration->Commit()&&!expiring->Ticket(3),"staged expiry retires exact membership after successful publication");
   std::cout<<checks<<" private LAN authority, three-pair datagram, replay/rejoin and ticket parser checks passed\n";
 }
 #endif

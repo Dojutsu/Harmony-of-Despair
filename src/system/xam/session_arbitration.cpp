@@ -172,6 +172,32 @@ ArbitrationStatus SessionArbitrationAuthority::RegisterFromVerifiedEndpoint(
     const ArbitrationRegistration& request) {
   std::lock_guard lock(mutex_); return RegisterRemoteLocked(request, true);
 }
+std::optional<ArbitrationSnapshot> SessionArbitrationAuthority::RegisterFromVerifiedEndpointIf(
+    const ArbitrationRegistration& request,
+    const std::function<bool(const ArbitrationSnapshot&)>& prepare_reply) {
+  if(!prepare_reply)return std::nullopt;
+  std::lock_guard lock(mutex_);
+  auto previous=members_;const auto revision=revision_;
+  struct Restore {
+    SessionArbitrationAuthority& owner;decltype(members_)& previous;uint64_t revision;bool committed=false;
+    ~Restore(){if(!committed){owner.members_=previous;owner.revision_=revision;}
+#if REX_PLATFORM_GNU_LINUX
+      OPENSSL_cleanse(previous.data(),sizeof(previous));
+#elif REX_PLATFORM_WIN32
+      SecureZeroMemory(previous.data(),sizeof(previous));
+#endif
+    }
+  } restore{*this,previous,revision};
+  try {
+    const auto status=RegisterRemoteLocked(request,true);
+    if(status!=ArbitrationStatus::kAccepted&&status!=ArbitrationStatus::kReplay)return std::nullopt;
+    ArbitrationSnapshot snapshot{identity_,revision_,{}};
+    for(const auto& member:members_)if(member.occupied&&member.registered)
+      snapshot.registrants.push_back({member.machine_id,0,{member.xuid}});
+    if(!prepare_reply(snapshot))return std::nullopt;
+    restore.committed=true;return snapshot;
+  }catch(...){return std::nullopt;}
+}
 std::optional<ArbitrationToken> SessionArbitrationAuthority::CredentialForVerification(
     const ArbitrationIdentity& identity, uint64_t xuid, uint64_t machine_id) const {
   std::lock_guard lock(mutex_);

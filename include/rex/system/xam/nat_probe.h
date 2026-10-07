@@ -90,6 +90,7 @@ void NatProbeRetireIdentity(std::string_view attempt_id);
 void NatProbeRetireParticipant(uint8_t participant);
 bool NatProbeIsClient();
 bool NatProbeIsGameplayPort(uint16_t port);
+bool NatProbeIsGameplaySocket(uint64_t socket);
 void NatProbeAttach(uint64_t socket, NatProbeRole role, LanAddress local,
                     XSocket* socket_object = nullptr);
 void NatProbeDetach(uint64_t socket);

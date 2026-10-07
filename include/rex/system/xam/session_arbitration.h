@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -91,6 +92,15 @@ class SessionArbitrationAuthority final {
   std::optional<ArbitrationToken> ExpiredJoinCredentialForVerification(
       const ArbitrationIdentity& identity, const ArbitrationJoinClaim& claim) const;
   ArbitrationStatus RegisterFromVerifiedEndpoint(const ArbitrationRegistration& request);
+  // Prepare a bounded encrypted reply before publishing registration. The
+  // callback may seal/copy local data only; it must not reenter arbitration,
+  // acquire record/gameplay/route locks, send network traffic or publish state.
+  // A provider/allocation/exception/rejected callback restores prior members
+  // and revision while the arbitration lock prevents intermediate observation.
+  std::optional<ArbitrationSnapshot> RegisterFromVerifiedEndpointIf(
+      const ArbitrationRegistration& request,
+      const std::function<bool(const ArbitrationSnapshot&)>& prepare_reply);
+
   ArbitrationStatus RegisterLocal(uint64_t xuid, uint64_t machine_id, uint64_t nonce,
                                   const ArbitrationToken& attempt);
   bool Remove(uint64_t xuid);

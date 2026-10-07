@@ -31,6 +31,7 @@ class PrivateLanAuthority final {
     // No network or record locks are held by a prepared admission. Commit
     // publishes atomically only if no intervening authority mutation occurred.
     bool Commit() noexcept;
+    const std::vector<uint64_t>& RemovedMembers() const noexcept;
     // Combine the final bounded, nonthrowing roster/arbitration commit with
     // authority publication. The callback runs after revision validation and
     // must not perform network operations or reenter this authority.
@@ -51,6 +52,9 @@ class PrivateLanAuthority final {
   };
   std::unique_ptr<Admission> Prepare(const PrivateLanJoinClaim& claim,
       std::span<const uint8_t> proof,Clock::time_point now=Clock::now());
+  std::unique_ptr<Admission> PrepareDeparture(const PrivateLanJoinClaim& claim,
+      std::span<const uint8_t> proof,Clock::time_point now=Clock::now());
+  std::unique_ptr<Admission> PrepareExpiration(Clock::time_point now=Clock::now());
   static std::unique_ptr<PrivateLanAuthority> Create(uint32_t title,
       ArbitrationIdentity identity, LanAddress host_endpoint,
       std::shared_ptr<const PrivateLanInvitation> invitation);
@@ -71,6 +75,8 @@ class PrivateLanAuthority final {
   // envelope. Callers must cleanse this temporary buffer after sealing.
   std::optional<std::vector<uint8_t>> Ticket(uint64_t member, uint32_t lease_ms = 30000) const;
  private:
+  std::unique_ptr<Admission> PrepareImpl(const PrivateLanJoinClaim&,
+      std::span<const uint8_t>,Clock::time_point,bool departure);
   struct State;
   explicit PrivateLanAuthority(std::shared_ptr<State> state);
   std::shared_ptr<State> state_;

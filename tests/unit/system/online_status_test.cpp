@@ -1,3 +1,4 @@
+#include "legacy_lan_diagnostics_scope.h"
 #include <catch2/catch_test_macros.hpp>
 #include <rex/system/xam/online_status.h>
 #include <rex/system/xam/session.h>
@@ -130,6 +131,7 @@ TEST_CASE("discovery join and leave notify the attached online projection", "[on
   status.Attach(&status, hosted);
   auto signal = hosted->status_signal.lock();
   REQUIRE(signal);
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_0;
   LanDiscoveryService host(0x58410A7A, 39049), client(0x58410A7A, 39049);
   REQUIRE(host.Advertise(hosted));
   auto results = client.Search(200, 4);

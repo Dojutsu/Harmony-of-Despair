@@ -1,4 +1,5 @@
 #include <rex/system/xam/gameplay_traversal.h>
+#include <rex/system/xam/private_lan_invitation.h>
 
 #include <algorithm>
 #include <mutex>
@@ -6,6 +7,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <rex/logging.h>
+#include <rex/cvar.h>
 #include <rex/platform.h>
 #if REX_PLATFORM_WIN32
 #include <winsock2.h>
@@ -77,7 +79,7 @@ bool MemberCurrent(const Scope& scope) {
   const auto session = scope.session.lock();
   if (!session || scope.closed) return false;
   std::lock_guard lock(*session->mutex);
-  if (session->state == SessionState::kDeleted) return false;
+  if (session->state == SessionState::kDeleted || (session->private_lan_invitation&&!session->private_lan_invitation->Current())) return false;
   const auto member = std::find_if(session->members.begin(), session->members.end(),
       [&](const auto& value) { return value.xuid == scope.xuid && value.local; });
   if (member == session->members.end()) return false;
@@ -511,8 +513,10 @@ bool GameplayAuthorizationCurrent(const std::shared_ptr<SessionRecord>& session,
 }
 
 bool IsAuthorizedGameplaySocket(uint64_t socket) {
+  if(!REXCVAR_GET(private_lan_invitation_file).empty())return true;
   std::lock_guard lock(gameplay_mutex);
   Reap();
+  if(!REXCVAR_GET(private_lan_allow_legacy_diagnostics)&&NatProbeIsGameplaySocket(socket))return true;
   // Keep failed/expired scopes fail-closed rather than falling back to raw UDP.
   return std::any_of(scopes.begin(), scopes.end(), [&](const auto& s) {
     if (s.socket != socket) return false;

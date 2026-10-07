@@ -1,13 +1,16 @@
-# Private LAN invitation capabilities
+# Protected direct LAN
 
-This candidate authenticates possession of a private invitation bound to an
-expected host XUID and one expected client XUID. It does not authenticate Xbox
-Live ownership. The host owns up to five distinct grants; each client receives
-only its own grant. Invited clients cannot use their grant to authenticate
-another client's bootstrap identity.
+The native Linux adapter authenticates possession of a private invitation for
+an expected host XUID and one expected client XUID. This grants access to that
+private group; it does not prove Xbox Live account ownership. Each client gets
+a distinct grant. Only that client's identity can use it. The host retains its
+own file containing up to five grants. No directory, DNS, broadcast secret,
+rendezvous, third-party relay, or public control service is needed.
 
-Generate fresh grants locally, using the XUIDs already configured by the local
-`user_xuid` profile setting:
+## Create and import a private group
+
+From the companion Harmony checkout, generate a fresh group using the local
+profile XUIDs (these arguments are hexadecimal):
 
 ```
 python3 -B tools/private_lan_invitation.py \
@@ -17,60 +20,106 @@ python3 -B tools/private_lan_invitation.py \
   --client-xuid 0009000000000003
 ```
 
-The directory must not exist. The generator creates it with mode 0700 and
-writes `host.hpli` and one `client-<xuid>.hpli` per client with mode 0600. It
-prints only file paths. Transfer each client's file through an existing trusted
-private channel; treat that file as the invitation capability. Keep the host
-file private. Files expire after one day by default; `--expires-in` accepts
-1–604800 seconds. Generate a fresh set for a new invitation group.
+The new leaf directory must not exist. It is created as same-owner 0700, with
+`host.hpli` and each `client-<xuid>.hpli` as 0600 single-link regular files.
+Transfer only the matching client's file through an existing trusted private
+channel. Keep the host file private. Invitations expire after one day by
+default; `--expires-in` accepts 1–604800 seconds. Generate a fresh group when a
+new trust grant is required. Revocation of one member removes its current
+session admission; possession of a still-valid invitation permits a fresh
+join. Replace the group invitation to revoke that continuing trust grant.
 
-The native loader requires an absolute path with no symlink or dot components,
-a same-owner 0700 parent, a same-owner regular single-link non-executable private
-file and exact bounded contents. It rejects expired/far-future invitations,
-duplicate XUIDs, duplicate selectors/secrets, zero identity/key values and
-trailing bytes. Key bytes have no public export API and are cleansed on object
-destruction. The file path is suitable for configuration; the secret bytes are
-never a cvar value, command-line argument, public discovery/session key or log
-message.
+The native loader requires absolute symlink-free paths, a same-owner 0700
+parent, a same-owner private non-executable single-link regular file, and exact
+bounded contents. It rejects expired/far-future invitations, duplicate XUIDs,
+selectors or secrets, zero values and trailing bytes. Keys are cleansed when
+native objects are destroyed. No key is a cvar, argument, discovery field or
+log message. Configure only the private file path.
 
-Each possession proof is HMAC-SHA-256 truncated to 128 bits. Its domain includes
-host and client XUIDs, invitation selector and expiry, explicit operation-domain
-and transcript lengths, and every transcript byte. Comparisons use the crypto
-provider's constant-time routine. Network callers must include exact session
-incarnation, request challenge, ordered ephemeral keys, endpoints and roles,
-and must validate fresh correlation before accepting a replayed proof.
+## Launch
 
-Private tickets use the existing X25519/AES-256-GCM exchange with a separate
-key-derivation domain and a 768-byte plaintext bound. The production wrapper
-authenticates ordered recipient/server public keys, IV, ciphertext length,
-ciphertext, tag and the complete caller-bound AAD with the matching private
-invitation grant before decrypting or publishing plaintext. Decrypted bytes
-have exclusive move ownership and are cleansed on destruction. The old
-16-byte continuity envelope retains its original domain and behavior.
+Use separate local profiles and distinct configured `user_xuid` values. The
+runtime uint64 cvar takes decimal values; the example hexadecimal XUIDs above
+are 2533274790395905, 2533274790395906 and 2533274790395907 in decimal. Preserve
+the normal legitimate game-data, renderer, controller and license arguments.
+Set the host's physical private IPv4 explicitly on both devices; no host DNS
+lookup or broadcast discovery is needed.
 
-This checkpoint provides the tested file loader, possession proofs, authenticated
-ticket-envelope component and local generator. The discovery/bootstrap and protected gameplay integration remain
-active work; possession-proof unit tests alone do not establish playable LAN
-multiplayer or authenticate an unauthenticated X25519 exchange.
+Host additions:
 
-## Private pair authority and direct routes
+```
+--user_xuid=2533274790395905 --lan_online=true
+--private_lan_invitation_file=/absolute/private/invitations/host.hpli
+--private_lan_allow_legacy_diagnostics=false
+--lan_bind_address=192.168.1.10 --lan_discovery_port=30741 --lan_gameplay_port=30742
+--session_directory_url=
+```
 
-`PrivateLanAuthority` verifies a distinct expected-client invitation proof over the full title/session identity, machine, fresh challenge and request, recipient key and private gameplay endpoint. It issues fresh member generations and independent per-pair traffic keys, link IDs and capabilities. Exact retries retain these keys; departures tombstone the old challenge, and a fresh authenticated rejoin rotates only affected links. Exact-size private tickets bind the complete session fingerprint and reject duplicate identities, aliases, links, physical routes and invalid fields.
+Client additions:
 
-A verified ticket supplies `authenticated_lan_endpoint` to the existing gameplay authorization. Direct routes reuse the existing protected socket scope and cipher lifetime, avoid rendezvous/DNS/punching, ignore HNAT controls, reject public routes and refuse endpoint mutation during a retained link. This is a trusted local API, never a network-facing membership grant. Production LAN discovery has not yet been connected to this authority.
+```
+--user_xuid=2533274790395906 --lan_online=true
+--private_lan_invitation_file=/absolute/private/invitations/client-0009000000000002.hpli
+--private_lan_allow_legacy_diagnostics=false
+--lan_bind_address=192.168.1.11 --direct_connect_address=192.168.1.10
+--lan_discovery_port=30741 --lan_gameplay_port=30742 --session_directory_url=
+```
 
-Validation at the foundation checkpoint: clean pinned Steam Runtime 4 SDK build and 477/477 CTests passed; standalone authority proof passed 434 checks in Clang release and GCC ASan/UBSan before the final direct-route integration. The independent three-process real XSocket fixture is being added separately; actual title gameplay has not run.
+Direct routes accept loopback/RFC1918 IPv4 and exact nonzero endpoints. Leave
+host firewall/router/service configuration unchanged. Offline local session
+creation needs no grant. Grant-free external gameplay UDP is closed by default.
+`private_lan_allow_legacy_diagnostics=true` explicitly selects the old raw LAN
+path for isolated diagnostics; it is not a protected multiplayer setting.
+A configured invalid or expired invitation always fails closed, even if legacy
+diagnostics are requested. Actual offline title semantics are still unverified;
+local session creation alone is not evidence that a stage can be played.
 
-The hidden `[.private-lan-integration]` fixture now runs three independent production XSocket processes using distinct client grants, correlated encrypted ticket envelopes and direct per-pair UDP encryption. All six directed flows passed for 32 seconds, including repeated tickets without replacing cipher state; all three processes exited zero. Control in this fixture uses private local files holding public claims and encrypted envelopes. It does not exercise production LAN discovery or actual title gameplay. Run `harmony/tools/private_lan_runtime_audit.py` inside the pinned runner.
+## Protocol and publication
 
-Private renewal IDs now use a stable random 64-bit prefix and a nonzero monotonic big-endian 64-bit sequence. The authority rejects earlier signed requests and nonce-prefix replacement. Exact retries preserve reply availability but cannot refresh host liveness. Sixty seconds without a fresh authenticated RPC retires member and affected pair keys atomically and tombstones its admission challenge; ticket issuance fails closed for a stale roster. Live plus retired non-host generations are bounded to 256 per authority lifetime.
+Private v3 UDP frames are exactly 1,440 bytes. Their fixed authenticated 40-byte
+header exposes protocol/version, direction, a random recipient selector,
+fresh 96-bit nonce and fixed length. The selector chooses one of at most five
+distinct grants; it contains no XUID or session identity and rotates with fresh
+invitations. Addresses, timing and the grant-lifetime selector remain visible.
+Names, title/session identity, participants, ephemeral keys, proofs, ticket
+keys and fixed checked padding are AES-256-GCM ciphertext. Configured private
+mode never invokes the legacy parser or accepts raw gameplay while admission
+is pending. Outer keys use RFC 5869 HKDF-SHA-256 extract/expand with distinct
+request/reply context. Inner possession-authenticated X25519/AES-GCM envelopes
+protect independent per-pair traffic keys. Possession proofs bind operation,
+full session/incarnation, member, role, endpoint, recipient key and exact RPC.
 
-Expanded validation: 454 Clang release and 454 GCC ASan/UBSan authority checks; full 477/477 SDK CTests; three independent actual XSocket processes reject a wrong invitation and another client's identity spoof, exchange all directed flows, close/revoke client 2, retire its replayed join, remove its peer routes, admit a fresh key/challenge/socket, and exchange all flows again. All processes passed for 35 seconds with recent traffic asserted after the original lease, exit zero. This still uses private file control in the fixture; production private discovery is the outstanding adapter.
+Fresh RPCs use a stable random 64-bit prefix and monotonic 64-bit sequence.
+Older signed renewals cannot extend host liveness. Exact retries preserve reply
+availability without renewing liveness. Sixty seconds of silence retires a
+member and its links; admission generations are bounded to 256. Retained links
+preserve traffic counters/replay state, keys, capabilities and physical routes.
+A fresh join after departure gets a fresh challenge, generation and affected
+pair keys. Tickets expire after 30 seconds; the worker renews once per second.
+All input is exact-size bounded and all trust effects follow authentication.
 
-Staged admission prepares complete immutable member/pair replacements and provisional tickets before any publication. `Admission::CommitIf` accepts only a bounded nonthrowing final commit callback, verifies the unchanged authority revision first, and atomically swaps the prepared state only if roster/arbitration publication succeeds. Failure, stale revision, intervening departure, destroyed authority and discarded renewal leave live membership/liveness unchanged; provisional tickets must never be sent or installed before commit. No record/network lock is retained by the prepared object. Validation: 476 release and 476 sanitized checks, full 478/478 CTests, and expanded three-process runtime proof passed again (35.008 seconds, all exits zero).
+Publication stages roster, authority, arbitration, socket cipher and direct
+routes, then commits only prepared moves/swaps in lock order gameplay → record
+→ route → private authority → arbitration. Provider/allocation/stale object/
+invalid route/callback failures preserve prior state. Private client control
+uses one owned socket across join, register, renew and leave, preserving exact
+native endpoint continuity. Shutdown joins bounded workers and revokes scopes.
 
-Private v3 discovery frames are exactly 1,440 bytes, below the IPv4 UDP MTU on a standard 1,500-byte link. A fixed 40-byte authenticated header exposes protocol/version, direction, a random 128-bit invitation selector, fresh 96-bit nonce and fixed length. The selector chooses one of at most five distinct recipient grants; it contains no XUID or session identity and changes when fresh invitations are generated. Addresses, packet timing and this grant-lifetime selector remain observable. All 640 bytes of legacy metadata, names, title/session identity, participant identities, ephemeral keys, proofs and private ticket envelope are AES-256-GCM ciphertext. Padding is fixed and checked after successful authentication. No legacy packet is accepted by this parser.
+## Validation and limits
 
-Outer keys use RFC 5869 HKDF-SHA-256 extract/expand over the recipient grant, with the random selector as salt and direction/host/client/expiry/selector as explicit context. Request and reply keys differ. The inner authenticated X25519 envelope still encrypts ticket keys. Every frame needs a fresh random GCM nonce; replies require the exact outstanding RPC, and the authority separately checks monotonic request freshness before membership effects. Validation includes independent HMAC-based HKDF comparison and the published RFC 5869 case 1 known answer. Production discovery wiring remains active work at this checkpoint.
+Pinned Steam Runtime 4 SDK: 483/483 CTests passed, including production two-peer
+search/join/register/renew/leave, exact retained-record handling and grant-free
+pending gameplay refusal. Three separate production LAN services plus actual
+XSocket processes passed all six synthetic encrypted directions for 36.068
+seconds, including wrong grant, authenticated wrong-client identity, opaque
+MITM, legacy/oversize downgrade, actual UDP departure, retired replay, fresh
+socket/key/challenge rejoin and renewal past the original lease. All exits zero.
+Run `harmony/tools/private_lan_discovery_audit.py` inside the pinned runner.
+The test proxy retains bounded opaque ciphertext in memory only. No fixture
+file carries session claims or traffic keys. Production privacy/authentication
+uses the real adapter, not a test API.
 
-Private gameplay publication now stages a complete roster, cipher state and direct-route map before the nonthrowing authority/arbitration callback. Lock order is gameplay, record, route, private authority, arbitration. A record-snapshot predicate runs before replacing the roster; provider errors, duplicate members, unavailable/wrong-role routes, rejected/stale callbacks and allocation failures retain prior membership, scope, routes and replay state. Direct-route replacement and scope/roster publication use only prepared moves/swaps after commit. Full pinned validation: 479/479 CTests passed in 41.38 seconds, including actual provider failure and renewal/removal rollback regressions.
+This does not execute Castlevania title code, menus, stages, saves, controllers
+or SteamOS hardware. Actual title offline and synchronized stage gameplay remain
+required before multiplayer or the project can be called playable. The adapter
+is Linux-native; other platforms currently fail closed for this private mode.

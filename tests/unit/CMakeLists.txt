@@ -26,6 +26,8 @@ add_executable(unit_tests
     system/private_lan_authority_test.cpp
     system/private_lan_runtime_test.cpp
     system/private_lan_wire_test.cpp
+    system/private_lan_discovery_test.cpp
+    system/private_lan_discovery_runtime_test.cpp
     system/session_test.cpp
     system/session_arbitration_test.cpp
     system/session_arbitration_crypto_test.cpp
