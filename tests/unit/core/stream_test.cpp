@@ -7,6 +7,8 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -288,58 +290,53 @@ TEST_CASE("BitStream Read crossing byte boundary", "[stream][bitstream]") {
 
 // =============================================================================
 // BitStream Write Tests
-// NOTE: BitStream::Write is marked "TODO: This is totally not tested!" in source.
-// It has a bug: doesn't byte-swap when storing, but Read expects big-endian.
-// These tests are skipped until Write is fixed.
 // =============================================================================
 
-TEST_CASE("BitStream Write byte-aligned", "[stream][bitstream][!mayfail]") {
-  SKIP("BitStream::Write is broken - doesn't byte-swap on store");
-
+TEST_CASE("BitStream Write byte-aligned", "[stream][bitstream]") {
   std::array<uint8_t, 16> buffer{};
   BitStream stream(buffer.data(), buffer.size() * 8);
 
-  stream.Write(0xAB, 8);
+  REQUIRE(stream.Write(0xAB, 8));
   CHECK(stream.offset_bits() == 8);
+  CHECK(buffer[0] == 0xAB);
 
   stream.SetOffset(0);
   CHECK(stream.Read(8) == 0xAB);
 }
 
-TEST_CASE("BitStream Write 16-bit value", "[stream][bitstream][!mayfail]") {
-  SKIP("BitStream::Write is broken - doesn't byte-swap on store");
-
+TEST_CASE("BitStream Write 16-bit value", "[stream][bitstream]") {
   std::array<uint8_t, 16> buffer{};
   BitStream stream(buffer.data(), buffer.size() * 8);
 
-  stream.Write(0x1234, 16);
+  REQUIRE(stream.Write(0x1234, 16));
+  CHECK(buffer[0] == 0x12);
+  CHECK(buffer[1] == 0x34);
 
   stream.SetOffset(0);
   CHECK(stream.Read(16) == 0x1234);
 }
 
-TEST_CASE("BitStream Write non-byte-aligned", "[stream][bitstream][!mayfail]") {
-  SKIP("BitStream::Write is broken - doesn't byte-swap on store");
-
+TEST_CASE("BitStream Write non-byte-aligned", "[stream][bitstream]") {
   std::array<uint8_t, 16> buffer{};
   BitStream stream(buffer.data(), buffer.size() * 8);
 
   // Write 4 bits, then 4 more
-  stream.Write(0xA, 4);  // 1010
-  stream.Write(0xB, 4);  // 1011
+  REQUIRE(stream.Write(0xA, 4));  // 1010
+  REQUIRE(stream.Write(0xB, 4));  // 1011
+  CHECK(buffer[0] == 0xAB);
 
   stream.SetOffset(0);
   CHECK(stream.Read(8) == 0xAB);
 }
 
-TEST_CASE("BitStream Write preserves surrounding bits", "[stream][bitstream][!mayfail]") {
-  SKIP("BitStream::Write is broken - doesn't byte-swap on store");
-
+TEST_CASE("BitStream Write preserves surrounding bits", "[stream][bitstream]") {
   std::array<uint8_t, 16> buffer = {0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
   BitStream stream(buffer.data(), buffer.size() * 8);
 
   stream.Advance(4);
-  stream.Write(0x0, 4);  // Clear middle 4 bits
+  REQUIRE(stream.Write(0x0, 4));  // Clear middle 4 bits
+  CHECK(buffer[0] == 0xF0);
+  CHECK(buffer[1] == 0xFF);
 
   stream.SetOffset(0);
   // First 4 bits should still be 1111, next 4 should be 0000
@@ -379,4 +376,84 @@ TEST_CASE("BitStream BitsRemaining decreases", "[stream][bitstream]") {
 
   stream.Read(32);
   CHECK(stream.BitsRemaining() == 16);
+}
+
+
+TEST_CASE("BitStream writes explicit endian bytes across unaligned fields",
+          "[stream][bitstream]") {
+  std::array<uint8_t, 5> buffer{0xF0, 0x00, 0x00, 0x00, 0x0F};
+  BitStream stream(buffer.data(), 36);
+  stream.SetOffset(4);
+  REQUIRE(stream.Write(0x12345678, 32));
+  CHECK(buffer == std::array<uint8_t, 5>{0xF1, 0x23, 0x45, 0x67, 0x8F});
+  CHECK(stream.offset_bits() == 36);
+  CHECK(stream.BitsRemaining() == 0);
+  stream.SetOffset(4);
+  CHECK(stream.Peek(32) == 0x12345678);
+  CHECK(stream.offset_bits() == 4);
+  CHECK(stream.Read(32) == 0x12345678);
+}
+
+TEST_CASE("BitStream exact-sized fields preserve every outside bit",
+          "[stream][bitstream]") {
+  constexpr std::array<uint64_t, 4> values{0, UINT64_MAX, 0x0123456789ABCDEF,
+                                           0xFEDCBA9876543210};
+  for (size_t offset = 0; offset < 8; ++offset) {
+    for (size_t width = 0; width <= 57; ++width) {
+      for (auto value : values) {
+        CAPTURE(offset, width, value);
+        const auto size_bits = offset + width;
+        std::vector<uint8_t> buffer((size_bits + 7) / 8, 0xA5);
+        auto expected = buffer;
+        // Independent bit-by-bit wire oracle checks order, high-value masking,
+        // surrounding-bit preservation and minimal allocation boundaries.
+        for (size_t bit = 0; bit < width; ++bit) {
+          const auto index = offset + bit;
+          const auto mask = uint8_t(0x80 >> (index & 7));
+          if ((value >> (width - bit - 1)) & 1)
+            expected[index / 8] |= mask;
+          else
+            expected[index / 8] &= uint8_t(~mask);
+        }
+        BitStream stream(buffer.data(), size_bits);
+        stream.SetOffset(offset);
+        REQUIRE(stream.Write(value, width));
+        CHECK(buffer == expected);
+        CHECK(stream.offset_bits() == size_bits);
+        CHECK(stream.BitsRemaining() == 0);
+        stream.SetOffset(offset);
+        const auto expected_value = value & ((uint64_t(1) << width) - 1);
+        CHECK(stream.Peek(width) == expected_value);
+        CHECK(stream.Read(width) == expected_value);
+        CHECK(stream.offset_bits() == size_bits);
+      }
+    }
+  }
+}
+
+TEST_CASE("BitStream invalid writes preserve buffer and offset",
+          "[stream][bitstream]") {
+  std::array<uint8_t, 3> buffer{0xA5, 0x5A, 0xC3};
+  const auto original = buffer;
+  BitStream stream(buffer.data(), 17);
+  stream.SetOffset(9);
+  for (auto width : {size_t(9), size_t(58), std::numeric_limits<size_t>::max()}) {
+    CHECK_FALSE(stream.Write(UINT64_MAX, width));
+    CHECK(stream.offset_bits() == 9);
+    CHECK(buffer == original);
+  }
+  stream.SetOffset(17);
+  CHECK_FALSE(stream.Write(1, 1));
+  CHECK(stream.offset_bits() == 17);
+  CHECK(buffer == original);
+  CHECK(stream.Write(UINT64_MAX, 0));
+  CHECK(stream.Peek(0) == 0);
+  CHECK(stream.Read(0) == 0);
+  CHECK(stream.offset_bits() == 17);
+  CHECK(buffer == original);
+  BitStream empty(nullptr, 0);
+  CHECK(empty.Write(UINT64_MAX, 0));
+  CHECK(empty.Peek(0) == 0);
+  CHECK(empty.Read(0) == 0);
+  CHECK_FALSE(empty.Write(1, 1));
 }

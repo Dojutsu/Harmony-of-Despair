@@ -14,7 +14,6 @@
 
 #include <rex/assert.h>
 #include <rex/stream.h>
-#include <rex/types.h>
 
 namespace rex::stream {
 
@@ -33,75 +32,58 @@ size_t BitStream::BitsRemaining() {
 }
 
 uint64_t BitStream::Peek(size_t num_bits) {
-  // FYI: The reason we can't copy more than 57 bits is:
-  // 57 = 7 * 8 + 1 - that can only span a maximum of 8 bytes.
-  // We can't read in 9 bytes (easily), so we limit it.
   assert_false(num_bits > 57);
-  assert_false(offset_bits_ + num_bits > size_bits_);
+  assert_false(num_bits > BitsRemaining());
+  if (num_bits > 57 || num_bits > BitsRemaining() || (!buffer_ && num_bits))
+    return 0;
 
-  size_t offset_bytes = offset_bits_ >> 3;
-  size_t rel_offset_bits = offset_bits_ - (offset_bytes << 3);
-
-  // offset -->
-  // ..[junk]..| target bits |....[junk].............
-  uint64_t bits = *(uint64_t*)(buffer_ + offset_bytes);
-
-  // We need the data in little endian.
-  // TODO: Have a flag specifying endianness of data?
-  bits = rex::byte_swap(bits);
-
-  // Shift right
-  // .....[junk]........| target bits |
-  bits >>= 64 - (rel_offset_bits + num_bits);
-
-  // AND with mask
-  // ...................| target bits |
-  bits &= (1ULL << num_bits) - 1;
-
+  // Read MSB-first bytes without requiring alignment or eight padding bytes
+  // after the requested field. A 0-bit read touches no memory and never shifts
+  // by the integer width.
+  uint64_t bits = 0;
+  size_t cursor = offset_bits_;
+  size_t remaining = num_bits;
+  while (remaining) {
+    const size_t bit_in_byte = cursor & 7;
+    const size_t count = std::min(remaining, 8 - bit_in_byte);
+    const size_t shift = 8 - bit_in_byte - count;
+    const uint32_t mask = (uint32_t(1) << count) - 1;
+    bits = (bits << count) | ((buffer_[cursor >> 3] >> shift) & mask);
+    cursor += count;
+    remaining -= count;
+  }
   return bits;
 }
 
 uint64_t BitStream::Read(size_t num_bits) {
   uint64_t val = Peek(num_bits);
-  Advance(num_bits);
-
+  // Preserve the offset when a release caller violates the asserted range.
+  if (num_bits <= 57 && num_bits <= BitsRemaining() && (buffer_ || !num_bits))
+    Advance(num_bits);
   return val;
 }
 
-// TODO: This is totally not tested!
 bool BitStream::Write(uint64_t val, size_t num_bits) {
-  assert_false(num_bits > 57);
-  assert_false(offset_bits_ + num_bits >= size_bits_);
-
-  size_t offset_bytes = offset_bits_ >> 3;
-  size_t rel_offset_bits = offset_bits_ - (offset_bytes << 3);
-
-  // Construct a mask
-  uint64_t mask = (1ULL << num_bits) - 1;
-  mask <<= 64 - (rel_offset_bits + num_bits);
-  mask = ~mask;
-
-  // Shift the value left into position.
-  val <<= 64 - (rel_offset_bits + num_bits);
-
-  // offset ----->
-  // ....[junk]...| target bits w/ junk |....[junk]......
-  uint64_t bits = *(uint64_t*)(buffer_ + offset_bytes);
-
-  // AND with mask
-  // ....[junk]...| target bits (0) |........[junk]......
-  bits &= mask;
-
-  // OR with val
-  // ....[junk]...| target bits (val) |......[junk]......
-  bits |= val;
-
-  // Store into the bitstream.
-  *(uint64_t*)(buffer_ + offset_bytes) = bits;
-
-  // Advance the bitstream forward.
-  Advance(num_bits);
-
+  // Validate before touching the buffer. Subtraction avoids offset+length
+  // overflow; writing the last bit and an empty write at EOF are both valid.
+  if (num_bits > 57 || num_bits > BitsRemaining() || (!buffer_ && num_bits))
+    return false;
+  size_t cursor = offset_bits_;
+  size_t remaining = num_bits;
+  while (remaining) {
+    const size_t bit_in_byte = cursor & 7;
+    const size_t count = std::min(remaining, 8 - bit_in_byte);
+    const size_t destination_shift = 8 - bit_in_byte - count;
+    const uint32_t low_mask = (uint32_t(1) << count) - 1;
+    const uint8_t mask = static_cast<uint8_t>(low_mask << destination_shift);
+    const auto field = static_cast<uint8_t>(((val >> (remaining - count)) & low_mask)
+                                           << destination_shift);
+    auto& byte = buffer_[cursor >> 3];
+    byte = static_cast<uint8_t>((byte & ~mask) | field);
+    cursor += count;
+    remaining -= count;
+  }
+  offset_bits_ = cursor;
   return true;
 }
 
