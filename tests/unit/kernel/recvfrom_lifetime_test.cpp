@@ -395,6 +395,224 @@ static void RunLinuxSocketAbi(KernelState* kernel) {
   mem->SystemHeapFree(guest);
   std::cout << "Linux guest options/ioctl/error/select ABI checks passed\n";
 }
+static void RunLinuxSendBounds(KernelState* kernel) {
+  pending_recv_pump_running = true;
+  auto* memory = kernel->memory();
+  const auto guest = memory->SystemHeapAlloc(128 * 1024);
+  Check(guest != 0, "send bound allocation");
+  auto ptr = [&]<typename T>(uint32_t offset) {
+    return ppc_ptr_t<T>(memory->TranslateVirtual<T*>(guest + offset), guest + offset);
+  };
+  auto bad = [&]<typename T>(uint32_t address) {
+    return ppc_ptr_t<T>(memory->TranslateVirtual<T*>(address), address);
+  };
+  auto raw = [&](uint32_t offset) {
+    return mapped_void(memory->TranslateVirtual(guest + offset), guest + offset);
+  };
+  auto descriptors = ptr.operator()<XWSABUF>(0);
+  auto bytes = ptr.operator()<be_u32>(1024);
+  auto overlapped = ptr.operator()<XWSAOVERLAPPED>(1056);
+  auto query = ptr.operator()<be_u32>(1088);
+  auto flags = ptr.operator()<be_u32>(1092);
+  auto destination = ptr.operator()<XSOCKADDR_IN>(1120);
+  auto sender = make_object<XSocket>(kernel), receiver = make_object<XSocket>(kernel);
+  Check(sender->Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM, XSocket::X_IPPROTO_UDP) ==
+            X_STATUS_SUCCESS &&
+        receiver->Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM, XSocket::X_IPPROTO_UDP) ==
+            X_STATUS_SUCCESS, "send bounds sockets");
+  N_XSOCKADDR_IN address{};
+  address.sin_family = AF_INET; address.sin_addr = INADDR_LOOPBACK;
+  Check(receiver->Bind(&address, sizeof(address)) == X_STATUS_SUCCESS, "send bounds bind");
+  sockaddr_in native{}; socklen_t native_size = sizeof(native);
+  Check(getsockname(receiver->native_handle(), reinterpret_cast<sockaddr*>(&native),
+                    &native_size) == 0, "send bounds getsockname");
+  address.sin_port = ntohs(native.sin_port);
+  destination->sin_family = address.sin_family;
+  destination->sin_addr = address.sin_addr;
+  destination->sin_port = address.sin_port;
+  auto event = make_object<XEvent>(kernel); event->Initialize(true, false);
+  const std::array<uint8_t, 7> payload{19, 31, 47, 59, 73, 89, 101};
+  std::memcpy(memory->TranslateVirtual(guest + 2048), payload.data(), payload.size());
+  descriptors[0].len = 3; descriptors[0].buf_ptr = guest + 2048;
+  descriptors[1].len = 4; descriptors[1].buf_ptr = guest + 2051;
+  auto reset_outputs = [&] {
+    *bytes = 0x51515151;
+    std::memset(overlapped.host_address(), 0xA7, sizeof(XWSAOVERLAPPED));
+    overlapped->event_handle = event->handle();
+    event->Reset();
+  };
+  auto send = [&](uint32_t count = 2, ppc_ptr_t<XSOCKADDR_IN> to = nullptr,
+                  uint32_t to_length = sizeof(XSOCKADDR_IN)) {
+    return NetDll_WSASendTo_entry(1, sender->handle(), descriptors, count, bytes, 0,
+                                   to ? to : destination, to_length, overlapped, nullptr);
+  };
+  auto receive = [&](const uint8_t* expected, uint32_t length) {
+    Check(receiver->WaitReadable(1000, false), "send bounds packet readiness");
+    std::vector<uint8_t> output(length + 1, 0xEE);
+    Check(receiver->RecvFrom(output.data(), output.size(), 0, nullptr, nullptr) == int(length),
+          "send bounds actual datagram length");
+    Check(!length || std::memcmp(output.data(), expected, length) == 0,
+          "send bounds actual datagram payload");
+    Check(output.back() == 0xEE, "send bounds exact payload extent");
+  };
+  auto unchanged = [&] {
+    Check(uint32_t(*bytes) == 0x51515151 &&
+          uint32_t(overlapped->internal) == 0xA7A7A7A7 &&
+          uint32_t(overlapped->internal_high) == 0xA7A7A7A7 &&
+          uint32_t(overlapped->offset.low) == 0xA7A7A7A7 &&
+          uint32_t(overlapped->offset.high) == 0xA7A7A7A7 &&
+          uint32_t(overlapped->event_handle) == event->handle(),
+          "failed send completion fields unchanged");
+    uint32_t type = 0, state = 0; event->Query(&type, &state);
+    Check(state == 0 && pending_recvs.empty(), "failed send event and pending state unchanged");
+    Check(!receiver->WaitReadable(0, false), "failed send emitted no packet");
+  };
+  auto failure = [&](uint32_t result, uint32_t error) {
+    Check(result == uint32_t(-1) && XThread::GetLastError() == error,
+          "send bounds expected API error");
+    unchanged();
+  };
+  reset_outputs();
+  Check(send() == 0 && uint32_t(*bytes) == payload.size(), "scatter send succeeds");
+  Check(uint32_t(overlapped->internal) == 0 &&
+        uint32_t(overlapped->internal_high) == payload.size() &&
+        uint32_t(overlapped->offset.low) == 0xA7A7A7A7,
+        "scatter send exact completion fields");
+  uint32_t type = 0, state = 0; event->Query(&type, &state);
+  Check(state == 1, "scatter send completion event");
+  *query = 99; *flags = 99;
+  Check(NetDll_WSAGetOverlappedResult_entry(1, sender->handle(), overlapped, query, 0, flags) == 1 &&
+        uint32_t(*query) == payload.size() && uint32_t(*flags) == 0 && pending_recvs.empty(),
+        "scatter send query preserves completion semantics");
+  receive(payload.data(), payload.size());
+  reset_outputs(); failure(send(0), 10022);
+  failure(send(65), 10022); failure(send(0xFFFFFFFF), 10022);
+  failure(NetDll_WSASendTo_entry(1, sender->handle(), bad.operator()<XWSABUF>(0xFFFFFFFC),
+                                  2, bytes, 0, destination, 16, overlapped, nullptr), 10014);
+  failure(NetDll_WSASendTo_entry(1, sender->handle(),
+                                  ppc_ptr_t<XWSABUF>(descriptors.host_address() + 1,
+                                                     descriptors.guest_address()),
+                                  2, bytes, 0, destination, 16, overlapped, nullptr), 10014);
+  descriptors[0].len = 0xFFFFFFFF; descriptors[1].len = 2;
+  failure(send(), 10040);  // Old uint32 aggregation wrapped this pair to one byte.
+  descriptors[0].len = 65508; descriptors[1].len = 0;
+  failure(send(), 10040);
+  descriptors[0].len = 8; descriptors[0].buf_ptr = 0xFFFFFFFC;
+  failure(send(), 10014);
+  descriptors[0].len = 3; descriptors[0].buf_ptr = guest + 2048;
+  descriptors[1].len = 4; descriptors[1].buf_ptr = 0xFFFFF000;
+  failure(send(), 10014);
+  descriptors[1].buf_ptr = guest + 2051;
+  failure(send(2, destination, 15), 10022); failure(send(2, destination, 17), 10022);
+  destination->sin_family = 23; failure(send(), 10047); destination->sin_family = AF_INET;
+  failure(send(2, bad.operator()<XSOCKADDR_IN>(0xFFFFFFFC)), 10014);
+  failure(NetDll_WSASendTo_entry(1, sender->handle(), descriptors, 2, bytes, 0,
+                                  nullptr, 16, overlapped, nullptr), 10022);
+  failure(NetDll_WSASendTo_entry(1, sender->handle(), descriptors, 2,
+                                  bad.operator()<be_u32>(0xFFFFFFFE), 0,
+                                  destination, 16, overlapped, nullptr), 10014);
+  failure(NetDll_WSASendTo_entry(1, sender->handle(), descriptors, 2, bytes, 0,
+                                  destination, 16, bad.operator()<XWSAOVERLAPPED>(0xFFFFFFFC),
+                                  nullptr), 10014);
+  // Read-only output and input page revocation must fail before socket effects.
+  const auto protected_page = memory->SystemHeapAlloc(4096);
+  Check(protected_page != 0, "send bounds protected allocation");
+  auto* heap = memory->LookupHeap(protected_page);
+  Check(heap->Protect(protected_page, 4096, memory::kMemoryProtectRead), "protect send output");
+  failure(NetDll_WSASendTo_entry(1, sender->handle(), descriptors, 2,
+                                  bad.operator()<be_u32>(protected_page), 0,
+                                  destination, 16, overlapped, nullptr), 10014);
+  Check(heap->Protect(protected_page, 4096, memory::kMemoryProtectNoAccess), "revoke send input");
+  descriptors[0].buf_ptr = protected_page; failure(send(), 10014);
+  Check(heap->Protect(protected_page, 4096,
+                       memory::kMemoryProtectRead | memory::kMemoryProtectWrite),
+        "restore send input");
+  memory->SystemHeapFree(protected_page);
+  descriptors[0].buf_ptr = guest + 2048;
+  // A native send failure must survive the required post-send receive pump:
+  // its nonblocking receive overwrites errno with EAGAIN. Keep the original
+  // WSAEDESTADDRREQ and leave both operations' completion outputs intact.
+  auto receive_buffer = ptr.operator()<XWSABUF>(1200);
+  auto receive_overlapped = ptr.operator()<XWSAOVERLAPPED>(1232);
+  auto receive_bytes = ptr.operator()<be_u32>(1264);
+  auto receive_flags = ptr.operator()<be_u32>(1268);
+  receive_buffer->len = 16; receive_buffer->buf_ptr = guest + 3000;
+  std::memset(receive_overlapped.host_address(), 0, sizeof(XWSAOVERLAPPED));
+  *receive_bytes = 99; *receive_flags = 0;
+  Check(NetDll_WSARecvFrom_entry(1, receiver->handle(), receive_buffer, 1,
+                                  receive_bytes, receive_flags, nullptr, nullptr,
+                                  receive_overlapped, nullptr) == uint32_t(-1) &&
+        XThread::GetLastError() == 997 && pending_recvs.size() == 1,
+        "send failure fixture pending receive");
+  Check(NetDll_WSASendTo_entry(1, sender->handle(), descriptors, 2, bytes, 0,
+                                nullptr, 0, overlapped, nullptr) == uint32_t(-1) &&
+        XThread::GetLastError() == 10039,
+        "native send error preserved across pending receive pump");
+  event->Query(&type, &state);
+  Check(uint32_t(*bytes) == 0x51515151 &&
+        uint32_t(overlapped->internal) == 0xA7A7A7A7 &&
+        uint32_t(overlapped->internal_high) == 0xA7A7A7A7 && state == 0 &&
+        uint32_t(receive_overlapped->internal) == X_STATUS_PENDING &&
+        uint32_t(*receive_bytes) == 0 && pending_recvs.size() == 1 &&
+        !receiver->WaitReadable(0, false), "native send failure completion state unchanged");
+  Check(sender->SendTo(const_cast<uint8_t*>(payload.data()), payload.size(), 0,
+                        &address, sizeof(address)) == 7 && receiver->WaitReadable(1000, false),
+        "complete failure fixture outstanding receive");
+  PumpPendingRecvFrom();
+  Check(NetDll_WSAGetOverlappedResult_entry(1, receiver->handle(), receive_overlapped,
+                                            query, 0, flags) == 1 &&
+        uint32_t(*query) == 7 && pending_recvs.empty(),
+        "failure fixture pending receive remains usable");
+  unchanged();
+  // Direct sendto enters the same validated staging path.
+  failure(NetDll_sendto_entry(1, sender->handle(),
+                               mapped_void(memory->TranslateVirtual(0xFFFFFFFC), 0xFFFFFFFC),
+                               8, 0, destination, 16), 10014);
+  failure(NetDll_sendto_entry(1, sender->handle(), raw(2048), 65508, 0, destination, 16), 10040);
+  failure(NetDll_sendto_entry(1, sender->handle(), raw(2048), 7, 0, nullptr, 16), 10022);
+  failure(NetDll_sendto_entry(1, sender->handle(), raw(2048), 7, 0, destination, 15), 10022);
+  Check(NetDll_sendto_entry(1, sender->handle(), raw(2048), 7, 0, destination, 16) == 7,
+        "direct staged sendto succeeds");
+  receive(payload.data(), payload.size()); unchanged();
+  Check(NetDll_connect_entry(1, sender->handle(),
+                              ppc_ptr_t<XSOCKADDR>(reinterpret_cast<XSOCKADDR*>(destination.host_address()),
+                                                  destination.guest_address()), 16) == 0,
+        "guest connected UDP");
+  Check(NetDll_WSASendTo_entry(1, sender->handle(), descriptors, 2, bytes, 0,
+                                nullptr, 0, nullptr, nullptr) == 0 && uint32_t(*bytes) == 7,
+        "connected scatter send with null destination");
+  receive(payload.data(), payload.size());
+  Check(NetDll_sendto_entry(1, sender->handle(), raw(2048), 7, 0, nullptr, 0) == 7,
+        "connected direct sendto with null destination");
+  receive(payload.data(), payload.size());
+  reset_outputs();
+  failure(NetDll_send_entry(1, sender->handle(),
+                             mapped_void(memory->TranslateVirtual(0xFFFFFFFC), 0xFFFFFFFC),
+                             8, 0), 10014);
+  failure(NetDll_send_entry(1, sender->handle(), raw(2048), 65508, 0), 10040);
+  Check(NetDll_send_entry(1, sender->handle(), raw(2048), 7, 0) == 7,
+        "connected checked send succeeds");
+  receive(payload.data(), payload.size()); unchanged();
+  descriptors[0].len = 0; descriptors[0].buf_ptr = 0xFFFFFFFF;
+  descriptors[1].len = 0; descriptors[1].buf_ptr = 0;
+  Check(NetDll_WSASendTo_entry(1, sender->handle(), descriptors, 2, bytes, 0,
+                                nullptr, 0, nullptr, nullptr) == 0 && uint32_t(*bytes) == 0,
+        "zero-length scatter datagram ignores unused pointers");
+  receive(nullptr, 0);
+  auto* maximum_payload = memory->TranslateVirtual(guest + 4096);
+  for (uint32_t i = 0; i < 65507; ++i) maximum_payload[i] = uint8_t(i * 73 + 11);
+  descriptors[0].len = 65507; descriptors[0].buf_ptr = guest + 4096;
+  Check(NetDll_WSASendTo_entry(1, sender->handle(), descriptors, 1, bytes, 0,
+                                nullptr, 0, nullptr, nullptr) == 0 && uint32_t(*bytes) == 65507,
+        "maximum ordinary UDP datagram");
+  receive(maximum_payload, 65507);
+  sender->Close(); receiver->Close(); event->ReleaseHandle();
+  sender->ReleaseHandle(); receiver->ReleaseHandle(); memory->SystemHeapFree(guest);
+  pending_recv_pump_running = false;
+  std::cout << "Linux real guest send descriptor, overflow, affine range, destination, output, "
+               "event, scatter, null-connected and maximum UDP checks passed\n";
+}
+
 static void RunLinuxSelectGuestIdentity(KernelState* kernel) {
   auto first = make_object<XSocket>(kernel), second = make_object<XSocket>(kernel);
   Check(first->Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM, XSocket::X_IPPROTO_UDP) ==
@@ -503,6 +721,7 @@ int main(int argc, char** argv) {
 #if REX_PLATFORM_GNU_LINUX
       if (!stale) {
         RunLinuxSocketAbi(runtime.kernel_state());
+        RunLinuxSendBounds(runtime.kernel_state());
         RunLinuxFatalReceive(runtime.kernel_state());
         RunLinuxSelectGuestIdentity(runtime.kernel_state());
         RunLinuxSelectRetirement(runtime.kernel_state());

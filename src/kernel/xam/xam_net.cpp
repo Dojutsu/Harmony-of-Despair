@@ -13,11 +13,13 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
+#include <new>
 #include <thread>
 #include <unordered_map>
 
@@ -54,6 +56,10 @@
 #include <netinet/ip.h>
 #include <poll.h>
 #include <sys/socket.h>
+#if REX_PLATFORM_GNU_LINUX
+#include <sys/uio.h>
+#include <unistd.h>
+#endif
 #endif
 
 namespace rex {
@@ -671,65 +677,223 @@ u32 NetDll_WSAGetOverlappedResult_entry(u32 caller, u32 socket_handle,
   return 1;
 }
 
+namespace {
+constexpr uint32_t kMaximumSendBuffers = 64;
+constexpr uint32_t kMaximumStreamSendBytes = 16 * 1024 * 1024;
+constexpr uint32_t kMaximumUdpSendBytes = 65507;
+constexpr uint32_t kWsaFault = 10014;
+constexpr uint32_t kWsaInvalidArgument = 10022;
+constexpr uint32_t kWsaMessageSize = 10040;
+constexpr uint32_t kWsaNoBuffers = 10055;
+
+// Validate the complete guest interval before interpreting any bytes. Guest
+// address wrap and transitions to a different host mapping are not contiguous
+// buffers. Callers hold the cooperative mapping lease only while staging or
+// publishing, never while waiting on a socket.
+bool SendGuestRange(memory::Memory* memory, uint32_t address, size_t length,
+                    const void* host, bool writable = false) {
+  if (!length) return true;
+  if (!address || uint64_t(address) + length > (uint64_t{1} << 32) ||
+      host != memory->TranslateVirtual(address)) return false;
+  const auto host_start = reinterpret_cast<uintptr_t>(host);
+  uint64_t position = address, end = uint64_t(address) + length;
+  while (position < end) {
+    auto* heap = memory->LookupHeap(uint32_t(position));
+    if (!heap) return false;
+    const uint64_t heap_end = uint64_t(heap->heap_base()) + heap->heap_size();
+    const uint64_t step_end = std::min(end, heap_end);
+    if (step_end <= position ||
+        reinterpret_cast<uintptr_t>(memory->TranslateVirtual(uint32_t(position))) !=
+            host_start + size_t(position - address)) return false;
+    const auto access = heap->QueryRangeAccess(
+        uint32_t(position), uint32_t(step_end - 1));
+    const auto required = writable ? memory::PageAccess::kReadWrite : memory::PageAccess::kReadOnly;
+    if ((uint32_t(access) & uint32_t(required)) != uint32_t(required)) return false;
+    position = step_end;
+  }
+  return true;
+}
+
+bool ReadSendGuest(memory::Memory* memory, uint32_t address, const void* host,
+                   void* staged, size_t length) {
+  if (!SendGuestRange(memory, address, length, host)) return false;
+  if (!length) return true;
+#if REX_PLATFORM_GNU_LINUX
+  iovec local{staged, length}, remote{const_cast<void*>(host), length};
+  return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == ssize_t(length);
+#else
+  std::memcpy(staged, host, length);
+  return true;
+#endif
+}
+
+bool WriteSendGuest(memory::Memory* memory, uint32_t address, void* host,
+                    const void* staged, size_t length) {
+  if (!SendGuestRange(memory, address, length, host, true)) return false;
+  if (!length) return true;
+#if REX_PLATFORM_GNU_LINUX
+  iovec local{const_cast<void*>(staged), length}, remote{host, length};
+  return process_vm_writev(getpid(), &local, 1, &remote, 1, 0) == ssize_t(length);
+#else
+  std::memcpy(host, staged, length);
+  return true;
+#endif
+}
+
+bool SendLimit(const XSocket::NativeLease& operation, uint32_t* limit) {
+  int type = 0;
+#if REX_PLATFORM_WIN32
+  int length = sizeof(type);
+  const int result = getsockopt(static_cast<SOCKET>(operation.handle()), SOL_SOCKET, SO_TYPE,
+                               reinterpret_cast<char*>(&type), &length);
+#else
+  socklen_t length = sizeof(type);
+  const int result = getsockopt(static_cast<int>(operation.handle()), SOL_SOCKET, SO_TYPE,
+                               &type, &length);
+#endif
+  if (result < 0 || operation.retired()) {
+    XThread::SetLastError(operation.retired() ? 10038 : LastSocketError());
+    return false;
+  }
+  *limit = type == SOCK_DGRAM ? kMaximumUdpSendBytes : kMaximumStreamSendBytes;
+#if REX_PLATFORM_GNU_LINUX
+  if (type == SOCK_DGRAM && IsAuthorizedGameplaySocket(operation.handle()))
+    *limit = kGameplayMaximumPlaintextBytes;
+#endif
+  return true;
+}
+
+bool StageSendDestination(memory::Memory* memory, ppc_ptr_t<XSOCKADDR_IN> to,
+                          uint32_t length, N_XSOCKADDR_IN* native) {
+  if (!to) {
+    if (!length) return true;  // Connected socket: no destination supplied.
+    XThread::SetLastError(kWsaInvalidArgument);
+    return false;
+  }
+  // Exactly the supported IPv4 structure; never read a short or oversized
+  // destination or silently accept an unsupported address family.
+  if (length != sizeof(XSOCKADDR_IN)) {
+    XThread::SetLastError(kWsaInvalidArgument);
+    return false;
+  }
+  XSOCKADDR_IN staged{};
+  if (!ReadSendGuest(memory, to.guest_address(), to.host_address(), &staged, sizeof(staged))) {
+    XThread::SetLastError(kWsaFault);
+    return false;
+  }
+  if (uint16_t(staged.sin_family) != XSocket::X_AF_INET) {
+    XThread::SetLastError(10047);  // WSAEAFNOSUPPORT
+    return false;
+  }
+  *native = staged;
+  return true;
+}
+}  // namespace
+
 // If the socket is a VDP socket, buffer 0 is the game data length, and buffer 1
 // is the unencrypted game data.
 u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buffers,
                            u32 num_buffers, mapped_u32 num_bytes_sent, u32 flags,
                            ppc_ptr_t<XSOCKADDR_IN> to_ptr, u32 to_len,
                            ppc_ptr_t<XWSAOVERLAPPED> overlapped, mapped_void completion_routine) {
-  // Harmony's client handshake retries sends while waiting for the receive
-  // event. Progress pending nonblocking receives on this guest thread so the
-  // reply can complete even when the background guest thread is not scheduled
-  // during the retry loop.
+  // Preserve the title handshake's existing pending-receive progress point.
   PumpPendingRecvFrom();
   auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
   if (!socket) {
-    // WSAENOTSOCK
-    XThread::SetLastError(0x2736);
+    XThread::SetLastError(10038);
+    return -1;
+  }
+  const auto operation = socket->AcquireNativeLease();
+  if (!operation) { XThread::SetLastError(10038); return -1; }
+  uint32_t maximum = 0;
+  if (!SendLimit(operation, &maximum)) return -1;
+  if (!buffers || !num_buffers || num_buffers > kMaximumSendBuffers) {
+    XThread::SetLastError(kWsaInvalidArgument);
     return -1;
   }
 
-  if (!buffers || !num_buffers || !to_ptr) {
-    XThread::SetLastError(0x2726);  // WSAEINVAL
+  std::array<XWSABUF, kMaximumSendBuffers> descriptors{};
+  std::vector<uint8_t> combined;
+  N_XSOCKADDR_IN native_to{};
+  XWSAOVERLAPPED staged_overlapped{};
+  uint64_t size = 0;
+  try {
+#if REX_PLATFORM_GNU_LINUX
+    memory::MappingAccessLease lease;
+#endif
+    auto* memory = REX_KERNEL_MEMORY();
+    if (!StageSendDestination(memory, to_ptr, to_len, &native_to)) return -1;
+    if (!ReadSendGuest(memory, buffers.guest_address(), buffers.host_address(),
+                       descriptors.data(), num_buffers * sizeof(XWSABUF)) ||
+        (num_bytes_sent && !SendGuestRange(memory, num_bytes_sent.guest_address(),
+                                           sizeof(be_u32), num_bytes_sent.host_address(), true)) ||
+        (overlapped &&
+         (!ReadSendGuest(memory, overlapped.guest_address(), overlapped.host_address(),
+                         &staged_overlapped, sizeof(staged_overlapped)) ||
+          !SendGuestRange(memory, overlapped.guest_address(), 2 * sizeof(be_u32),
+                          overlapped.host_address(), true)))) {
+      XThread::SetLastError(kWsaFault);
+      return -1;
+    }
+    for (uint32_t i = 0; i < num_buffers; ++i) {
+      size += uint32_t(descriptors[i].len);
+      if (size > maximum) { XThread::SetLastError(kWsaMessageSize); return -1; }
+    }
+    combined.resize(size_t(size));
+    size_t offset = 0;
+    for (uint32_t i = 0; i < num_buffers; ++i) {
+      const auto length = uint32_t(descriptors[i].len);
+      const auto address = uint32_t(descriptors[i].buf_ptr);
+      if (length && !ReadSendGuest(memory, address, memory->TranslateVirtual(address),
+                                    combined.data() + offset, length)) {
+        XThread::SetLastError(kWsaFault);
+        return -1;
+      }
+      offset += length;
+    }
+  } catch (const std::bad_alloc&) {
+    XThread::SetLastError(kWsaNoBuffers);
     return -1;
   }
 
-  // Our sockets implementation doesn't support multiple buffers, so we need
-  // to combine the buffers the game has given us!
-  std::vector<uint8_t> combined_buffer_mem;
-  uint32_t combined_buffer_size = 0;
-  uint32_t combined_buffer_offset = 0;
-  for (uint32_t i = 0; i < num_buffers; i++) {
-    combined_buffer_size += buffers[i].len;
-    combined_buffer_mem.resize(combined_buffer_size);
-    uint8_t* combined_buffer = combined_buffer_mem.data();
-
-    std::memcpy(combined_buffer + combined_buffer_offset,
-                REX_KERNEL_MEMORY()->TranslateVirtual(buffers[i].buf_ptr), buffers[i].len);
-    combined_buffer_offset += buffers[i].len;
-  }
-
-  N_XSOCKADDR_IN native_to(to_ptr);
-  int result = socket->SendTo(combined_buffer_mem.data(), combined_buffer_size, flags, &native_to,
-                              to_len);
+  const int result = socket->SendTo(combined.data(), uint32_t(size), flags,
+                                    to_ptr ? &native_to : nullptr, to_len);
+  const uint32_t send_error = result < 0 ? LastSocketError() : 0;
   PumpPendingRecvFrom();
-  if (result < 0) {
-    XThread::SetLastError(LastSocketError());
-    return -1;
+  if (result < 0) { XThread::SetLastError(send_error); return -1; }
+  // Recheck mapping ownership after the network call, then publish only the
+  // result fields. Never copy the descriptor's event/offset bytes back over a
+  // concurrent title update and never hold a mapping lease across native I/O.
+  {
+#if REX_PLATFORM_GNU_LINUX
+    memory::MappingAccessLease lease;
+#endif
+    auto* memory = REX_KERNEL_MEMORY();
+    if ((num_bytes_sent && !SendGuestRange(memory, num_bytes_sent.guest_address(),
+                                           sizeof(be_u32), num_bytes_sent.host_address(), true)) ||
+        (overlapped && !SendGuestRange(memory, overlapped.guest_address(), 2 * sizeof(be_u32),
+                                       overlapped.host_address(), true))) {
+      XThread::SetLastError(kWsaFault);
+      return -1;
+    }
+    const be_u32 sent{uint32_t(result)};
+    const std::array<be_u32, 2> status{be_u32(0), sent};
+    if ((num_bytes_sent && !WriteSendGuest(memory, num_bytes_sent.guest_address(),
+                                          num_bytes_sent.host_address(), &sent, sizeof(sent))) ||
+        (overlapped && !WriteSendGuest(memory, overlapped.guest_address(),
+                                       overlapped.host_address(), status.data(), sizeof(status)))) {
+      XThread::SetLastError(kWsaFault);
+      return -1;
+    }
   }
-  if (num_bytes_sent)
-    *num_bytes_sent = uint32_t(result);
   REXKRNL_INFO(
       "NetDll_WSASendTo: socket={:08X} destination={:08X}:{} bytes={} overlapped={:08X}",
       socket_handle, uint32_t(native_to.sin_addr), uint16_t(native_to.sin_port), result,
       overlapped.guest_address());
 
-  // A datagram copied into the host socket has completed synchronously even
-  // when the caller supplied an OVERLAPPED. Publish the same completion state
-  // that WSAGetOverlappedResult/event wait observes for receives.
+  // Keep synchronous OVERLAPPED/event completion semantics, using the event
+  // identity staged before sending rather than dereferencing guest memory.
   if (overlapped) {
-    overlapped->internal = 0;
-    overlapped->internal_high = uint32_t(result);
     PendingRecvFrom completed{};
     completed.socket_handle = socket_handle;
     completed.overlapped_ptr = overlapped.guest_address();
@@ -739,18 +903,14 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
       std::lock_guard lock(pending_recv_mutex);
       pending_recvs[completed.overlapped_ptr] = completed;
     }
-    if (overlapped->event_handle) {
-      auto event = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(overlapped->event_handle);
-      if (event)
-        event->Set(0, false);
+    if (staged_overlapped.event_handle) {
+      auto event = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(staged_overlapped.event_handle);
+      if (event) event->Set(0, false);
     }
-    if (completion_routine) {
-      REXKRNL_WARN(
-          "NetDll_WSASendTo: completion routine {:08X} retained as immediate event completion",
-          completion_routine.guest_address());
-    }
+    if (completion_routine)
+      REXKRNL_WARN("NetDll_WSASendTo: completion routine {:08X} retained as immediate event completion",
+                  completion_routine.guest_address());
   }
-
   XThread::SetLastError(0);
   return 0;
 }
@@ -1576,13 +1736,28 @@ u32 NetDll_recvfrom_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u3
 
 u32 NetDll_send_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 buf_len, u32 flags) {
   auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
-  if (!socket) {
-    // WSAENOTSOCK
-    XThread::SetLastError(0x2736);
+  if (!socket) { XThread::SetLastError(10038); return -1; }
+  const auto operation = socket->AcquireNativeLease();
+  if (!operation) { XThread::SetLastError(10038); return -1; }
+  uint32_t maximum = 0;
+  if (!SendLimit(operation, &maximum)) return -1;
+  if (buf_len > maximum) { XThread::SetLastError(kWsaMessageSize); return -1; }
+  std::vector<uint8_t> staged;
+  try {
+#if REX_PLATFORM_GNU_LINUX
+    memory::MappingAccessLease lease;
+#endif
+    staged.resize(buf_len);
+    if (!ReadSendGuest(REX_KERNEL_MEMORY(), buf_ptr.guest_address(), buf_ptr.host_address(),
+                       staged.data(), buf_len)) {
+      XThread::SetLastError(kWsaFault);
+      return -1;
+    }
+  } catch (const std::bad_alloc&) {
+    XThread::SetLastError(kWsaNoBuffers);
     return -1;
   }
-
-  const int result = socket->Send(buf_ptr, buf_len, flags);
+  const int result = socket->Send(staged.data(), buf_len, flags);
   if (result < 0) XThread::SetLastError(LastSocketError());
   return result;
 }
@@ -1590,14 +1765,32 @@ u32 NetDll_send_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 bu
 u32 NetDll_sendto_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 buf_len, u32 flags,
                         ppc_ptr_t<XSOCKADDR_IN> to_ptr, u32 to_len) {
   auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
-  if (!socket) {
-    // WSAENOTSOCK
-    XThread::SetLastError(0x2736);
+  if (!socket) { XThread::SetLastError(10038); return -1; }
+  const auto operation = socket->AcquireNativeLease();
+  if (!operation) { XThread::SetLastError(10038); return -1; }
+  uint32_t maximum = 0;
+  if (!SendLimit(operation, &maximum)) return -1;
+  if (buf_len > maximum) { XThread::SetLastError(kWsaMessageSize); return -1; }
+  N_XSOCKADDR_IN native_to{};
+  std::vector<uint8_t> staged;
+  try {
+#if REX_PLATFORM_GNU_LINUX
+    memory::MappingAccessLease lease;
+#endif
+    auto* memory = REX_KERNEL_MEMORY();
+    if (!StageSendDestination(memory, to_ptr, to_len, &native_to)) return -1;
+    staged.resize(buf_len);
+    if (!ReadSendGuest(memory, buf_ptr.guest_address(), buf_ptr.host_address(),
+                       staged.data(), buf_len)) {
+      XThread::SetLastError(kWsaFault);
+      return -1;
+    }
+  } catch (const std::bad_alloc&) {
+    XThread::SetLastError(kWsaNoBuffers);
     return -1;
   }
-
-  N_XSOCKADDR_IN native_to(to_ptr);
-  const int result = socket->SendTo(buf_ptr, buf_len, flags, &native_to, to_len);
+  const int result = socket->SendTo(staged.data(), buf_len, flags,
+                                    to_ptr ? &native_to : nullptr, to_len);
   if (result < 0) XThread::SetLastError(LastSocketError());
   return result;
 }
