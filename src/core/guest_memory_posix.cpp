@@ -18,8 +18,8 @@ namespace {
 using MMIO = runtime::MMIOHandler;
 constexpr unsigned kRetryLimit = 8;
 // Ordinary virtual RAM has no physical write-watch/device callbacks. Retain
-// owner and mapping admission through one x86 MOVQ, including its epilogue.
-// A failing MOVQ publishes no bytes/output and is never split or replayed.
+// owner and mapping admission through one x86 scalar MOV, including its epilogue.
+// A failing MOV publishes no bytes/output and is never split or replayed.
 // This is an unaligned scalar operation, not an atomic snapshot guarantee.
 std::optional<AccessAttempt> CaptureCrossPageRamScalar(const void* pointer,void* value,size_t width,bool write) noexcept {
   const auto address=reinterpret_cast<uintptr_t>(pointer);
@@ -218,7 +218,7 @@ void RequireFillRange(void* destination,size_t length) noexcept {
 }
 AccessResult<bool> TryReadBytes(const void* address,void* output,size_t width,bool vector,bool reservation) noexcept {
   RequireAccess();
-  if((width==8 || width==2) && !vector && !reservation) {
+  if((width==2 || width==4 || width==8) && !vector && !reservation) {
     if(auto captured=CaptureCrossPageRamScalar(address,output,width,false)) {
       if(captured->success)return AccessResult<bool>::Success(true);
       return Terminal<bool>(captured->fault);
@@ -245,7 +245,7 @@ AccessResult<bool> TryReadBytes(const void* address,void* output,size_t width,bo
 }
 AccessResult<bool> TryWriteBytes(void* address,const void* value,size_t width,bool vector) noexcept {
   RequireAccess();
-  if(width==8 && !vector) {
+  if((width==2 || width==4 || width==8) && !vector) {
     if(auto captured=CaptureCrossPageRamScalar(address,const_cast<void*>(value),width,true)) {
       if(captured->success)return AccessResult<bool>::Success(true);
       return Terminal<bool>(captured->fault);

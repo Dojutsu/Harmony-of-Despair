@@ -39,9 +39,15 @@ TEST_CASE("Linux mapping leases exclude real host VM mutators and release after 
     while(!MappingMutationWaiters()&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();
     CHECK(MappingMutationWaiters()>0);CHECK_FALSE(completed.load());
     CHECK(lease.identity()==identity);CHECK(lease.generation()==generation);
-    uint64_t value=0;auto read=rex::guest::CaptureRead(pages+4095,&value,8);CHECK(read.success);CHECK(value==0xA5A5A5A5A5A5A5A5ULL);
-    uint64_t input=0x00001A3E0080503FULL;auto write=rex::guest::CaptureWrite(pages+4092,&input,8);CHECK(write.success);
-    CHECK(std::memcmp(pages+4092,"\x3F\x50\x80\x00\x3E\x1A\x00\x00",8)==0);
+    for(size_t width : {size_t(2),size_t(4),size_t(8)}) {
+      auto* cell=pages+4096-width/2;
+      std::memset(cell,0xA5,width);
+      uint64_t value=0,expected=0;std::memset(&expected,0xA5,width);
+      auto read=rex::guest::CaptureRead(cell,&value,width);CHECK(read.success);CHECK(value==expected);
+      const uint64_t input=0x00001A3E0080503FULL;
+      auto write=rex::guest::CaptureWrite(cell,&input,width);CHECK(write.success);
+      CHECK(std::memcmp(cell,&input,width)==0);
+    }
     lease.Release();mutator.join();CHECK(completed.load());CHECK(okay.load());CHECK_FALSE(HasMappingAccessLease());
     if(operation!=2&&operation!=4)CHECK(DeallocFixed(pages,8192,DeallocationType::kRelease));
     if(operation!=5)CloseFileMappingHandle(fd,"lease-unit-"+std::to_string(getpid()));
@@ -108,7 +114,7 @@ TEST_CASE("Linux mapping lease detects duplicate release and forbidden recursive
 #endif
 
 #if REX_PLATFORM_GNU_LINUX
-TEST_CASE("Linux scalar64 virtual RAM crosses every host-page split without partial publication", "[linux][mapping-lease][guest-fault][scalar64]") {
+TEST_CASE("Linux ordinary scalar virtual RAM crosses every host-page split without partial publication", "[linux][mapping-lease][guest-fault][scalar16][scalar32][scalar64]") {
   using namespace rex::memory;
   auto& memory=rex::testing::GetTestMemory();
   auto* heap=memory.LookupHeapByType(false,65536);REQUIRE(heap!=nullptr);
@@ -123,53 +129,136 @@ TEST_CASE("Linux scalar64 virtual RAM crosses every host-page split without part
     ~Binding(){rex::runtime::ThreadState::Bind(previous);}
   } binding(memory);
   // The second boundary also crosses a guest 64 KiB page, keeping one allocation.
-  for(size_t boundary : {size_t(4096),size_t(65536)}) {
-    for(unsigned first_bytes=1;first_bytes<8;++first_bytes) {
-      INFO("boundary "<<boundary<<", split "<<first_bytes);
-      auto* cell=pages+boundary-first_bytes;
-      for(unsigned denied=0;denied<4;++denied) {
-        INFO("read protection mask "<<denied);
-        std::memset(cell,0xA5,8);
-        REQUIRE(Protect(pages+boundary-4096,4096,denied&1?PageAccess::kNoAccess:PageAccess::kReadWrite));
-        REQUIRE(Protect(pages+boundary,4096,denied&2?PageAccess::kNoAccess:PageAccess::kReadWrite));
-        rex::guest::ExecutionActivation activation;uint64_t output=0xDEADBEEFCAFEBABEULL;
-        auto result=rex::guest::detail::TryReadBytes(cell,&output,8);
-        REQUIRE(result.IsSuccess()==(denied==0));
-        if(result.Failed()) {
-          CHECK(output==0xDEADBEEFCAFEBABEULL);
-          CHECK(activation.published_faults()==1);
-          const auto fault=activation.Consume(result.Fault());
-          CHECK(fault.access_intent==0);
-          CHECK(fault.address==reinterpret_cast<uintptr_t>(denied&1?cell:pages+boundary));
-          CHECK(activation.consumed_faults()==1);
-        } else CHECK(output==0xA5A5A5A5A5A5A5A5ULL);
-        CHECK_FALSE(HasMappingAccessLease());
-        REQUIRE(Protect(pages+boundary-4096,8192,PageAccess::kReadWrite));
-      }
-      for(unsigned denied=0;denied<4;++denied) {
-        INFO("write protection mask "<<denied);
-        std::memset(cell-1,0xA5,10);
-        REQUIRE(Protect(pages+boundary-4096,4096,denied&1?PageAccess::kReadOnly:PageAccess::kReadWrite));
-        REQUIRE(Protect(pages+boundary,4096,denied&2?PageAccess::kReadOnly:PageAccess::kReadWrite));
-        rex::guest::ExecutionActivation activation;
-        auto result=rex::guest::TryWrite<uint64_t>(cell,0x00001A3E0080503FULL);
-        REQUIRE(result.IsSuccess()==(denied==0));
-        if(result.Failed()) {
-          CHECK(activation.published_faults()==1);
-          const auto fault=activation.Consume(result.Fault());
-          CHECK(fault.access_intent==1);
-          CHECK(fault.address==reinterpret_cast<uintptr_t>(denied&1?cell:pages+boundary));
-          CHECK(activation.consumed_faults()==1);
+  for(size_t boundary : {page_size(),size_t(65536)}) {
+    for(size_t width : {size_t(2),size_t(4),size_t(8)}) {
+      for(size_t first_bytes=1;first_bytes<width;++first_bytes) {
+        INFO("boundary "<<boundary<<", width "<<width<<", split "<<first_bytes);
+        auto* cell=pages+boundary-first_bytes;
+        for(unsigned denied=0;denied<4;++denied) {
+          INFO("read protection mask "<<denied);
+          std::memset(cell,0xA5,width);
+          REQUIRE(Protect(pages+boundary-page_size(),page_size(),denied&1?PageAccess::kNoAccess:PageAccess::kReadWrite));
+          REQUIRE(Protect(pages+boundary,page_size(),denied&2?PageAccess::kNoAccess:PageAccess::kReadWrite));
+          rex::guest::ExecutionActivation activation;uint64_t output=0xDEADBEEFCAFEBABEULL;
+          uint64_t expected=output;
+          std::memset(&expected,0xA5,width);
+          auto result=rex::guest::detail::TryReadBytes(cell,&output,width);
+          REQUIRE(result.IsSuccess()==(denied==0));
+          if(result.Failed()) {
+            CHECK(output==0xDEADBEEFCAFEBABEULL);
+            CHECK(activation.published_faults()==1);
+            const auto fault=activation.Consume(result.Fault());
+            CHECK(fault.access_intent==0);
+            CHECK(fault.address==reinterpret_cast<uintptr_t>(denied&1?cell:pages+boundary));
+            CHECK(activation.consumed_faults()==1);
+          } else CHECK(output==expected);
+          CHECK_FALSE(HasMappingAccessLease());
+          REQUIRE(Protect(pages+boundary-page_size(),page_size()*2,PageAccess::kReadWrite));
         }
-        CHECK_FALSE(HasMappingAccessLease());
-        REQUIRE(Protect(pages+boundary-4096,8192,PageAccess::kReadWrite));
-        CHECK(cell[-1]==0xA5);CHECK(cell[8]==0xA5);
-        if(denied)CHECK(std::memcmp(cell,"\xA5\xA5\xA5\xA5\xA5\xA5\xA5\xA5",8)==0);
-        else CHECK(std::memcmp(cell,"\x3F\x50\x80\x00\x3E\x1A\x00\x00",8)==0);
+        for(unsigned denied=0;denied<4;++denied) {
+          INFO("write protection mask "<<denied);
+          std::memset(cell-1,0xA5,width+2);
+          REQUIRE(Protect(pages+boundary-page_size(),page_size(),denied&1?PageAccess::kReadOnly:PageAccess::kReadWrite));
+          REQUIRE(Protect(pages+boundary,page_size(),denied&2?PageAccess::kReadOnly:PageAccess::kReadWrite));
+          rex::guest::ExecutionActivation activation;
+          const uint64_t payload=0x00001A3E0080503FULL;
+          auto result=rex::guest::detail::TryWriteBytes(cell,&payload,width);
+          REQUIRE(result.IsSuccess()==(denied==0));
+          if(result.Failed()) {
+            CHECK(activation.published_faults()==1);
+            const auto fault=activation.Consume(result.Fault());
+            CHECK(fault.access_intent==1);
+            CHECK(fault.address==reinterpret_cast<uintptr_t>(denied&1?cell:pages+boundary));
+            CHECK(activation.consumed_faults()==1);
+          }
+          CHECK_FALSE(HasMappingAccessLease());
+          REQUIRE(Protect(pages+boundary-page_size(),page_size()*2,PageAccess::kReadWrite));
+          CHECK(cell[-1]==0xA5);CHECK(cell[width]==0xA5);
+          if(denied) {
+            for(size_t byte=0;byte<width;++byte)CHECK(cell[byte]==0xA5);
+          } else CHECK(std::memcmp(cell,&payload,width)==0);
+        }
       }
     }
   }
   CHECK(heap->Release(address));
+}
+
+TEST_CASE("Linux scalar32 stage-loading address is admitted within its original allocation", "[linux][mapping-lease][guest-fault][scalar32]") {
+  using namespace rex::memory;
+  constexpr uint32_t allocation=0x43E00000,allocation_size=0x400000,guest=0x43FD6FFE;
+  auto& memory=rex::testing::GetTestMemory();
+  auto* heap=memory.LookupHeap(guest);REQUIRE(heap!=nullptr);
+  REQUIRE(heap->heap_type()==HeapType::kGuestVirtual);
+  REQUIRE(heap->AllocFixed(allocation,allocation_size,65536,kMemoryAllocationReserve|kMemoryAllocationCommit,kMemoryProtectRead|kMemoryProtectWrite));
+  auto* cell=memory.TranslateVirtual<unsigned char*>(guest);
+  REQUIRE(reinterpret_cast<uintptr_t>(cell)%page_size()==page_size()-2);
+  HeapAllocationInfo info{};REQUIRE(heap->QueryRegionInfo(guest,&info));
+  CHECK(info.allocation_base==allocation);CHECK(info.allocation_size==allocation_size);
+  struct Binding {
+    rex::runtime::ThreadState* previous=rex::runtime::ThreadState::Get();
+    rex::runtime::ThreadState thread;
+    explicit Binding(Memory& memory):thread(99,0,0,&memory){rex::runtime::ThreadState::Bind(&thread);}
+    ~Binding(){rex::runtime::ThreadState::Bind(previous);}
+  } binding(memory);
+  std::memcpy(cell,"\x12\x34\x56\x78",4);
+  rex::guest::ExecutionActivation activation;
+  auto read=rex::guest::TryRead<uint32_t>(cell);
+  REQUIRE(read.IsSuccess());CHECK(read.Value()==0x78563412);
+  auto write=rex::guest::TryWrite<uint32_t>(cell,0xA1B2C3D4);
+  REQUIRE(write.IsSuccess());CHECK(std::memcmp(cell,"\xD4\xC3\xB2\xA1",4)==0);
+  CHECK(activation.published_faults()==0);CHECK_FALSE(HasMappingAccessLease());
+  CHECK(heap->Release(allocation));
+}
+
+TEST_CASE("Linux cross-page scalar admission rejects mutated virtual heap state", "[linux][mapping-lease][guest-fault][negative-control]") {
+  using namespace rex::memory;
+  auto& memory=rex::testing::GetTestMemory();
+  auto* heap=memory.LookupHeapByType(false,65536);REQUIRE(heap!=nullptr);
+  struct Binding {
+    rex::runtime::ThreadState* previous=rex::runtime::ThreadState::Get();
+    rex::runtime::ThreadState thread;
+    explicit Binding(Memory& memory):thread(99,0,0,&memory){rex::runtime::ThreadState::Bind(&thread);}
+    ~Binding(){rex::runtime::ThreadState::Bind(previous);}
+  } binding(memory);
+  for(size_t width : {size_t(2),size_t(4),size_t(8)}) {
+    for(unsigned operation=0;operation<3;++operation) {
+      for(unsigned denied=1;denied<4;++denied) {
+        if(operation==2 && denied!=3)continue;
+        INFO("width "<<width<<", mutator "<<operation<<", denial mask "<<denied);
+        uint32_t address=0;
+        REQUIRE(heap->Alloc(131072,65536,kMemoryAllocationReserve|kMemoryAllocationCommit,kMemoryProtectRead|kMemoryProtectWrite,false,&address));
+        auto* pages=memory.TranslateVirtual<unsigned char*>(address);
+        auto* cell=pages+65536-width/2;
+        std::memset(cell-1,0xA5,width+2);
+        for(unsigned half=0;half<2;++half) {
+          if(!(denied&(1u<<half)))continue;
+          if(operation==0)REQUIRE(heap->Protect(address+half*65536,65536,kMemoryProtectNoAccess));
+          if(operation==1)REQUIRE(heap->Decommit(address+half*65536,65536));
+        }
+        if(operation==2)REQUIRE(heap->Release(address));
+        const auto fault_address=reinterpret_cast<uintptr_t>(denied&1?cell:pages+65536);
+        rex::guest::ExecutionActivation activation;
+        uint64_t output=0xDEADBEEFCAFEBABEULL,payload=0x1234567887654321ULL;
+        auto read=rex::guest::detail::TryReadBytes(cell,&output,width);
+        REQUIRE(read.Failed());CHECK(output==0xDEADBEEFCAFEBABEULL);
+        const auto read_fault=activation.Consume(read.Fault());
+        CHECK(read_fault.address==fault_address);CHECK(read_fault.access_intent==0);
+        auto write=rex::guest::detail::TryWriteBytes(cell,&payload,width);
+        REQUIRE(write.Failed());
+        const auto write_fault=activation.Consume(write.Fault());
+        CHECK(write_fault.address==fault_address);CHECK(write_fault.access_intent==1);
+        CHECK(activation.published_faults()==2);CHECK(activation.consumed_faults()==2);
+        CHECK_FALSE(HasMappingAccessLease());
+        if(operation!=2) {
+          REQUIRE(Protect(pages+65536-page_size(),page_size()*2,PageAccess::kReadWrite));
+          for(size_t byte=0;byte<width;++byte)CHECK(cell[byte]==0xA5);
+          CHECK(cell[-1]==0xA5);CHECK(cell[width]==0xA5);
+          CHECK(heap->Release(address));
+        }
+      }
+    }
+  }
 }
 
 TEST_CASE("Linux owner retirement rejects stale thread bindings and drains admitted operations", "[linux][mapping-lease][retirement]") {
@@ -199,12 +288,19 @@ TEST_CASE("Linux owner retirement rejects stale thread bindings and drains admit
     if(rejected.memory() || !complete.load())_exit(94);
     // The stale binding rejects a checked access before touching freed Memory.
     rex::runtime::ThreadState::Bind(&stale);
-    rex::guest::ExecutionActivation activation;
-    uint64_t output=0xDEADBEEFCAFEBABEULL;
-    auto read=rex::guest::detail::TryReadBytes(reinterpret_cast<void*>(0x140000FFFULL),&output,8);
-    if(!read.Failed() || output!=0xDEADBEEFCAFEBABEULL)_exit(95);
-    auto fault=activation.Consume(read.Fault());
-    if(fault.address!=0x140000FFFULL || fault.access_intent || activation.consumed_faults()!=1)_exit(96);
+    for(size_t width : {size_t(2),size_t(4),size_t(8)}) {
+      rex::guest::ExecutionActivation activation;
+      uint64_t output=0xDEADBEEFCAFEBABEULL,payload=0x1234567887654321ULL;
+      auto* cell=reinterpret_cast<void*>(0x140000FFFULL);
+      auto read=rex::guest::detail::TryReadBytes(cell,&output,width);
+      if(!read.Failed() || output!=0xDEADBEEFCAFEBABEULL)_exit(95);
+      auto fault=activation.Consume(read.Fault());
+      if(fault.address!=0x140000FFFULL || fault.access_intent || activation.consumed_faults()!=1)_exit(96);
+      auto write=rex::guest::detail::TryWriteBytes(cell,&payload,width);
+      if(!write.Failed())_exit(97);
+      fault=activation.Consume(write.Fault());
+      if(fault.address!=0x140000FFFULL || fault.access_intent!=1 || activation.consumed_faults()!=2)_exit(98);
+    }
     rex::runtime::ThreadState::Bind(nullptr);
     _exit(0);
   }
@@ -222,17 +318,24 @@ TEST_CASE("Linux cross-page admission rejects replaced backing even when heap me
   auto* pages=memory.TranslateVirtual<unsigned char*>(address);
   auto fd=CreateFileMappingHandle("replacement-unit-"+std::to_string(getpid()),8192,PageAccess::kReadWrite,true);
   REQUIRE(fd!=kFileMappingHandleInvalid);
-  auto child=fork();REQUIRE(child>=0);
-  if(!child) {
-    alarm(5);
-    if(MapFileView(fd,pages,8192,PageAccess::kReadWrite,0)!=pages)_exit(91);
-    rex::runtime::ThreadState binding(99,0,0,&memory);rex::runtime::ThreadState::Bind(&binding);
-    rex::guest::ExecutionActivation activation;
-    auto result=rex::guest::TryWrite<uint64_t>(pages+4092,0x1122334455667788ULL);
-    (void)result;_exit(92);
+  for(size_t width : {size_t(2),size_t(4),size_t(8)}) {
+    for(bool write : {false,true}) {
+      INFO("width "<<width<<", write "<<write);
+      auto child=fork();REQUIRE(child>=0);
+      if(!child) {
+        alarm(5);
+        if(MapFileView(fd,pages,8192,PageAccess::kReadWrite,0)!=pages)_exit(91);
+        rex::runtime::ThreadState binding(99,0,0,&memory);rex::runtime::ThreadState::Bind(&binding);
+        rex::guest::ExecutionActivation activation;
+        uint64_t value=0x1122334455667788ULL;
+        auto* cell=pages+page_size()-width/2;
+        auto result=write?rex::guest::detail::TryWriteBytes(cell,&value,width):rex::guest::detail::TryReadBytes(cell,&value,width);
+        (void)result;_exit(92);
+      }
+      int status=0;REQUIRE(waitpid(child,&status,0)==child);
+      REQUIRE(WIFEXITED(status));CHECK(WEXITSTATUS(status)==rex::guest::kFaultContractFailureExitCode);
+    }
   }
-  int status=0;REQUIRE(waitpid(child,&status,0)==child);
-  REQUIRE(WIFEXITED(status));CHECK(WEXITSTATUS(status)==rex::guest::kFaultContractFailureExitCode);
   auto* observed=static_cast<unsigned char*>(MapFileView(fd,nullptr,8192,PageAccess::kReadOnly,0));
   REQUIRE(observed!=nullptr);CHECK(std::memcmp(observed+4092,"\0\0\0\0\0\0\0\0",8)==0);
   CHECK(UnmapFileView(fd,observed,8192));
