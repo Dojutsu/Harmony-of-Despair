@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <limits>
+#include <type_traits>
 
 namespace rex::guest {
 namespace {
@@ -22,13 +23,45 @@ extern char rex_guest_cas4_site, rex_guest_cas4_fail, rex_guest_cas8_site, rex_g
 int rex_guest_copy(void*, const void*, size_t);
 extern char rex_guest_copy_site, rex_guest_copy_fail;
 }
+// Owned faults populate every member below; ordinary successful leaves need
+// no private fault payload. Keep the public successful AccessAttempt zeroed.
+// Keep these fields synchronized with CapturedFault; assertions pin their
+// current layout without changing the public capture ABI.
+struct CaptureSnapshot {
+  int signal_number;
+  int signal_code;
+  uint32_t access_intent;
+  uint64_t page_fault_error;
+  uint64_t flags;
+  uintptr_t address;
+  uintptr_t instruction_pointer;
+  uintptr_t stack_pointer;
+  uint64_t integer_registers[16];
+  unsigned char xmm_registers[16][16];
+};
+static_assert(std::is_standard_layout_v<CaptureSnapshot>);
+static_assert(std::is_standard_layout_v<CapturedFault>);
+static_assert(std::is_trivially_copyable_v<CaptureSnapshot>);
+static_assert(std::is_trivially_copyable_v<CapturedFault>);
+static_assert(sizeof(CaptureSnapshot) == sizeof(CapturedFault));
+static_assert(alignof(CaptureSnapshot) == alignof(CapturedFault));
+static_assert(offsetof(CaptureSnapshot, signal_number) == offsetof(CapturedFault, signal_number));
+static_assert(offsetof(CaptureSnapshot, signal_code) == offsetof(CapturedFault, signal_code));
+static_assert(offsetof(CaptureSnapshot, access_intent) == offsetof(CapturedFault, access_intent));
+static_assert(offsetof(CaptureSnapshot, page_fault_error) == offsetof(CapturedFault, page_fault_error));
+static_assert(offsetof(CaptureSnapshot, flags) == offsetof(CapturedFault, flags));
+static_assert(offsetof(CaptureSnapshot, address) == offsetof(CapturedFault, address));
+static_assert(offsetof(CaptureSnapshot, instruction_pointer) == offsetof(CapturedFault, instruction_pointer));
+static_assert(offsetof(CaptureSnapshot, stack_pointer) == offsetof(CapturedFault, stack_pointer));
+static_assert(offsetof(CaptureSnapshot, integer_registers) == offsetof(CapturedFault, integer_registers));
+static_assert(offsetof(CaptureSnapshot, xmm_registers) == offsetof(CapturedFault, xmm_registers));
 struct AccessFrame {
   volatile sig_atomic_t phase = 0;
   uintptr_t site = 0, failure = 0;
   uintptr_t low[2]{}, high[2]{};
   int expected_intent = -1;
   bool bulk = false;
-  CapturedFault fault{};
+  CaptureSnapshot fault;
 };
 // Constant-initialized shared runtime TLS. Initial-exec/direct FS is reviewed
 // for the admitted startup-loaded Linux DSOs; late loader use is not admitted.
@@ -63,7 +96,9 @@ AccessAttempt Finish(const AccessFrame& frame, int status, size_t completed) noe
   AccessAttempt result;
   result.success = status == 0;
   result.completed = completed;
-  if (status) result.fault = frame.fault;
+  if (status) {
+    std::memcpy(&result.fault, &frame.fault, sizeof(result.fault));
+  }
   return result;
 }
 using Leaf = int (*)(const void*, void*);
@@ -122,6 +157,9 @@ bool CaptureOwnedSignal(int sig, void* raw_info, void* raw_context) noexcept {
     auto* destination = reinterpret_cast<volatile unsigned char*>(frame->fault.xmm_registers);
     auto* source = reinterpret_cast<const volatile unsigned char*>(context->uc_mcontext.fpregs->_xmm);
     for (unsigned i = 0; i < 256; ++i) destination[i] = source[i];
+  } else {
+    auto* destination = reinterpret_cast<volatile unsigned char*>(frame->fault.xmm_registers);
+    for (unsigned i = 0; i < 256; ++i) destination[i] = 0;
   }
   frame->phase = 3;
   g[REG_RIP] = static_cast<greg_t>(frame->failure);

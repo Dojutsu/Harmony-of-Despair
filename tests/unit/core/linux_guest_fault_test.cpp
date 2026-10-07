@@ -98,6 +98,86 @@ void ScalarAndVectorIntent() {
   Check(!std::memcmp(write.fault.xmm_registers[0], payload.data(), 16), "simd_fault_payload_snapshot");
 }
 
+void CheckSuccessfulSnapshot(const AccessAttempt& attempt, size_t completed) {
+  const auto& fault = attempt.fault;
+  bool zero = fault.signal_number == 0 && fault.signal_code == 0 && fault.access_intent == 0 &&
+      fault.page_fault_error == 0 && fault.flags == 0 && fault.address == 0 &&
+      fault.instruction_pointer == 0 && fault.stack_pointer == 0;
+  for (auto value : fault.integer_registers) zero &= value == 0;
+  for (const auto& row : fault.xmm_registers) for (auto value : row) zero &= value == 0;
+  Check(attempt.success && attempt.completed == completed, "successful_capture_exact_progress");
+  Check(zero, "successful_capture_public_fault_snapshot_zero");
+  Check(!HasArmedAccessFrame(), "successful_capture_frame_disarmed");
+}
+void SuccessfulCaptureSnapshots() {
+  Mapping ram(page_size);
+  const uint64_t payload = 0x1234567887654321;
+  for (size_t width : {1u, 2u, 4u, 8u}) {
+    std::memcpy(ram.data, &payload, sizeof(payload));
+    uint64_t output = 0;
+    CheckSuccessfulSnapshot(CaptureRead(ram.data, &output, width), width);
+    CheckSuccessfulSnapshot(CaptureWrite(ram.data, &payload, width), width);
+  }
+  alignas(16) std::array<unsigned char, 16> vector{}, output{};
+  vector.fill(0xA5);
+  CheckSuccessfulSnapshot(CaptureVectorWrite(ram.data, vector.data()), 16);
+  CheckSuccessfulSnapshot(CaptureVectorRead(ram.data, output.data()), 16);
+  Check(output == vector, "successful_vector_snapshot_data");
+  uint32_t previous32 = 0;
+  uint64_t previous64 = 0;
+  CheckSuccessfulSnapshot(CaptureCompareExchange32(ram.data, 0, 1, &previous32), 4);
+  CheckSuccessfulSnapshot(CaptureCompareExchange64(ram.data, 0, 1, &previous64), 8);
+  CheckSuccessfulSnapshot(CaptureCopy(ram.data + 32, vector.data(), 16), 16);
+  CheckSuccessfulSnapshot(CaptureCopy(nullptr, nullptr, 0), 0);
+}
+
+// This wrapper runs only in its dedicated bounded child. It delegates to the
+// real installed SEH handler, omitting fpregs for one owned hardware fault and
+// restoring the kernel context before signal return. No production seam exists.
+struct sigaction capture_previous{};
+volatile sig_atomic_t omit_capture_fpregs = 0;
+volatile sig_atomic_t wrapped_capture_signals = 0;
+void CaptureWithoutFpregs(int sig, siginfo_t* info, void* raw) {
+  auto* context = static_cast<ucontext_t*>(raw);
+  if (sig != SIGSEGV || !context || !info || info->si_code != SEGV_ACCERR) _exit(100);
+  auto* saved = context->uc_mcontext.fpregs;
+  if (omit_capture_fpregs) context->uc_mcontext.fpregs = nullptr;
+  wrapped_capture_signals = wrapped_capture_signals + 1;
+  capture_previous.sa_sigaction(sig, info, raw);
+  context->uc_mcontext.fpregs = saved;
+}
+int MissingFpregsSnapshot(void* inaccessible) {
+  rex::initialize_seh();
+  if (sigaction(SIGSEGV, nullptr, &capture_previous)) return 101;
+  if (!(capture_previous.sa_flags & SA_SIGINFO) ||
+      capture_previous.sa_handler == SIG_DFL || capture_previous.sa_handler == SIG_IGN) return 102;
+  auto wrapper = capture_previous;
+  wrapper.sa_sigaction = CaptureWithoutFpregs;
+  if (sigaction(SIGSEGV, &wrapper, nullptr)) return 103;
+  alignas(16) std::array<unsigned char, 16> payload{};
+  payload.fill(0xA5);
+  std::array<AccessAttempt, 2> attempts{};
+  // Same callsite and backend stack: the first fault seeds nonzero XMM0 in the
+  // private snapshot, so the second must replace it even without native fpregs.
+  for (unsigned index = 0; index < attempts.size(); ++index) {
+    omit_capture_fpregs = index == 1;
+    attempts[index] = CaptureVectorWrite(inaccessible, payload.data());
+  }
+  omit_capture_fpregs = 0;
+  if (sigaction(SIGSEGV, &capture_previous, nullptr)) return 104;
+  Check(wrapped_capture_signals == 2, "missing_fpregs_exact_two_owned_hardware_faults");
+  CheckFault(attempts[0], inaccessible, 1, "normal_fpregs_vector_fault");
+  Check(!std::memcmp(attempts[0].fault.xmm_registers[0], payload.data(), payload.size()),
+        "normal_fpregs_nonzero_xmm_payload");
+  CheckFault(attempts[1], inaccessible, 1, "missing_fpregs_vector_fault");
+  bool zero = true;
+  for (const auto& row : attempts[1].fault.xmm_registers) for (auto value : row) zero &= value == 0;
+  Check(zero, "missing_fpregs_full_xmm_snapshot_zero");
+  Check(attempts[0].completed == 0 && attempts[1].completed == 0,
+        "missing_fpregs_faults_no_completed_output");
+  return failures ? 105 : 0;
+}
+
 void ScalarSplitFaults() {
   Mapping ram(page_size*2);
   for(size_t width : {size_t(2),size_t(4),size_t(8)}) {
@@ -330,7 +410,9 @@ int ChildMode(const std::string& mode) {
   Mapping ram(page_size * 2), inaccessible(page_size, PROT_NONE);
   expected_address = reinterpret_cast<uintptr_t>(inaccessible.data);
   expected_intent = 1;
-  if (mode == "default-native") {
+  if (mode == "capture-missing-fpregs") {
+    return MissingFpregsSnapshot(inaccessible.data);
+  } else if (mode == "default-native") {
     rex::initialize_seh();
     rex::SehGuard legacy_scope;
     *static_cast<volatile unsigned char*>(inaccessible.data) = 1;
@@ -473,12 +555,14 @@ int main(int argc, char** argv) {
   for (const char* mode : {"native-prior", "host-read-output", "host-write-payload", "host-vector-output",
                            "host-vector-payload", "host-cas-output", "bulk-host-source", "bulk-host-destination"})
     RunChild(executable, mode, 77);
+  RunChild(executable, "capture-missing-fpregs", 0);
   RunChild(executable, "default-native", 0, SIGSEGV);
   for (const char* mode : {"prior-checked", "prior-low", "prior-low-zero", "prior-delivery"})
     RunChild(executable, mode, 139);
   RunChild(executable, "adjudication-low", 86);
   RunChild(executable, "adjudication-low-zero", 86);
   rex::initialize_seh();
+  SuccessfulCaptureSnapshots();
   ScalarAndVectorIntent();
   ScalarSplitFaults();
   AtomicIntentAndCompletion();
