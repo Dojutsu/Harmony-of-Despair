@@ -73,3 +73,25 @@ not title stage entry or synchronized game logic. Actual Harmony multiplayer
 stage/gameplay, controller/audio/render behavior and SteamOS hardware validation
 remain separate acceptance requirements. LAN identities and admission do not
 prove ownership of an Xbox account/XUID; no new guarantee is asserted here.
+
+## Scoped gameplay receives
+
+Admitted gameplay sockets reject unknown, pending, revoked and expired native
+sources before returning payload. Datagram recv uses the same receive mutex and
+admission path as recvfrom. A still-open socket keeps its rejection scope after
+the last session owner dies; native close ends that tombstone before reuse.
+
+Linux stages UDP in57..65536 host bytes, including a complete56-byte NAT frame
+plus an oversize byte independently of the guest buffer size. Rejected/internal
+packets do not touch guest memory, and MSG_PEEK cannot loop on their retained
+queue entry.32 filtered packets bound one invocation. Accepted self-process
+copies retain native EFAULT/write-protection/partial-write behavior; ordinary
+unscoped truncation retains its caller-bounded prefix. Other platforms retain
+their existing direct-buffer behavior pending physical qualification.
+
+Prototype proofs pass343 source/output assertions,165 control assertions and
+553 gameplay assertions against the complete release DSO. Independent fixtures
+pass48+33 checks after reproducing the previous failures. These checks establish
+receive admission and output behavior, not per-payload encryption, active on-path
+authentication or synchronized title gameplay. Full-source and hardware results
+are recorded in the parent project's STATUS.md.

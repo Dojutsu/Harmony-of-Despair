@@ -96,7 +96,11 @@ void Reap() {
       for (const auto& peer : scope.authorization.peers)
         if (!PeerCurrent(scope, peer))
           NatProbeRemoveGameplayIdentity(*scope.socket, peer.traversal.attempt_id);
-  std::erase_if(scopes, [](const auto& scope) { return scope.session.expired(); });
+  // An open native socket must retain its fail-closed scope after the session
+  // dies. CloseGameplaySocket releases the tombstone before descriptor reuse.
+  std::erase_if(scopes, [](const auto& scope) {
+    return scope.session.expired() && !scope.socket;
+  });
 }
 
 bool InstallRoutes(Scope& scope) {
@@ -352,7 +356,8 @@ bool IsAuthorizedGameplaySocket(uint64_t socket) {
   return std::any_of(scopes.begin(), scopes.end(), [&](const auto& s) {
     if (s.socket != socket) return false;
     auto session = s.session.lock();
-    return !s.authorization.member_nonce.empty() || (session && s.xuid != session->host_xuid);
+    return s.closed || !session || !s.authorization.member_nonce.empty() ||
+           s.xuid != session->host_xuid;
   });
 }
 

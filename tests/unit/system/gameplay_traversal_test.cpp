@@ -477,3 +477,219 @@ TEST_CASE("XSocket drops an early gameplay packet until its own ACK then normali
   CHECK(uint16_t(source.sin_port)==1000);
 }
 } // namespace rex::system::xam
+
+namespace rex::system::xam {
+TEST_CASE("admitted XSocket refuses unknown and revoked native sources including empty and peek", "[gameplay-source][gameplay][socket][security]") {
+  Udp peer, stranger, rendezvous;
+  XSocket receiver(nullptr);
+  REQUIRE(receiver.Initialize(XSocket::X_AF_INET,XSocket::X_SOCK_DGRAM,XSocket::X_IPPROTO_UDP)==X_STATUS_SUCCESS);
+  N_XSOCKADDR_IN bind_address{};bind_address.sin_family=AF_INET;bind_address.sin_addr=INADDR_ANY;bind_address.sin_port=0;
+  REQUIRE(receiver.Bind(&bind_address,sizeof(bind_address))==X_STATUS_SUCCESS);
+  REQUIRE(receiver.SetNonBlocking(true)==X_STATUS_SUCCESS);
+  sockaddr_in target{};SockLen native_size=sizeof(target);
+  REQUIRE(getsockname(receiver.native_handle(),reinterpret_cast<sockaddr*>(&target),&native_size)==0);
+  target.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+  SessionRegistry registry;auto session=registry.Create(1,"Host",{htonl(INADDR_LOOPBACK),30742},1,3,3);
+  auto auth=Ticket(session);
+  for(auto& entry:auth.peers) entry.traversal.port=rendezvous.address.port;
+  NatProbeAttach(receiver.native_handle(),NatProbeRole::kGameplay,{target.sin_addr.s_addr,ntohs(target.sin_port)});
+  REQUIRE(InstallGameplayAuthorization(session,auth));REQUIRE(BindGameplaySocket(session,1,receiver.native_handle(),1000));
+  auto packet=Registered(auth.peers[0],peer.address);
+  REQUIRE(NatProbeConsume(receiver.native_handle(),packet.data(),56,htonl(INADDR_LOOPBACK),rendezvous.address.port));
+  packet=Registered(auth.peers[0],peer.address,4);
+  REQUIRE(NatProbeConsume(receiver.native_handle(),packet.data(),56,peer.address.ipv4,peer.address.port));
+  auto send=[&](Udp& sender,const char* bytes,int count) {
+    REQUIRE(sendto(sender.socket,bytes,count,0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==count);
+    REQUIRE(receiver.WaitReadable(500));
+  };
+  std::array<uint8_t,8> data{};N_XSOCKADDR_IN source{};uint32_t size=sizeof(source);
+  auto rejected=[&](Udp& sender,int count,uint32_t flags,bool with_source) {
+    CAPTURE(count,flags,with_source);
+    std::memset(&source,0xa5,sizeof(source));size=0x55667788;
+    const auto before=source;data.fill(0x69);const auto before_data=data;
+    send(sender,"bad",count);
+    CHECK(receiver.RecvFrom(data.data(),uint32_t(data.size()),flags,with_source?&source:nullptr,&size)==-1);
+    CHECK(std::memcmp(&source,&before,sizeof(source))==0);CHECK(size==0x55667788);CHECK(data==before_data);
+    CHECK_FALSE(receiver.WaitReadable(0));
+  };
+  for(int count:{0,3})for(uint32_t flags:{0u,uint32_t(MSG_PEEK)})for(bool with_source:{false,true})
+    rejected(stranger,count,flags,with_source);
+  // The recv API must use the same admission and receive ownership path.
+  for(int count:{0,3})for(uint32_t flags:{0u,uint32_t(MSG_PEEK)}) {
+    data.fill(0x69);const auto before_data=data;send(stranger,"bad",count);
+    CHECK(receiver.Recv(data.data(),uint32_t(data.size()),flags)==-1);
+    CHECK(data==before_data);CHECK_FALSE(receiver.WaitReadable(0));
+  }
+  // An allowed empty datagram remains a valid datagram and MSG_PEEK leaves it queued.
+  for(int count:{0,3}) {
+    send(peer,"abc",count);size=sizeof(source);
+    REQUIRE(receiver.RecvFrom(data.data(),uint32_t(data.size()),MSG_PEEK,&source,&size)==count);
+    CHECK(uint32_t(source.sin_addr)==ntohl(auth.peers[0].logical.ipv4));CHECK(uint16_t(source.sin_port)==1000);
+    REQUIRE(receiver.WaitReadable(0));
+    REQUIRE(receiver.RecvFrom(data.data(),uint32_t(data.size()),0,&source,&size)==count);
+    CHECK_FALSE(receiver.WaitReadable(0));
+  }
+  REQUIRE(registry.Leave(session->info.id,2));
+  rejected(peer,3,0,true);rejected(peer,0,MSG_PEEK,false);
+  // Rejected queues yield after32 packets, then continue without admitting bytes.
+  for(int i=0;i<40;++i)send(stranger,"bad",3);
+  const auto begin=Clock::now();
+  CHECK(receiver.RecvFrom(data.data(),uint32_t(data.size()),MSG_PEEK,nullptr,nullptr)==-1);
+  CHECK(Clock::now()-begin<std::chrono::milliseconds(100));CHECK(receiver.WaitReadable(0));
+  CHECK(receiver.RecvFrom(data.data(),uint32_t(data.size()),0,nullptr,nullptr)==-1);
+  CHECK_FALSE(receiver.WaitReadable(0));
+}
+TEST_CASE("unscoped XSocket retains ordinary native source and peek semantics", "[gameplay-source][socket][network]") {
+  Udp peer;XSocket receiver(nullptr);
+  REQUIRE(receiver.Initialize(XSocket::X_AF_INET,XSocket::X_SOCK_DGRAM,XSocket::X_IPPROTO_UDP)==X_STATUS_SUCCESS);
+  N_XSOCKADDR_IN address{};address.sin_family=AF_INET;address.sin_addr=INADDR_ANY;address.sin_port=0;
+  REQUIRE(receiver.Bind(&address,sizeof(address))==X_STATUS_SUCCESS);REQUIRE(receiver.SetNonBlocking(true)==X_STATUS_SUCCESS);
+  sockaddr_in target{};SockLen length=sizeof(target);
+  REQUIRE(getsockname(receiver.native_handle(),reinterpret_cast<sockaddr*>(&target),&length)==0);target.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+  std::array<uint8_t,8> data{};N_XSOCKADDR_IN from{};uint32_t from_length=sizeof(from);
+  for(int count:{0,3}) {
+    REQUIRE(sendto(peer.socket,"abc",count,0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==count);REQUIRE(receiver.WaitReadable(500));
+    REQUIRE(receiver.RecvFrom(data.data(),uint32_t(data.size()),MSG_PEEK,&from,&from_length)==count);
+    CHECK(uint32_t(from.sin_addr)==INADDR_LOOPBACK);CHECK(uint16_t(from.sin_port)==peer.address.port);
+    REQUIRE(receiver.WaitReadable(0));REQUIRE(receiver.RecvFrom(data.data(),uint32_t(data.size()),0,&from,&from_length)==count);
+    CHECK_FALSE(receiver.WaitReadable(0));
+  }
+}
+}
+namespace rex::system::xam {
+TEST_CASE("XSocket filtered NAT control and pending payload cannot spin under peek", "[gameplay-control-peek][gameplay][socket][security]") {
+  Udp peer, rendezvous;XSocket receiver(nullptr);
+  REQUIRE(receiver.Initialize(XSocket::X_AF_INET,XSocket::X_SOCK_DGRAM,XSocket::X_IPPROTO_UDP)==X_STATUS_SUCCESS);
+  N_XSOCKADDR_IN address{};address.sin_family=AF_INET;address.sin_addr=INADDR_ANY;address.sin_port=0;
+  REQUIRE(receiver.Bind(&address,sizeof(address))==X_STATUS_SUCCESS);REQUIRE(receiver.SetNonBlocking(true)==X_STATUS_SUCCESS);
+  sockaddr_in target{};SockLen length=sizeof(target);REQUIRE(getsockname(receiver.native_handle(),reinterpret_cast<sockaddr*>(&target),&length)==0);target.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+  SessionRegistry registry;auto session=registry.Create(1,"Host",{htonl(INADDR_LOOPBACK),30742},1,3,3);auto auth=Ticket(session);
+  for(auto& entry:auth.peers)entry.traversal.port=rendezvous.address.port;
+  NatProbeAttach(receiver.native_handle(),NatProbeRole::kGameplay,{target.sin_addr.s_addr,ntohs(target.sin_port)});
+  REQUIRE(InstallGameplayAuthorization(session,auth));REQUIRE(BindGameplaySocket(session,1,receiver.native_handle(),1000));
+  auto packet=Registered(auth.peers[0],peer.address);
+  REQUIRE(sendto(rendezvous.socket,reinterpret_cast<char*>(packet.data()),int(packet.size()),0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==56);
+  REQUIRE(receiver.WaitReadable(500));
+  std::array<uint8_t,128> data{};N_XSOCKADDR_IN source{};uint32_t size=sizeof(source);
+  const auto begin=Clock::now();CHECK(receiver.RecvFrom(data.data(),uint32_t(data.size()),MSG_PEEK,&source,&size)==-1);
+  CHECK(Clock::now()-begin<std::chrono::milliseconds(100));CHECK_FALSE(receiver.WaitReadable(0));
+  REQUIRE(NatProbeIsPendingGameplaySource(receiver.native_handle(),peer.address));
+  REQUIRE(sendto(peer.socket,"abc",3,0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==3);REQUIRE(receiver.WaitReadable(500));
+  CHECK(receiver.RecvFrom(data.data(),uint32_t(data.size()),MSG_PEEK,&source,&size)==-1);CHECK_FALSE(receiver.WaitReadable(0));
+  packet=Registered(auth.peers[0],peer.address,4);
+  REQUIRE(sendto(peer.socket,reinterpret_cast<char*>(packet.data()),int(packet.size()),0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==56);
+  REQUIRE(receiver.WaitReadable(500));CHECK(receiver.RecvFrom(data.data(),uint32_t(data.size()),MSG_PEEK,&source,&size)==-1);CHECK_FALSE(receiver.WaitReadable(0));
+  CHECK_FALSE(NatProbeIsPendingGameplaySource(receiver.native_handle(),peer.address));
+  REQUIRE(sendto(peer.socket,"abc",3,0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==3);REQUIRE(receiver.WaitReadable(500));
+  REQUIRE(receiver.RecvFrom(data.data(),uint32_t(data.size()),MSG_PEEK,&source,&size)==3);CHECK(receiver.WaitReadable(0));
+  REQUIRE(receiver.RecvFrom(data.data(),uint32_t(data.size()),0,&source,&size)==3);CHECK(std::memcmp(data.data(),"abc",3)==0);
+}
+}
+namespace rex::system::xam {
+TEST_CASE("open gameplay socket stays scoped after its last session owner dies", "[gameplay-source][gameplay][socket][security]") {
+  Udp stranger;XSocket receiver(nullptr);
+  REQUIRE(receiver.Initialize(XSocket::X_AF_INET,XSocket::X_SOCK_DGRAM,XSocket::X_IPPROTO_UDP)==X_STATUS_SUCCESS);
+  N_XSOCKADDR_IN address{};address.sin_family=AF_INET;address.sin_addr=INADDR_ANY;address.sin_port=0;
+  REQUIRE(receiver.Bind(&address,sizeof(address))==X_STATUS_SUCCESS);REQUIRE(receiver.SetNonBlocking(true)==X_STATUS_SUCCESS);
+  sockaddr_in target{};SockLen length=sizeof(target);REQUIRE(getsockname(receiver.native_handle(),reinterpret_cast<sockaddr*>(&target),&length)==0);target.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+  SessionRegistry registry;auto session=registry.Create(1,"Host",{htonl(INADDR_LOOPBACK),30742},1,3,3);auto auth=Ticket(session);
+  NatProbeAttach(receiver.native_handle(),NatProbeRole::kGameplay,{target.sin_addr.s_addr,ntohs(target.sin_port)});
+  REQUIRE(InstallGameplayAuthorization(session,auth));REQUIRE(BindGameplaySocket(session,1,receiver.native_handle(),1000));
+  std::weak_ptr<SessionRecord> weak=session;REQUIRE(registry.Delete(session->info.id));session.reset();REQUIRE(weak.expired());
+  REQUIRE(IsAuthorizedGameplaySocket(receiver.native_handle()));
+  std::array<uint8_t,8> data{};data.fill(0x69);const auto before=data;
+  REQUIRE(sendto(stranger.socket,"bad",3,0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==3);REQUIRE(receiver.WaitReadable(500));
+  CHECK(receiver.Recv(data.data(),uint32_t(data.size()),MSG_PEEK)==-1);CHECK(data==before);CHECK_FALSE(receiver.WaitReadable(0));
+  // Native close ends the tombstone, including if the descriptor is reused.
+  const auto old=receiver.native_handle();REQUIRE(receiver.Close()==X_STATUS_SUCCESS);CHECK_FALSE(IsAuthorizedGameplaySocket(old));
+  REQUIRE(receiver.Initialize(XSocket::X_AF_INET,XSocket::X_SOCK_DGRAM,XSocket::X_IPPROTO_UDP)==X_STATUS_SUCCESS);
+  REQUIRE(receiver.Bind(&address,sizeof(address))==X_STATUS_SUCCESS);REQUIRE(receiver.SetNonBlocking(true)==X_STATUS_SUCCESS);
+  CHECK_FALSE(IsAuthorizedGameplaySocket(receiver.native_handle()));length=sizeof(target);
+  REQUIRE(getsockname(receiver.native_handle(),reinterpret_cast<sockaddr*>(&target),&length)==0);target.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+  REQUIRE(sendto(stranger.socket,"abc",3,0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==3);REQUIRE(receiver.WaitReadable(500));
+  REQUIRE(receiver.Recv(data.data(),uint32_t(data.size()),0)==3);CHECK(std::memcmp(data.data(),"abc",3)==0);
+}
+#if REX_PLATFORM_GNU_LINUX
+TEST_CASE("staged UDP retains kernel EFAULT for an invalid output buffer", "[gameplay-source][socket][linux]") {
+  Udp peer;XSocket receiver(nullptr);
+  REQUIRE(receiver.Initialize(XSocket::X_AF_INET,XSocket::X_SOCK_DGRAM,XSocket::X_IPPROTO_UDP)==X_STATUS_SUCCESS);
+  N_XSOCKADDR_IN address{};address.sin_family=AF_INET;address.sin_addr=INADDR_ANY;address.sin_port=0;
+  REQUIRE(receiver.Bind(&address,sizeof(address))==X_STATUS_SUCCESS);REQUIRE(receiver.SetNonBlocking(true)==X_STATUS_SUCCESS);
+  sockaddr_in target{};SockLen length=sizeof(target);REQUIRE(getsockname(receiver.native_handle(),reinterpret_cast<sockaddr*>(&target),&length)==0);target.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+  for(uint32_t flags:{0u,uint32_t(MSG_PEEK)}) {
+    REQUIRE(sendto(peer.socket,"abc",3,0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==3);REQUIRE(receiver.WaitReadable(500));
+    N_XSOCKADDR_IN source{};std::memset(&source,0xa5,sizeof(source));const auto before=source;uint32_t size=0x77889911;
+    CHECK(receiver.RecvFrom(reinterpret_cast<uint8_t*>(8),8,flags,&source,&size)==-1);CHECK(errno==EFAULT);
+    CHECK(std::memcmp(&source,&before,sizeof(source))==0);CHECK(size==0x77889911);
+    if(flags&MSG_PEEK){std::array<uint8_t,8> valid{};REQUIRE(receiver.Recv(valid.data(),uint32_t(valid.size()),0)==3);}
+  }
+}
+#endif
+}
+namespace rex::system::xam {
+TEST_CASE("XSocket processes complete NAT control independently of guest receive capacity", "[gameplay-small-control][gameplay][socket][security]") {
+  for(uint32_t capacity:{0u,1u,8u,128u}) {
+  CAPTURE(capacity);
+  Udp peer, rendezvous;XSocket receiver(nullptr);
+  REQUIRE(receiver.Initialize(XSocket::X_AF_INET,XSocket::X_SOCK_DGRAM,XSocket::X_IPPROTO_UDP)==X_STATUS_SUCCESS);
+  N_XSOCKADDR_IN address{};address.sin_family=AF_INET;address.sin_addr=INADDR_ANY;address.sin_port=0;
+  REQUIRE(receiver.Bind(&address,sizeof(address))==X_STATUS_SUCCESS);REQUIRE(receiver.SetNonBlocking(true)==X_STATUS_SUCCESS);
+  sockaddr_in target{};SockLen length=sizeof(target);REQUIRE(getsockname(receiver.native_handle(),reinterpret_cast<sockaddr*>(&target),&length)==0);target.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+  SessionRegistry registry;auto session=registry.Create(1,"Host",{htonl(INADDR_LOOPBACK),30742},1,3,3);auto auth=Ticket(session);
+  for(auto& entry:auth.peers)entry.traversal.port=rendezvous.address.port;
+  NatProbeAttach(receiver.native_handle(),NatProbeRole::kGameplay,{target.sin_addr.s_addr,ntohs(target.sin_port)});
+  REQUIRE(InstallGameplayAuthorization(session,auth));REQUIRE(BindGameplaySocket(session,1,receiver.native_handle(),1000));
+  auto packet=Registered(auth.peers[0],peer.address);
+  REQUIRE(sendto(rendezvous.socket,reinterpret_cast<char*>(packet.data()),int(packet.size()),0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==56);
+  REQUIRE(receiver.WaitReadable(500));
+  std::array<uint8_t,128> data{};N_XSOCKADDR_IN source{};uint32_t size=sizeof(source);
+  const auto begin=Clock::now();CHECK(receiver.RecvFrom(data.data(),capacity,MSG_PEEK,&source,&size)==-1);
+  CHECK(Clock::now()-begin<std::chrono::milliseconds(100));CHECK_FALSE(receiver.WaitReadable(0));
+  REQUIRE(NatProbeIsPendingGameplaySource(receiver.native_handle(),peer.address));
+  REQUIRE(sendto(peer.socket,"abc",3,0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==3);REQUIRE(receiver.WaitReadable(500));
+  CHECK(receiver.RecvFrom(data.data(),capacity,MSG_PEEK,&source,&size)==-1);CHECK_FALSE(receiver.WaitReadable(0));
+  packet=Registered(auth.peers[0],peer.address,4);
+  REQUIRE(sendto(peer.socket,reinterpret_cast<char*>(packet.data()),int(packet.size()),0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==56);
+  REQUIRE(receiver.WaitReadable(500));CHECK(receiver.RecvFrom(data.data(),capacity,MSG_PEEK,&source,&size)==-1);CHECK_FALSE(receiver.WaitReadable(0));
+  CHECK_FALSE(NatProbeIsPendingGameplaySource(receiver.native_handle(),peer.address));
+  REQUIRE(sendto(peer.socket,"abc",3,0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==3);REQUIRE(receiver.WaitReadable(500));
+  REQUIRE(receiver.RecvFrom(data.data(),uint32_t(data.size()),MSG_PEEK,&source,&size)==3);CHECK(receiver.WaitReadable(0));
+  REQUIRE(receiver.RecvFrom(data.data(),uint32_t(data.size()),0,&source,&size)==3);CHECK(std::memcmp(data.data(),"abc",3)==0);
+  }
+}
+}
+#if REX_PLATFORM_GNU_LINUX
+#include <sys/mman.h>
+#include <limits>
+namespace rex::system::xam {
+TEST_CASE("staged UDP preserves ordinary truncation and bounded output writes", "[gameplay-source][socket][linux]") {
+  Udp peer;XSocket receiver(nullptr);
+  REQUIRE(receiver.Initialize(XSocket::X_AF_INET,XSocket::X_SOCK_DGRAM,XSocket::X_IPPROTO_UDP)==X_STATUS_SUCCESS);
+  N_XSOCKADDR_IN address{};address.sin_family=AF_INET;address.sin_addr=INADDR_ANY;address.sin_port=0;
+  REQUIRE(receiver.Bind(&address,sizeof(address))==X_STATUS_SUCCESS);REQUIRE(receiver.SetNonBlocking(true)==X_STATUS_SUCCESS);
+  sockaddr_in target{};SockLen length=sizeof(target);REQUIRE(getsockname(receiver.native_handle(),reinterpret_cast<sockaddr*>(&target),&length)==0);target.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+  auto send=[&] {REQUIRE(sendto(peer.socket,"abc",3,0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==3);REQUIRE(receiver.WaitReadable(500));};
+  std::array<uint8_t,8> data{};N_XSOCKADDR_IN source{};uint32_t source_size=0x11223344;
+  for(uint32_t flags:{0u,uint32_t(MSG_PEEK)}) {
+    data.fill(0x69);std::memset(&source,0xa5,sizeof(source));const auto before=source;source_size=0x11223344;send();
+    CHECK(receiver.RecvFrom(data.data(),2,flags,&source,&source_size)==-1);CHECK(errno==EMSGSIZE);
+    CHECK(data[0]=='a');CHECK(data[1]=='b');for(size_t i=2;i<data.size();++i)CHECK(data[i]==0x69);
+    CHECK(std::memcmp(&source,&before,sizeof(source))==0);CHECK(source_size==0x11223344);
+    CHECK(receiver.WaitReadable(0)==bool(flags&MSG_PEEK));
+    if(flags&MSG_PEEK)REQUIRE(receiver.Recv(data.data(),uint32_t(data.size()),0)==3);
+  }
+  // A huge caller declaration does not allocate huge host staging or copy beyond the datagram.
+  data.fill(0x69);send();REQUIRE(receiver.Recv(data.data(),std::numeric_limits<uint32_t>::max(),0)==3);
+  CHECK(std::memcmp(data.data(),"abc",3)==0);for(size_t i=3;i<data.size();++i)CHECK(data[i]==0x69);
+  const auto page=sysconf(_SC_PAGESIZE);REQUIRE(page>0);REQUIRE(page<=1024*1024);
+  auto* protected_output=static_cast<uint8_t*>(mmap(nullptr,size_t(page)*2,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0));
+  REQUIRE(protected_output!=MAP_FAILED);protected_output[0]=0x69;
+  REQUIRE(mprotect(protected_output,size_t(page),PROT_READ)==0);send();
+  CHECK(receiver.Recv(protected_output,8,0)==-1);CHECK(errno==EFAULT);CHECK(protected_output[0]==0x69);
+  REQUIRE(mprotect(protected_output,size_t(page),PROT_READ|PROT_WRITE)==0);
+  REQUIRE(mprotect(protected_output+page,size_t(page),PROT_NONE)==0);send();
+  CHECK(receiver.Recv(protected_output+page-1,3,0)==-1);CHECK(errno==EFAULT);
+  REQUIRE(munmap(protected_output,size_t(page)*2)==0);
+}
+}
+#endif

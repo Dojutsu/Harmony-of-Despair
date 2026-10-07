@@ -12,6 +12,7 @@
 #include <array>
 #include <climits>
 #include <cstring>
+#include <vector>
 
 #include <rex/kernel/xam/module.h>
 #include <rex/logging.h>
@@ -38,6 +39,10 @@
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#if REX_PLATFORM_GNU_LINUX
+#include <sys/uio.h>
+#include <unistd.h>
+#endif
 #endif
 
 namespace rex::system {
@@ -321,6 +326,7 @@ int XSocket::Shutdown(int how) {
 }
 
 int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
+  if (type_ == X_SOCK_DGRAM) return RecvFrom(buf, buf_len, flags, nullptr, nullptr);
 #if REX_PLATFORM_GNU_LINUX
   const int result = recv(native_handle(), reinterpret_cast<char*>(buf), buf_len,
                            flags | (type_ == X_SOCK_DGRAM ? MSG_TRUNC : 0));
@@ -360,37 +366,108 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
   }
   */
 
+  // Native IPv4 UDP cannot exceed 65535 bytes. Stage datagrams on the host
+  // so control, pending, unknown and revoked peers never write guest memory.
+  // Stage ordinary UDP too: membership may become scoped during this receive.
+  // Keep a complete56-byte NAT control frame plus one oversize byte, even
+  // when the guest requests fewer bytes or only polls with a zero-length buffer.
+#if REX_PLATFORM_GNU_LINUX
+  const uint32_t receive_capacity = type_ == X_SOCK_DGRAM
+      ? std::clamp<uint32_t>(buf_len, 57u, 65536u) : buf_len;
+  std::vector<uint8_t> receive_storage(type_ == X_SOCK_DGRAM ? receive_capacity : 0);
+  uint8_t* receive_data = type_ == X_SOCK_DGRAM ? receive_storage.data() : buf;
+#else
+  // Other platforms retain their native direct-buffer contract until qualified.
+  const uint32_t receive_capacity = buf_len;
+  uint8_t* receive_data = buf;
+#endif
+  auto copy_received = [&](size_t count) {
+#if REX_PLATFORM_GNU_LINUX
+    if (!count || type_ != X_SOCK_DGRAM) return true;
+    // A userspace memcpy would turn a native EFAULT into a host crash or bypass
+    // kernel partial-write semantics. Copy only within this exact process.
+    iovec local{receive_data, count}, remote{buf, count};
+    const auto written = process_vm_writev(getpid(), &local, 1, &remote, 1, 0);
+    if (written == static_cast<ssize_t>(count)) return true;
+    errno = EFAULT;
+    return false;
+#else
+    return true;
+#endif
+  };
+  uint32_t filtered_datagrams = 0;
+  auto reject_datagram = [&] {
+    // Protocol/control or unadmitted bytes are invisible to guest MSG_PEEK.
+    // Consume the already inspected datagram rather than peeking it forever.
+    if (flags & MSG_PEEK) {
+      const int discarded = recvfrom(native_handle(), reinterpret_cast<char*>(receive_data), receive_capacity,
+                                    flags & ~MSG_PEEK, nullptr, nullptr);
+      if (discarded < 0) {
+#if REX_PLATFORM_WIN32
+        if (WSAGetLastError() != WSAEMSGSIZE) return false;
+#else
+        if (errno != EMSGSIZE) return false;
+#endif
+      }
+    }
+    // A sustained control/hostile queue must not monopolize the receive lock.
+    if (++filtered_datagrams < 32) return true;
+#if REX_PLATFORM_WIN32
+    WSASetLastError(WSAEWOULDBLOCK);
+#else
+    errno = EWOULDBLOCK;
+#endif
+    return false;
+  };
+
 retry_native_receive:
   xam::NatProbeTick(native_handle());
-  sockaddr_in nfrom;
+  sockaddr_in nfrom{};
   socklen_t nfromlen = sizeof(sockaddr_in);
-  int ret = recvfrom(native_handle(), reinterpret_cast<char*>(buf), buf_len,
+  int ret = recvfrom(native_handle(), reinterpret_cast<char*>(receive_data), receive_capacity,
 #if REX_PLATFORM_GNU_LINUX
                      flags | (type_ == X_SOCK_DGRAM ? MSG_TRUNC : 0),
 #else
                      flags,
 #endif
                      (sockaddr*)&nfrom, &nfromlen);
+  if (ret < 0) return ret;
+  if (ret > 0 && uint32_t(ret) <= receive_capacity &&
+      xam::NatProbeConsume(native_handle(), receive_data, ret, nfrom.sin_addr.s_addr,
+                                      ntohs(nfrom.sin_port))) {
+    if (!reject_datagram()) return -1;
+    goto retry_native_receive;
+  }
+  if (ret >= 0 && xam::NatProbeIsPendingGameplaySource(native_handle(),
+          {nfrom.sin_addr.s_addr, ntohs(nfrom.sin_port)})) {
+    if (!reject_datagram()) return -1;
+    goto retry_native_receive;
+  }
+  const uint16_t source_port = ret >= 0 ? ntohs(nfrom.sin_port) : 0;
+  const xam::LanAddress native_source{ret >= 0 ? nfrom.sin_addr.s_addr : 0, source_port};
+  // Reap expired/revoked membership before consulting its native route.
+  const bool scoped = xam::IsAuthorizedGameplaySocket(native_handle());
+  std::optional<xam::LanAddress> logical;
+  if (ret >= 0) {
+    logical = xam::NatProbeNormalizeGameplaySource(native_handle(), native_source);
+    if (scoped && !logical) {
+      if (!reject_datagram()) return -1;
+      goto retry_native_receive;
+    }
+  }
 #if REX_PLATFORM_GNU_LINUX
-  // Winsock rejects oversized UDP after copying the available prefix. Never
-  // authorize NAT/control state from that prefix or report it as game payload.
   if (ret > 0 && uint32_t(ret) > buf_len) {
+    // Preserve ordinary Winsock-style truncation, but scoped errors expose no bytes.
+    if (type_ == X_SOCK_DGRAM && !scoped && buf_len &&
+        !copy_received(std::min<uint32_t>(buf_len, uint32_t(ret)))) return -1;
     errno = EMSGSIZE;
     return -1;
   }
 #endif
-  if (ret > 0 && xam::NatProbeConsume(native_handle(), buf, ret, nfrom.sin_addr.s_addr,
-                                      ntohs(nfrom.sin_port))) {
-    goto retry_native_receive;
-  }
-  if (ret > 0 && xam::NatProbeIsPendingGameplaySource(native_handle(),
-          {nfrom.sin_addr.s_addr, ntohs(nfrom.sin_port)}))
-    goto retry_native_receive;
+  if (ret > 0 && !copy_received(size_t(ret))) return -1;
   if (ret >= 0 && from) {
     from->sin_family = nfrom.sin_family;
-    const uint16_t source_port = ntohs(nfrom.sin_port);
-    const xam::LanAddress native_source{nfrom.sin_addr.s_addr, source_port};
-    if (auto logical = xam::NatProbeNormalizeGameplaySource(native_handle(), native_source)) {
+    if (logical) {
       xam::NatProbeRecordGameplayTraffic(native_handle(), native_source, size_t(ret), false);
       from->sin_addr = ntohl(logical->ipv4);
       from->sin_port = logical->port;
