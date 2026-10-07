@@ -12,7 +12,10 @@
 
 #include <atomic>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <queue>
+#include <shared_mutex>
 
 #include <rex/math.h>
 #include <rex/system/xobject.h>
@@ -26,7 +29,7 @@ struct XSOCKADDR {
 };
 
 struct N_XSOCKADDR {
-  N_XSOCKADDR() {}
+  N_XSOCKADDR() : address_family(0), sa_data{} {}
   N_XSOCKADDR(const XSOCKADDR* other) { *this = *other; }
   N_XSOCKADDR& operator=(const XSOCKADDR& other) {
     address_family = other.address_family;
@@ -50,7 +53,7 @@ struct XSOCKADDR_IN {
 
 // Xenia native sockaddr_in
 struct N_XSOCKADDR_IN {
-  N_XSOCKADDR_IN() {}
+  N_XSOCKADDR_IN() : sin_family(0), sin_port(0), sin_addr(0), x_sin_zero{} {}
   N_XSOCKADDR_IN(const XSOCKADDR_IN* other) { *this = *other; }
   N_XSOCKADDR_IN& operator=(const XSOCKADDR_IN& other) {
     sin_family = other.sin_family;
@@ -69,7 +72,23 @@ struct N_XSOCKADDR_IN {
 };
 
 class XSocket : public XObject {
+  struct NativeSocketState;
  public:
+  // Host operations hold the original native descriptor until they return.
+  // Logical close retires the lease and wakes waits before descriptor reuse.
+  class NativeLease {
+   public:
+    NativeLease() = default;
+    uint64_t handle() const noexcept;
+    int cancellation_handle() const noexcept;
+    bool retired() const noexcept;
+    explicit operator bool() const noexcept { return !retired(); }
+   private:
+    friend class XSocket;
+    explicit NativeLease(std::shared_ptr<NativeSocketState> state) : state_(std::move(state)) {}
+    std::shared_ptr<NativeSocketState> state_;
+  };
+  NativeLease AcquireNativeLease() const;
   static const XObject::Type kObjectType = XObject::Type::Socket;
 
   enum AddressFamily {
@@ -136,12 +155,18 @@ class XSocket : public XObject {
   bool QueuePacket(uint32_t src_ip, uint16_t src_port, const uint8_t* buf, size_t len);
 
  private:
-  XSocket(KernelState* kernel_state, uint64_t native_handle);
+  XSocket(KernelState* kernel_state, std::shared_ptr<NativeSocketState> state);
+  bool WaitReadableNative(const NativeLease&, uint32_t timeout_ms, bool infinite) const;
+  int RecvFromNative(const NativeLease&, uint8_t* buf, uint32_t buf_len, uint32_t flags,
+                     N_XSOCKADDR_IN* from, uint32_t* from_len);
   std::atomic<uint64_t> native_handle_{uint64_t(-1)};
+  mutable std::mutex native_lifetime_mutex_;
+  std::shared_ptr<NativeSocketState> native_state_;
+  std::weak_ptr<NativeSocketState> retired_state_;
 
-  AddressFamily af_;    // Address family
-  Type type_;           // Type (DGRAM/Stream/etc)
-  Protocol proto_;      // Protocol (TCP/UDP/etc)
+  AddressFamily af_ = X_AF_INET;    // Address family
+  Type type_ = X_SOCK_STREAM;           // Type (DGRAM/Stream/etc)
+  Protocol proto_ = X_IPPROTO_TCP;      // Protocol (TCP/UDP/etc)
   bool secure_ = true;  // Secure socket (encryption enabled)
 
   bool bound_ = false;  // Explicitly bound to an IP address?
@@ -156,6 +181,8 @@ class XSocket : public XObject {
   std::unique_ptr<rex::thread::Event> event_;
   std::mutex incoming_packet_mutex_;
   std::mutex native_receive_mutex_;
+  std::mutex native_configuration_mutex_;
+  std::shared_mutex native_connect_window_mutex_;
   std::queue<uint8_t*> incoming_packets_;
 };
 

@@ -307,7 +307,9 @@ bool TryCompleteRecvFrom(PendingRecvFrom& pending, bool wait) {
 
 #if REX_PLATFORM_WIN32
   u_long available = 0;
-  if (ioctlsocket(static_cast<SOCKET>(socket->native_handle()), FIONREAD, &available) == 0 &&
+  const auto diagnostic_operation = socket->AcquireNativeLease();
+  if (diagnostic_operation &&
+      ioctlsocket(static_cast<SOCKET>(diagnostic_operation.handle()), FIONREAD, &available) == 0 &&
       available != 0 && !pending.readiness_logged) {
     pending.readiness_logged = true;
     REXKRNL_INFO(
@@ -1352,6 +1354,13 @@ struct x_fd_set {
 struct host_set {
   uint32_t count;
   object_ref<XSocket> sockets[64];
+  X_HANDLE guest_handles[64];
+  XSocket::NativeLease operations[64];
+
+  bool Retired() const {
+    for (uint32_t i = 0; i < count; ++i) if (operations[i].retired()) return true;
+    return false;
+  }
 
   bool Load(const x_fd_set* guest_set) {
     const uint32_t supplied = guest_set->fd_count;
@@ -1363,15 +1372,19 @@ struct host_set {
     for (uint32_t i = 0; i < supplied; ++i) {
       const auto socket_handle = static_cast<X_HANDLE>(guest_set->fd_array[i]);
       auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
-      if (!socket || socket->native_handle() == uint64_t(-1)) {
+      auto operation = socket ? socket->AcquireNativeLease() : XSocket::NativeLease{};
+      if (!operation) {
         XThread::SetLastError(10038);
         return false;
       }
       bool duplicate = false;
       for (uint32_t j = 0; j < this->count; ++j)
-        duplicate |= this->sockets[j]->handle() == socket_handle;
-      if (!duplicate)
-        this->sockets[this->count++] = socket;
+        duplicate |= this->guest_handles[j] == socket_handle;
+      if (!duplicate) {
+        this->guest_handles[this->count] = socket_handle;
+        this->sockets[this->count] = socket;
+        this->operations[this->count++] = std::move(operation);
+      }
     }
     return true;
   }
@@ -1379,15 +1392,14 @@ struct host_set {
   void Store(x_fd_set* guest_set) {
     guest_set->fd_count = 0;
     for (uint32_t i = 0; i < this->count; ++i) {
-      auto socket = this->sockets[i];
-      guest_set->fd_array[guest_set->fd_count++] = socket->handle();
+      guest_set->fd_array[guest_set->fd_count++] = this->guest_handles[i];
     }
   }
 
   void Store(fd_set* native_set) {
     FD_ZERO(native_set);
     for (uint32_t i = 0; i < this->count; ++i) {
-      FD_SET(this->sockets[i]->native_handle(), native_set);
+      FD_SET(this->operations[i].handle(), native_set);
     }
   }
 
@@ -1395,7 +1407,9 @@ struct host_set {
     uint32_t new_count = 0;
     for (uint32_t i = 0; i < this->count; ++i) {
       auto socket = this->sockets[i];
-      if (FD_ISSET(socket->native_handle(), native_set)) {
+      if (FD_ISSET(this->operations[i].handle(), native_set)) {
+        this->operations[new_count] = this->operations[i];
+        this->guest_handles[new_count] = this->guest_handles[i];
         this->sockets[new_count++] = socket;
       }
     }
@@ -1433,7 +1447,7 @@ i32 NetDll_select_entry(i32 caller, i32 nfds, ppc_ptr_t<x_fd_set> readfds,
   std::vector<pollfd> descriptors;
   auto append = [&](const host_set& set, short events) {
     for (uint32_t i = 0; i < set.count; ++i) {
-      const int descriptor = static_cast<int>(set.sockets[i]->native_handle());
+      const int descriptor = static_cast<int>(set.operations[i].handle());
       auto found = std::find_if(descriptors.begin(), descriptors.end(),
                                [&](const auto& value) { return value.fd == descriptor; });
       if (found == descriptors.end()) descriptors.push_back({descriptor, events, 0});
@@ -1443,6 +1457,18 @@ i32 NetDll_select_entry(i32 caller, i32 nfds, ppc_ptr_t<x_fd_set> readfds,
   append(host_readfds, POLLIN);
   append(host_writefds, POLLOUT);
   append(host_exceptfds, POLLPRI);
+  auto append_cancellation = [&](const host_set& set) {
+    for (uint32_t i = 0; i < set.count; ++i) {
+      const int descriptor = set.operations[i].cancellation_handle();
+      if (descriptor < 0) continue;
+      if (std::none_of(descriptors.begin(), descriptors.end(),
+                      [&](const auto& value) { return value.fd == descriptor; }))
+        descriptors.push_back({descriptor, POLLIN, 0});
+    }
+  };
+  append_cancellation(host_readfds);
+  append_cancellation(host_writefds);
+  append_cancellation(host_exceptfds);
   timespec timeout{seconds, static_cast<long>(microseconds) * 1000};
   const int result = ppoll(descriptors.data(), descriptors.size(),
                            timeout_ptr ? &timeout : nullptr, nullptr);
@@ -1450,7 +1476,8 @@ i32 NetDll_select_entry(i32 caller, i32 nfds, ppc_ptr_t<x_fd_set> readfds,
     XThread::SetLastError(LastSocketError());
     return -1;
   }
-  if (std::any_of(descriptors.begin(), descriptors.end(),
+  if (host_readfds.Retired() || host_writefds.Retired() || host_exceptfds.Retired() ||
+      std::any_of(descriptors.begin(), descriptors.end(),
                   [](const auto& value) { return value.revents & POLLNVAL; })) {
     XThread::SetLastError(10038);
     return -1;
@@ -1458,11 +1485,14 @@ i32 NetDll_select_entry(i32 caller, i32 nfds, ppc_ptr_t<x_fd_set> readfds,
   auto update = [&](host_set& set, short ready) {
     uint32_t new_count = 0;
     for (uint32_t i = 0; i < set.count; ++i) {
-      const int descriptor = static_cast<int>(set.sockets[i]->native_handle());
+      const int descriptor = static_cast<int>(set.operations[i].handle());
       const auto found = std::find_if(descriptors.begin(), descriptors.end(),
                                [&](const auto& value) { return value.fd == descriptor; });
-      if (found != descriptors.end() && (found->revents & ready))
+      if (found != descriptors.end() && (found->revents & ready)) {
+        set.operations[new_count] = set.operations[i];
+        set.guest_handles[new_count] = set.guest_handles[i];
         set.sockets[new_count++] = set.sockets[i];
+      }
     }
     set.count = new_count;
   };
@@ -1483,6 +1513,10 @@ i32 NetDll_select_entry(i32 caller, i32 nfds, ppc_ptr_t<x_fd_set> readfds,
                    exceptfds ? &native_exceptfds : nullptr, timeout_ptr ? &timeout : nullptr);
   if (ret < 0) {
     XThread::SetLastError(LastSocketError());
+    return -1;
+  }
+  if (host_readfds.Retired() || host_writefds.Retired() || host_exceptfds.Retired()) {
+    XThread::SetLastError(10038);
     return -1;
   }
   if (readfds) { host_readfds.UpdateFrom(&native_readfds); host_readfds.Store(readfds); }

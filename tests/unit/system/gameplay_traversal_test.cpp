@@ -693,3 +693,38 @@ TEST_CASE("staged UDP preserves ordinary truncation and bounded output writes", 
 }
 }
 #endif
+
+#if REX_PLATFORM_GNU_LINUX
+namespace rex::system::xam {
+TEST_CASE("retiring gameplay descriptor stays fail closed while a native operation owns it",
+          "[gameplay-source][gameplay][socket][security][retirement]") {
+  XSocket receiver(nullptr);
+  REQUIRE(receiver.Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM, XSocket::X_IPPROTO_UDP) == X_STATUS_SUCCESS);
+  N_XSOCKADDR_IN address{};
+  address.sin_family = AF_INET; address.sin_addr = INADDR_LOOPBACK;
+  REQUIRE(receiver.Bind(&address, sizeof(address)) == X_STATUS_SUCCESS);
+  auto operation = receiver.AcquireNativeLease();
+  REQUIRE(operation);
+  const auto original = operation.handle();
+  SessionRegistry registry;
+  auto session = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 30742}, 1, 3, 3);
+  auto authorization = Ticket(session);
+  NatProbeAttach(original, NatProbeRole::kGameplay,
+                 {htonl(INADDR_LOOPBACK), ntohs(receiver.bound_port())}, &receiver);
+  REQUIRE(InstallGameplayAuthorization(session, authorization));
+  REQUIRE(BindGameplaySocket(session, 1, original, 1000));
+  REQUIRE(IsAuthorizedGameplaySocket(original));
+  REQUIRE(receiver.Close() == X_STATUS_SUCCESS);
+  CHECK(operation.retired());
+  CHECK(receiver.native_handle() == uint64_t(-1));
+  CHECK(IsAuthorizedGameplaySocket(original));
+  CHECK_FALSE(NatProbeNormalizeGameplaySource(original, {htonl(INADDR_LOOPBACK), 49188}));
+  CHECK(fcntl(static_cast<int>(original), F_GETFD) >= 0);
+  operation = {};
+  CHECK_FALSE(IsAuthorizedGameplaySocket(original));
+  CHECK(fcntl(static_cast<int>(original), F_GETFD) == -1);
+  REQUIRE(receiver.Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM, XSocket::X_IPPROTO_UDP) == X_STATUS_SUCCESS);
+  CHECK_FALSE(IsAuthorizedGameplaySocket(receiver.native_handle()));
+}
+}
+#endif

@@ -11,6 +11,7 @@
 
 #include <array>
 #include <climits>
+#include <chrono>
 #include <cstring>
 #include <vector>
 
@@ -41,55 +42,172 @@
 #include <sys/socket.h>
 #if REX_PLATFORM_GNU_LINUX
 #include <sys/uio.h>
+#include <sys/eventfd.h>
 #include <unistd.h>
 #endif
 #endif
 
 namespace rex::system {
 
+namespace {
+int ClosedNativeSocket() {
+#if REX_PLATFORM_WIN32
+  WSASetLastError(WSAENOTSOCK);
+#else
+  errno = ENOTSOCK;
+#endif
+  return -1;
+}
+}  // namespace
+
+struct XSocket::NativeSocketState {
+  explicit NativeSocketState(uint64_t value) : handle(value) {
+#if REX_PLATFORM_GNU_LINUX
+    cancellation = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+#endif
+  }
+  ~NativeSocketState() {
+#if REX_PLATFORM_WIN32
+    const int error = WSAGetLastError();
+#else
+    const int error = errno;
+#endif
+    Finalize();
+#if REX_PLATFORM_GNU_LINUX
+    if (cancellation >= 0) ::close(cancellation);
+#endif
+#if REX_PLATFORM_WIN32
+    WSASetLastError(error);
+#else
+    errno = error;
+#endif
+  }
+  bool valid() const {
+#if REX_PLATFORM_GNU_LINUX
+    return cancellation >= 0;
+#else
+    return true;
+#endif
+  }
+  int Finalize() {
+    if (finalized.exchange(true, std::memory_order_acq_rel)) return 0;
+    // Admission tombstones and descriptor identity survive every native lease.
+    // Close detaches the NAT worker before dropping its own final reference.
+    xam::CloseGameplaySocket(handle);
+    const int result = rex::net::socket_close(handle);
+    if (result != 0) REXSYS_ERROR("XSocket: native retirement failed socket={}", handle);
+    return result;
+  }
+  const uint64_t handle;
+  std::atomic<bool> retired{false};
+  std::atomic<bool> finalized{false};
+  int cancellation = -1;
+};
+
+uint64_t XSocket::NativeLease::handle() const noexcept {
+  return state_ ? state_->handle : uint64_t(-1);
+}
+int XSocket::NativeLease::cancellation_handle() const noexcept {
+  return state_ ? state_->cancellation : -1;
+}
+bool XSocket::NativeLease::retired() const noexcept {
+  return !state_ || state_->retired.load(std::memory_order_acquire);
+}
+XSocket::NativeLease XSocket::AcquireNativeLease() const {
+  std::lock_guard lock(native_lifetime_mutex_);
+  if (!native_state_ || native_state_->retired.load(std::memory_order_acquire)) {
+    ClosedNativeSocket();
+    return {};
+  }
+  return NativeLease(native_state_);
+}
+
 XSocket::XSocket(KernelState* kernel_state) : XObject(kernel_state, kObjectType) {}
 
-XSocket::XSocket(KernelState* kernel_state, uint64_t native_handle)
-    : XObject(kernel_state, kObjectType), native_handle_(native_handle) {}
+XSocket::XSocket(KernelState* kernel_state, std::shared_ptr<NativeSocketState> state)
+    : XObject(kernel_state, kObjectType), native_state_(std::move(state)) {
+  native_handle_.store(native_state_->handle, std::memory_order_release);
+}
 
 XSocket::~XSocket() {
   Close();
 }
 
 X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
+  std::lock_guard lock(native_lifetime_mutex_);
+  if (native_state_ || !retired_state_.expired()) {
+    ClosedNativeSocket();
+    return X_STATUS_UNSUCCESSFUL;
+  }
+  const auto handle = socket(af, type
+#if REX_PLATFORM_GNU_LINUX
+      | SOCK_CLOEXEC
+#endif
+      , proto == Protocol::X_IPPROTO_VDP ? Protocol::X_IPPROTO_UDP : proto);
+  if (handle == decltype(handle)(-1)) return X_STATUS_UNSUCCESSFUL;
+  std::shared_ptr<NativeSocketState> state;
+  try { state = std::make_shared<NativeSocketState>(handle); }
+  catch (const std::bad_alloc&) {
+    rex::net::socket_close(handle);
+#if REX_PLATFORM_WIN32
+    WSASetLastError(WSAENOBUFS);
+#else
+    errno = ENOMEM;
+#endif
+    return X_STATUS_UNSUCCESSFUL;
+  }
+  if (!state->valid()) return X_STATUS_UNSUCCESSFUL;
   af_ = af;
   type_ = type;
   proto_ = proto;
-
-  if (proto == Protocol::X_IPPROTO_VDP) {
-    // VDP is a layer on top of UDP.
-    proto = Protocol::X_IPPROTO_UDP;
-  }
-
-  native_handle_.store(socket(af, type, proto), std::memory_order_release);
-  if (native_handle() == -1) {
-    return X_STATUS_UNSUCCESSFUL;
-  }
-
-  REXSYS_INFO("XSocket::Initialize: native={} af={} type={} proto={}", native_handle(),
+  native_state_ = std::move(state);
+  native_handle_.store(handle, std::memory_order_release);
+  REXSYS_INFO("XSocket::Initialize: native={} af={} type={} proto={}", handle,
               uint32_t(af), uint32_t(type), uint32_t(proto));
-
   return X_STATUS_SUCCESS;
 }
 
 X_STATUS XSocket::Close() {
-  // Explicit guest close and XObject destruction must retire the native socket
-  // exactly once. POSIX may immediately reuse this descriptor for another file.
-  const auto handle = native_handle_.exchange(uint64_t(-1), std::memory_order_acq_rel);
-  if (handle == uint64_t(-1))
-    return X_STATUS_SUCCESS;
-  REXSYS_INFO("XSocket::Close: native={}", handle);
-  xam::CloseGameplaySocket(handle);
-  xam::NatProbeDetach(handle);
-  return rex::net::socket_close(handle) == 0 ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;
+  std::shared_ptr<NativeSocketState> state;
+  {
+    std::lock_guard lock(native_lifetime_mutex_);
+    if (!native_state_) return X_STATUS_SUCCESS;
+    state = std::move(native_state_);
+    retired_state_ = state;
+    native_handle_.store(uint64_t(-1), std::memory_order_release);
+    state->retired.store(true, std::memory_order_release);
+  }
+  REXSYS_INFO("XSocket::Close: native={}", state->handle);
+#if REX_PLATFORM_GNU_LINUX
+  const uint64_t wake = 1;
+  ssize_t written;
+  do { written = ::write(state->cancellation, &wake, sizeof(wake)); }
+  while (written < 0 && errno == EINTR);
+  if (written != static_cast<ssize_t>(sizeof(wake)) && errno != EAGAIN)
+    REXSYS_ERROR("XSocket: cancellation wake failed socket={}", state->handle);
+#endif
+  // Never acquire native_receive_mutex_: a blocking receive may own it.
+  // Linux shutdown wakes even an unconnected UDP receive (ENOTCONN is benign).
+  // The cancellation descriptor independently wakes poll/select waiters.
+  shutdown(state->handle,
+#if REX_PLATFORM_WIN32
+           SD_BOTH
+#else
+           SHUT_RDWR
+#endif
+  );
+  // NAT's raw XSocket pump references must drain while this object is live.
+  // Doing this in the last operation's destructor would wait for that very pump.
+  xam::NatProbeDetach(state->handle);
+  if (state.use_count() == 1)
+    return state->Finalize() == 0 ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;
+  return X_STATUS_SUCCESS;  // Last lease retires the descriptor and scope.
 }
 
 X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, uint32_t optlen) {
+  const auto operation = AcquireNativeLease();
+  if (!operation) return X_STATUS_UNSUCCESSFUL;
+  const auto handle = operation.handle();
   if (level == 0xFFFF && (optname == 0x5801 || optname == 0x5802)) {
     // Disable socket encryption
     secure_ = false;
@@ -97,7 +215,7 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, 
   }
 
 #if REX_PLATFORM_WIN32
-  int ret = setsockopt(native_handle(), level, optname, (char*)optval_ptr, optlen);
+  int ret = setsockopt(handle, level, optname, (char*)optval_ptr, optlen);
 #else
   // The title always supplies Xbox/Winsock constants and big-endian values,
   // regardless of the native platform. Never forward guest option numbers to
@@ -145,12 +263,12 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, 
     std::memcpy(encoded_linger.data(), optval_ptr, sizeof(encoded_linger));
     linger native_linger{int(uint16_t(encoded_linger[0]) != 0),
                          int(uint16_t(encoded_linger[1]))};
-    ret = setsockopt(native_handle(), native_level, native_option, &native_linger,
+    ret = setsockopt(handle, native_level, native_option, &native_linger,
                      sizeof(native_linger));
   } else if (native_option == SO_SNDTIMEO || native_option == SO_RCVTIMEO) {
     timeval native_timeout{static_cast<time_t>(value / 1000),
                            static_cast<suseconds_t>((value % 1000) * 1000)};
-    ret = setsockopt(native_handle(), native_level, native_option, &native_timeout,
+    ret = setsockopt(handle, native_level, native_option, &native_timeout,
                      sizeof(native_timeout));
   } else {
     if (!boolean && value > INT_MAX) {
@@ -158,12 +276,12 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, 
       return X_STATUS_UNSUCCESSFUL;
     }
     int native_value = boolean ? int(value != 0) : int(value);
-    ret = setsockopt(native_handle(), native_level, native_option, &native_value,
+    ret = setsockopt(handle, native_level, native_option, &native_value,
                      sizeof(native_value));
   }
 #endif
   REXSYS_INFO("XSocket::SetOption: native={} level={:#x} option={:#x} length={} result={}",
-              native_handle(), level, optname, optlen, ret);
+              handle, level, optname, optlen, ret);
   if (ret < 0) {
     // TODO: WSAGetLastError()
     return X_STATUS_UNSUCCESSFUL;
@@ -178,8 +296,11 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, 
 }
 
 X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
+  const auto operation = AcquireNativeLease();
+  if (!operation) return X_STATUS_UNSUCCESSFUL;
+  const auto handle = operation.handle();
 #if REX_PLATFORM_WIN32
-  int ret = rex::net::socket_ioctl(native_handle(), cmd, arg_ptr);
+  int ret = rex::net::socket_ioctl(handle, cmd, arg_ptr);
 #else
   if (!arg_ptr) {
     errno = EFAULT;
@@ -195,7 +316,7 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
     return X_STATUS_UNSUCCESSFUL;
   }
   int available = 0;
-  int ret = ioctl(native_handle(), FIONREAD, &available);
+  int ret = ioctl(handle, FIONREAD, &available);
   if (ret == 0) {
     rex::be<uint32_t> value = uint32_t(available);
     std::memcpy(arg_ptr, &value, sizeof(value));
@@ -210,55 +331,142 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
 }
 
 X_STATUS XSocket::SetNonBlocking(bool enabled) {
+  const auto operation = AcquireNativeLease();
+  if (!operation) return X_STATUS_UNSUCCESSFUL;
+  const auto handle = operation.handle();
+  std::lock_guard configuration_lock(native_configuration_mutex_);
+  if (operation.retired()) { ClosedNativeSocket(); return X_STATUS_UNSUCCESSFUL; }
 #if REX_PLATFORM_WIN32
   u_long value = enabled ? 1 : 0;
-  return ioctlsocket(static_cast<SOCKET>(native_handle()), FIONBIO, &value) == 0
+  return ioctlsocket(static_cast<SOCKET>(handle), FIONBIO, &value) == 0
              ? X_STATUS_SUCCESS
              : X_STATUS_UNSUCCESSFUL;
 #else
-  int flags = fcntl(static_cast<int>(native_handle()), F_GETFL, 0);
+  int flags = fcntl(static_cast<int>(handle), F_GETFL, 0);
   if (flags < 0)
     return X_STATUS_UNSUCCESSFUL;
   int updated = enabled ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
-  return fcntl(static_cast<int>(native_handle()), F_SETFL, updated) == 0 ? X_STATUS_SUCCESS
+  return fcntl(static_cast<int>(handle), F_SETFL, updated) == 0 ? X_STATUS_SUCCESS
                                                                        : X_STATUS_UNSUCCESSFUL;
 #endif
 }
 
 X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
-  int ret = connect(native_handle(), (sockaddr*)name, name_len);
-  REXSYS_INFO("XSocket::Connect: native={} family={} length={} result={}", native_handle(),
-              name ? name->address_family : 0, name_len, ret);
-  if (ret < 0) {
-    return X_STATUS_UNSUCCESSFUL;
+  const auto operation = AcquireNativeLease();
+  if (!operation) return X_STATUS_UNSUCCESSFUL;
+  const auto handle = operation.handle();
+  int ret;
+#if REX_PLATFORM_GNU_LINUX
+  // UDP only associates an address: no handshake or blocking connect wait,
+  // and no native mode change. Connected/listening TCP also needs no handshake.
+  sockaddr_storage peer{}; socklen_t peer_length = sizeof(peer);
+  int listening = 0; socklen_t listening_length = sizeof(listening);
+  const bool association_only = type_ == X_SOCK_DGRAM ||
+      getpeername(handle, reinterpret_cast<sockaddr*>(&peer), &peer_length) == 0 ||
+      (getsockopt(handle, SOL_SOCKET, SO_ACCEPTCONN, &listening, &listening_length) == 0 && listening);
+  bool blocking = false;
+  int error;
+  if (association_only) {
+    if (operation.retired()) { ClosedNativeSocket(); return X_STATUS_UNSUCCESSFUL; }
+    ret = connect(handle, reinterpret_cast<sockaddr*>(name), name_len);
+    error = errno;
+  } else {
+    // connect has no per-call MSG_DONTWAIT. Exclude native send/receive entry
+    // only for the short forced-nonblocking syscall, restoring flags BEFORE
+    // waiting. Ordinary FIONBIO remains prompt during a blocked receive.
+    // Never wait indefinitely behind a concurrent operation on a pending TCP
+    // connection: the caller may retry after this EALREADY completion.
+    std::unique_lock connect_window(native_connect_window_mutex_, std::try_to_lock);
+    if (!connect_window.owns_lock()) {
+      if (operation.retired()) ClosedNativeSocket(); else errno = EALREADY;
+      return X_STATUS_UNSUCCESSFUL;
+    }
+    std::lock_guard configuration_lock(native_configuration_mutex_);
+    if (operation.retired()) { ClosedNativeSocket(); return X_STATUS_UNSUCCESSFUL; }
+    const int original_flags = fcntl(handle, F_GETFL, 0);
+    if (original_flags < 0) return X_STATUS_UNSUCCESSFUL;
+    blocking = !(original_flags & O_NONBLOCK);
+    if (blocking && fcntl(handle, F_SETFL, original_flags | O_NONBLOCK) < 0)
+      return X_STATUS_UNSUCCESSFUL;
+    ret = connect(handle, reinterpret_cast<sockaddr*>(name), name_len);
+    error = errno;
+    if (blocking && fcntl(handle, F_SETFL, original_flags) < 0) {
+      error = errno; ret = -1; blocking = false;
+    }
   }
-
-  return X_STATUS_SUCCESS;
+  if (blocking && ret < 0 && error == EINPROGRESS && !operation.retired()) {
+    std::array<pollfd, 2> descriptors{{{static_cast<int>(handle), POLLOUT, 0},
+                                    {operation.cancellation_handle(), POLLIN, 0}}};
+    // Linux connect's socket send timeout must remain a finite guest contract.
+    timeval send_timeout{}; socklen_t length = sizeof(send_timeout);
+    if (getsockopt(handle, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, &length) < 0) {
+      error = errno;
+    } else {
+      const bool timed = send_timeout.tv_sec || send_timeout.tv_usec;
+      const auto duration = std::chrono::seconds(send_timeout.tv_sec) +
+                            std::chrono::microseconds(send_timeout.tv_usec);
+      const auto deadline = std::chrono::steady_clock::now() + duration;
+      for (;;) {
+        timespec remaining{}; const timespec* wait = nullptr;
+        if (timed) {
+          const auto left = deadline - std::chrono::steady_clock::now();
+          if (left <= decltype(left)::zero()) { error = EINPROGRESS; break; }
+          const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(left);
+          remaining.tv_sec = seconds.count();
+          remaining.tv_nsec = std::chrono::duration_cast<std::chrono::nanoseconds>(left - seconds).count();
+          wait = &remaining;
+        }
+        const int ready = ppoll(descriptors.data(), descriptors.size(), wait, nullptr);
+        if (operation.retired()) { error = ENOTSOCK; break; }
+        if (ready < 0) { error = errno; break; }
+        if (!ready) { error = EINPROGRESS; break; }
+        int connected_error = 0; length = sizeof(connected_error);
+        if (getsockopt(handle, SOL_SOCKET, SO_ERROR, &connected_error, &length) < 0)
+          error = errno;
+        else { error = connected_error; ret = connected_error ? -1 : 0; }
+        break;
+      }
+    }
+  }
+  if (operation.retired()) { error = ENOTSOCK; ret = -1; }
+  errno = error;
+#else
+  ret = connect(handle, reinterpret_cast<sockaddr*>(name), name_len);
+  if (operation.retired()) { ClosedNativeSocket(); ret = -1; }
+#endif
+  REXSYS_INFO("XSocket::Connect: native={} family={} length={} result={}", handle,
+              name ? name->address_family : 0, name_len, ret);
+  return ret < 0 ? X_STATUS_UNSUCCESSFUL : X_STATUS_SUCCESS;
 }
 
 X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
-  int ret = bind(native_handle(), (sockaddr*)name, name_len);
+  const auto operation = AcquireNativeLease();
+  if (!operation) return X_STATUS_UNSUCCESSFUL;
+  const auto handle = operation.handle();
+  int ret = bind(handle, (sockaddr*)name, name_len);
   if (ret < 0) {
     return X_STATUS_UNSUCCESSFUL;
   }
 
+  std::lock_guard lifetime_lock(native_lifetime_mutex_);
+  if (operation.retired()) { ClosedNativeSocket(); return X_STATUS_UNSUCCESSFUL; }
   bound_ = true;
   sockaddr_in actual_address{};
   socklen_t actual_length = sizeof(actual_address);
-  if (getsockname(native_handle(), reinterpret_cast<sockaddr*>(&actual_address), &actual_length) ==
+  if (getsockname(handle, reinterpret_cast<sockaddr*>(&actual_address), &actual_length) ==
       0) {
     // Keep the native/network-order value used by sockaddr. This is especially
     // important for port 0, where the OS selects the real guest transport port.
     bound_port_ = actual_address.sin_port;
-    REXSYS_INFO("XSocket::Bind: native={} local={:08X}:{}", native_handle(),
+    REXSYS_INFO("XSocket::Bind: native={} local={:08X}:{}", handle,
                 ntohl(actual_address.sin_addr.s_addr), ntohs(actual_address.sin_port));
     if (type_ == Type::X_SOCK_DGRAM &&
         xam::NatProbeIsGameplayPort(ntohs(actual_address.sin_port))) {
-      xam::NatProbeAttach(native_handle(), xam::NatProbeRole::kGameplay,
+      xam::NatProbeAttach(handle, xam::NatProbeRole::kGameplay,
                           {actual_address.sin_addr.s_addr, ntohs(actual_address.sin_port)}, this);
       if (auto* manager = kernel_state() ? kernel_state()->session_manager() : nullptr) {
         const auto local_xuid = kernel_state()->user_profile()->xuid();
-        xam::RegisterGameplaySocketCandidate(local_xuid, native_handle(),
+        xam::RegisterGameplaySocketCandidate(local_xuid, handle,
             guest_port_ ? guest_port_ : ntohs(actual_address.sin_port));
         std::shared_ptr<xam::SessionRecord> exact;
         for (const auto& record : manager->registry().List()) {
@@ -271,13 +479,13 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
           exact = record;
         }
         if (exact)
-          xam::BindGameplaySocket(exact, local_xuid, native_handle(),
+          xam::BindGameplaySocket(exact, local_xuid, handle,
                                   guest_port_ ? guest_port_ : ntohs(actual_address.sin_port));
       }
     }
   } else {
     bound_port_ = name->sin_port;
-    REXSYS_ERROR("XSocket::Bind: getsockname failed native={} error={}", native_handle(),
+    REXSYS_ERROR("XSocket::Bind: getsockname failed native={} error={}", handle,
 #if REX_PLATFORM_WIN32
                  WSAGetLastError()
 #else
@@ -290,7 +498,10 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
 }
 
 X_STATUS XSocket::Listen(int backlog) {
-  int ret = listen(native_handle(), backlog);
+  const auto operation = AcquireNativeLease();
+  if (!operation) return X_STATUS_UNSUCCESSFUL;
+  const auto handle = operation.handle();
+  int ret = listen(handle, backlog);
   if (ret < 0) {
     return X_STATUS_UNSUCCESSFUL;
   }
@@ -299,50 +510,113 @@ X_STATUS XSocket::Listen(int backlog) {
 }
 
 object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
+  const auto operation = AcquireNativeLease();
+  if (!operation) return nullptr;
+  const auto handle = operation.handle();
+  std::shared_lock connect_window(native_connect_window_mutex_);
+  if (operation.retired()) { ClosedNativeSocket(); return nullptr; }
   sockaddr n_sockaddr;
   socklen_t n_name_len = sizeof(sockaddr);
-  uintptr_t ret = accept(native_handle(), &n_sockaddr, &n_name_len);
-  if (ret == -1) {
+  uintptr_t ret =
+#if REX_PLATFORM_GNU_LINUX
+      accept4(handle, &n_sockaddr, &n_name_len, SOCK_CLOEXEC);
+#else
+      accept(handle, &n_sockaddr, &n_name_len);
+#endif
+  if (operation.retired()) {
+    if (ret != uintptr_t(-1)) rex::net::socket_close(ret);
+    ClosedNativeSocket();
+    return nullptr;
+  }
+  if (ret == uintptr_t(-1)) {
     std::memset(name, 0, *name_len);
     *name_len = 0;
     return nullptr;
   }
 
-  std::memcpy(name, &n_sockaddr, n_name_len);
-  *name_len = n_name_len;
-
-  // Create a kernel object to represent the new socket, and copy parameters
-  // over.
-  auto socket = object_ref<XSocket>(new XSocket(kernel_state_, ret));
-  socket->af_ = af_;
-  socket->type_ = type_;
-  socket->proto_ = proto_;
-
-  return socket;
+  // Prepare ownership before allocating the guest object: even a throwing
+  // XObject base constructor cannot leak an accepted native descriptor.
+  std::shared_ptr<NativeSocketState> child_state;
+  try { child_state = std::make_shared<NativeSocketState>(ret); }
+  catch (const std::bad_alloc&) {
+    rex::net::socket_close(ret);
+#if REX_PLATFORM_WIN32
+    WSASetLastError(WSAENOBUFS);
+#else
+    errno = ENOMEM;
+#endif
+    return nullptr;
+  }
+  if (!child_state->valid()) return nullptr;
+  object_ref<XSocket> child;
+  try { child = object_ref<XSocket>(new XSocket(kernel_state_, std::move(child_state))); }
+  catch (const std::bad_alloc&) {
+#if REX_PLATFORM_WIN32
+    WSASetLastError(WSAENOBUFS);
+#else
+    errno = ENOMEM;
+#endif
+    return nullptr;
+  }
+  child->af_ = af_; child->type_ = type_; child->proto_ = proto_;
+  {
+    // Linearize accepted-child publication against Close, without holding the
+    // parent's lifetime lock during child construction/object-table access.
+    std::lock_guard lifetime_lock(native_lifetime_mutex_);
+    if (!operation.retired()) {
+      std::memcpy(name, &n_sockaddr, n_name_len);
+      *name_len = n_name_len;
+      return child;
+    }
+  }
+  child->Close();
+  if (kernel_state_) child->ReleaseHandle();
+  ClosedNativeSocket();
+  return nullptr;
 }
 
 int XSocket::Shutdown(int how) {
-  return shutdown(native_handle(), how);
+  const auto operation = AcquireNativeLease();
+  if (!operation) return -1;
+  const auto handle = operation.handle();
+  return shutdown(handle, how);
 }
 
 int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
-  if (type_ == X_SOCK_DGRAM) return RecvFrom(buf, buf_len, flags, nullptr, nullptr);
+  const auto operation = AcquireNativeLease();
+  if (!operation) return -1;
+  if (type_ == X_SOCK_DGRAM)
+    return RecvFromNative(operation, buf, buf_len, flags, nullptr, nullptr);
+  const auto handle = operation.handle();
+  std::shared_lock connect_window(native_connect_window_mutex_);
+  if (operation.retired()) return ClosedNativeSocket();
 #if REX_PLATFORM_GNU_LINUX
-  const int result = recv(native_handle(), reinterpret_cast<char*>(buf), buf_len,
+  const int result = recv(handle, reinterpret_cast<char*>(buf), buf_len,
                            flags | (type_ == X_SOCK_DGRAM ? MSG_TRUNC : 0));
+  if (operation.retired()) return ClosedNativeSocket();
   if (result > 0 && uint32_t(result) > buf_len) {
     errno = EMSGSIZE;
     return -1;
   }
   return result;
 #else
-  return recv(native_handle(), reinterpret_cast<char*>(buf), buf_len, flags);
+  return recv(handle, reinterpret_cast<char*>(buf), buf_len, flags);
 #endif
 }
 
 int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* from,
                       uint32_t* from_len) {
+  const auto operation = AcquireNativeLease();
+  if (!operation) return -1;
+  return RecvFromNative(operation, buf, buf_len, flags, from, from_len);
+}
+
+int XSocket::RecvFromNative(const NativeLease& operation, uint8_t* buf, uint32_t buf_len,
+                            uint32_t flags, N_XSOCKADDR_IN* from, uint32_t* from_len) {
+  const auto handle = operation.handle();
   std::lock_guard receive_lock(native_receive_mutex_);
+  std::shared_lock connect_window(native_connect_window_mutex_);
+  if (operation.retired()) return ClosedNativeSocket();
   // Pop from secure packets first
   // TODO(DrChat): Enable when I commit XNet
   /*
@@ -400,7 +674,7 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
     // Protocol/control or unadmitted bytes are invisible to guest MSG_PEEK.
     // Consume the already inspected datagram rather than peeking it forever.
     if (flags & MSG_PEEK) {
-      const int discarded = recvfrom(native_handle(), reinterpret_cast<char*>(receive_data), receive_capacity,
+      const int discarded = recvfrom(handle, reinterpret_cast<char*>(receive_data), receive_capacity,
                                     flags & ~MSG_PEEK, nullptr, nullptr);
       if (discarded < 0) {
 #if REX_PLATFORM_WIN32
@@ -421,24 +695,26 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
   };
 
 retry_native_receive:
-  xam::NatProbeTick(native_handle());
+  if (operation.retired()) return ClosedNativeSocket();
+  xam::NatProbeTick(handle);
   sockaddr_in nfrom{};
   socklen_t nfromlen = sizeof(sockaddr_in);
-  int ret = recvfrom(native_handle(), reinterpret_cast<char*>(receive_data), receive_capacity,
+  int ret = recvfrom(handle, reinterpret_cast<char*>(receive_data), receive_capacity,
 #if REX_PLATFORM_GNU_LINUX
                      flags | (type_ == X_SOCK_DGRAM ? MSG_TRUNC : 0),
 #else
                      flags,
 #endif
                      (sockaddr*)&nfrom, &nfromlen);
+  if (operation.retired()) return ClosedNativeSocket();
   if (ret < 0) return ret;
   if (ret > 0 && uint32_t(ret) <= receive_capacity &&
-      xam::NatProbeConsume(native_handle(), receive_data, ret, nfrom.sin_addr.s_addr,
+      xam::NatProbeConsume(handle, receive_data, ret, nfrom.sin_addr.s_addr,
                                       ntohs(nfrom.sin_port))) {
     if (!reject_datagram()) return -1;
     goto retry_native_receive;
   }
-  if (ret >= 0 && xam::NatProbeIsPendingGameplaySource(native_handle(),
+  if (ret >= 0 && xam::NatProbeIsPendingGameplaySource(handle,
           {nfrom.sin_addr.s_addr, ntohs(nfrom.sin_port)})) {
     if (!reject_datagram()) return -1;
     goto retry_native_receive;
@@ -446,10 +722,10 @@ retry_native_receive:
   const uint16_t source_port = ret >= 0 ? ntohs(nfrom.sin_port) : 0;
   const xam::LanAddress native_source{ret >= 0 ? nfrom.sin_addr.s_addr : 0, source_port};
   // Reap expired/revoked membership before consulting its native route.
-  const bool scoped = xam::IsAuthorizedGameplaySocket(native_handle());
+  const bool scoped = xam::IsAuthorizedGameplaySocket(handle);
   std::optional<xam::LanAddress> logical;
   if (ret >= 0) {
-    logical = xam::NatProbeNormalizeGameplaySource(native_handle(), native_source);
+    logical = xam::NatProbeNormalizeGameplaySource(handle, native_source);
     if (scoped && !logical) {
       if (!reject_datagram()) return -1;
       goto retry_native_receive;
@@ -464,11 +740,12 @@ retry_native_receive:
     return -1;
   }
 #endif
+  if (operation.retired()) return ClosedNativeSocket();
   if (ret > 0 && !copy_received(size_t(ret))) return -1;
   if (ret >= 0 && from) {
     from->sin_family = nfrom.sin_family;
     if (logical) {
-      xam::NatProbeRecordGameplayTraffic(native_handle(), native_source, size_t(ret), false);
+      xam::NatProbeRecordGameplayTraffic(handle, native_source, size_t(ret), false);
       from->sin_addr = ntohl(logical->ipv4);
       from->sin_port = logical->port;
       if (last_normalized_source_ipv4_ != native_source.ipv4 ||
@@ -495,59 +772,78 @@ retry_native_receive:
 }
 
 bool XSocket::PumpNatControl() {
+  const auto operation = AcquireNativeLease();
+  if (!operation) return false;
+  const auto handle = operation.handle();
   std::lock_guard receive_lock(native_receive_mutex_);
-  if (!WaitReadable(0)) return false;
+  if (!WaitReadableNative(operation, 0, false)) return false;
 
   // One extra byte distinguishes an exact control frame from a valid-looking
   // prefix of an oversized datagram on both POSIX and Winsock peek paths.
   std::array<uint8_t, 57> packet{};
   sockaddr_in source{};
   socklen_t source_length = sizeof(source);
-  const int peeked = recvfrom(native_handle(), reinterpret_cast<char*>(packet.data()),
-                              int(packet.size()), MSG_PEEK,
+  const int peeked = recvfrom(handle, reinterpret_cast<char*>(packet.data()),
+                              int(packet.size()), MSG_PEEK
+#if REX_PLATFORM_GNU_LINUX
+                              | MSG_DONTWAIT
+#endif
+                              ,
                               reinterpret_cast<sockaddr*>(&source), &source_length);
-  if (peeked <= 0 ||
-      !xam::NatProbeIsControlPacket(native_handle(), packet.data(), size_t(peeked),
+  if (operation.retired() || peeked <= 0 ||
+      !xam::NatProbeIsControlPacket(handle, packet.data(), size_t(peeked),
                                     source.sin_addr.s_addr, ntohs(source.sin_port)))
     return false;
 
   source_length = sizeof(source);
-  const int received = recvfrom(native_handle(), reinterpret_cast<char*>(packet.data()),
-                                int(packet.size()), 0,
+  const int received = recvfrom(handle, reinterpret_cast<char*>(packet.data()),
+                                int(packet.size()),
+#if REX_PLATFORM_GNU_LINUX
+                                MSG_DONTWAIT,
+#else
+                                0,
+#endif
                                 reinterpret_cast<sockaddr*>(&source), &source_length);
   const bool consumed =
-      received > 0 && xam::NatProbeConsume(native_handle(), packet.data(), size_t(received),
+      !operation.retired() && received > 0 && xam::NatProbeConsume(handle, packet.data(), size_t(received),
                                            source.sin_addr.s_addr, ntohs(source.sin_port));
   if (consumed)
     REXSYS_INFO("NAT traversal: independent gameplay control receive socket={} type={} "
                 "source={:08X}:{}",
-                native_handle(), packet[5], source.sin_addr.s_addr, ntohs(source.sin_port));
+                handle, packet[5], source.sin_addr.s_addr, ntohs(source.sin_port));
   return consumed;
 }
 
 bool XSocket::WaitReadable(uint32_t timeout_ms, bool infinite) const {
-  const auto handle = native_handle();
-  if (handle == uint64_t(-1))
-    return false;
+  const auto operation = AcquireNativeLease();
+  return operation && WaitReadableNative(operation, timeout_ms, infinite);
+}
+
+bool XSocket::WaitReadableNative(const NativeLease& operation, uint32_t timeout_ms, bool infinite) const {
+  if (operation.retired()) return false;
+  const auto handle = operation.handle();
 #if !REX_PLATFORM_WIN32
-  pollfd pending{static_cast<int>(handle), POLLIN, 0};
+  std::array<pollfd, 2> pending{{{static_cast<int>(handle), POLLIN, 0},
+                               {operation.cancellation_handle(), POLLIN, 0}}};
   // poll has a signed millisecond timeout. Split unusually long finite waits
   // without turning them into an infinite wait or overflowing an int.
   uint32_t remaining = timeout_ms;
   for (;;) {
     const int interval = infinite ? -1 : static_cast<int>(std::min<uint32_t>(remaining, INT_MAX));
-    const int result = poll(&pending, 1, interval);
+    const int result = poll(pending.data(), pending.size(), interval);
     if (result != 0 || infinite || remaining <= uint32_t(INT_MAX))
-      return result > 0 && (pending.revents & (POLLIN | POLLHUP | POLLERR));
+      return !operation.retired() && result > 0 &&
+             !(pending[1].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) &&
+             (pending[0].revents & (POLLIN | POLLHUP | POLLERR));
     remaining -= uint32_t(INT_MAX);
   }
 #else
   fd_set read_set;
   FD_ZERO(&read_set);
 #if REX_PLATFORM_WIN32
-  auto native_socket = static_cast<SOCKET>(native_handle());
+  auto native_socket = static_cast<SOCKET>(handle);
 #else
-  auto native_socket = static_cast<int>(native_handle());
+  auto native_socket = static_cast<int>(handle);
 #endif
   FD_SET(native_socket, &read_set);
   timeval timeout{static_cast<long>(timeout_ms / 1000),
@@ -566,12 +862,12 @@ bool XSocket::WaitReadable(uint32_t timeout_ms, bool infinite) const {
       REXSYS_ERROR(
           "XSocket::WaitReadable: select reported no data but FIONREAD reports {} bytes "
           "native={}",
-          available, native_handle());
+          available, handle);
     }
   }
 #endif
   if (result < 0) {
-    REXSYS_ERROR("XSocket::WaitReadable: select failed native={} error={}", native_handle(),
+    REXSYS_ERROR("XSocket::WaitReadable: select failed native={} error={}", handle,
 #if REX_PLATFORM_WIN32
                  WSAGetLastError()
 #else
@@ -579,16 +875,30 @@ bool XSocket::WaitReadable(uint32_t timeout_ms, bool infinite) const {
 #endif
     );
   }
-  return result > 0 && FD_ISSET(native_socket, &read_set);
+  return !operation.retired() && result > 0 && FD_ISSET(native_socket, &read_set);
 #endif
 }
 
 int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
-  return send(native_handle(), reinterpret_cast<const char*>(buf), buf_len, flags);
+  const auto operation = AcquireNativeLease();
+  if (!operation) return -1;
+  const auto handle = operation.handle();
+  std::shared_lock connect_window(native_connect_window_mutex_);
+  if (operation.retired()) return ClosedNativeSocket();
+  return send(handle, reinterpret_cast<const char*>(buf), buf_len, flags
+#if REX_PLATFORM_GNU_LINUX
+              | MSG_NOSIGNAL
+#endif
+              );
 }
 
 int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* to,
                     uint32_t to_len) {
+  const auto operation = AcquireNativeLease();
+  if (!operation) return -1;
+  const auto handle = operation.handle();
+  std::shared_lock connect_window(native_connect_window_mutex_);
+  if (operation.retired()) return ClosedNativeSocket();
   // Send 2 copies of the packet: One to XNet (for network security) and an
   // unencrypted copy for other Xenia hosts.
   // TODO(DrChat): Enable when I commit XNet.
@@ -600,7 +910,7 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
   }
   */
 
-  xam::NatProbeTick(native_handle());
+  xam::NatProbeTick(handle);
   sockaddr_in nto;
   if (to) {
     // N_XSOCKADDR_IN exposes logical host-order values through endian_store,
@@ -611,10 +921,10 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
         native_port_ != 0 && uint16_t(to->sin_port) == guest_port_ ? native_port_
                                                                    : uint16_t(to->sin_port);
     nto.sin_port = htons(destination_port);
-    if (xam::IsAuthorizedGameplaySocket(native_handle())) {
-      auto logical = xam::GameplayLogicalDestination(native_handle(),
+    if (xam::IsAuthorizedGameplaySocket(handle)) {
+      auto logical = xam::GameplayLogicalDestination(handle,
           {nto.sin_addr.s_addr, uint16_t(to->sin_port)});
-      auto peer = logical ? xam::NatProbeGameplayDestination(native_handle(), *logical) : std::nullopt;
+      auto peer = logical ? xam::NatProbeGameplayDestination(handle, *logical) : std::nullopt;
       if (!peer && (logical || xam::IsGameplayLogicalAddress(nto.sin_addr.s_addr))) {
 #if REX_PLATFORM_WIN32
         WSASetLastError(WSAEWOULDBLOCK);
@@ -634,7 +944,7 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
       errno = EHOSTUNREACH;
 #endif
       return -1;
-    } else if (auto peer = xam::NatProbePeer(native_handle())) {
+    } else if (auto peer = xam::NatProbePeer(handle)) {
       nto.sin_addr.s_addr = peer->ipv4;
       nto.sin_port = htons(peer->port);
       if (xam::NatProbeIsClient()) {
@@ -649,10 +959,13 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
     }
   }
 
-  const int result = sendto(native_handle(), reinterpret_cast<char*>(buf), buf_len, flags,
-                to ? (sockaddr*)&nto : nullptr, to_len);
+  const int result = sendto(handle, reinterpret_cast<char*>(buf), buf_len, flags
+#if REX_PLATFORM_GNU_LINUX
+                | MSG_NOSIGNAL
+#endif
+                , to ? (sockaddr*)&nto : nullptr, to_len);
   if (result > 0 && to)
-    xam::NatProbeRecordGameplayTraffic(native_handle(),
+    xam::NatProbeRecordGameplayTraffic(handle,
         {nto.sin_addr.s_addr, ntohs(nto.sin_port)}, size_t(result), true);
   return result;
 }

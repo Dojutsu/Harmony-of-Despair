@@ -9,6 +9,7 @@
 #if REX_PLATFORM_GNU_LINUX
 #include <fcntl.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 #endif
 
 using namespace rex;
@@ -394,6 +395,88 @@ static void RunLinuxSocketAbi(KernelState* kernel) {
   mem->SystemHeapFree(guest);
   std::cout << "Linux guest options/ioctl/error/select ABI checks passed\n";
 }
+static void RunLinuxSelectGuestIdentity(KernelState* kernel) {
+  auto first = make_object<XSocket>(kernel), second = make_object<XSocket>(kernel);
+  Check(first->Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM, XSocket::X_IPPROTO_UDP) ==
+            X_STATUS_SUCCESS &&
+        second->Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM, XSocket::X_IPPROTO_UDP) ==
+            X_STATUS_SUCCESS, "select identity sockets");
+  const X_HANDLE primary = first->handle(), other = second->handle(); X_HANDLE alias = 0;
+  Check(kernel->object_table()->AddHandle(first.get(), &alias) == X_STATUS_SUCCESS && alias != primary,
+        "select identity real guest alias");
+  x_fd_set supplied{}; supplied.fd_count = 3;
+  supplied.fd_array[0] = alias; supplied.fd_array[1] = other; supplied.fd_array[2] = alias;
+  host_set captured{}; Check(captured.Load(&supplied) && captured.count == 2,
+                            "select identity duplicate supplied handle");
+  x_fd_set output{}; captured.Store(&output);
+  Check(output.fd_count == 2 && output.fd_array[0] == alias && output.fd_array[1] == other,
+        "select preserves supplied alias instead of primary handle");
+  first->Close(); second->Close();
+  Check(kernel->object_table()->ReleaseHandle(primary) == X_STATUS_SUCCESS &&
+        kernel->object_table()->ReleaseHandle(alias) == X_STATUS_SUCCESS &&
+        kernel->object_table()->ReleaseHandle(other) == X_STATUS_SUCCESS,
+        "select identity real guest handle removal");
+  Check(first->handles().empty() && second->handles().empty(), "removed guest vectors are empty");
+  captured.Store(&output);
+  Check(output.fd_count == 2 && output.fd_array[0] == alias && output.fd_array[1] == other,
+        "select output never consults emptied handle vector");
+  fd_set ready; FD_ZERO(&ready); FD_SET(captured.operations[1].handle(), &ready);
+  captured.UpdateFrom(&ready); captured.Store(&output);
+  Check(output.fd_count == 1 && output.fd_array[0] == other,
+        "select compaction preserves captured guest identity");
+  std::cout << "Linux select captured guest alias/removal/compaction checks passed\n";
+}
+
+static void RunLinuxSelectRetirement(KernelState* kernel) {
+  auto receiver = make_object<XSocket>(kernel);
+  Check(receiver->Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM,
+                             XSocket::X_IPPROTO_UDP) == X_STATUS_SUCCESS, "select retire receiver");
+  N_XSOCKADDR_IN address{}; address.sin_port = 0; address.sin_family = AF_INET; address.sin_addr = INADDR_LOOPBACK;
+  Check(receiver->Bind(&address, sizeof(address)) == X_STATUS_SUCCESS, "select retire loopback");
+  auto operation = receiver->AcquireNativeLease();
+  const auto descriptor = operation.handle();
+  const auto handle = receiver->handle();
+  x_fd_set reads{}; reads.fd_count = 1; reads.fd_array[0] = handle;
+  const auto before = reads;
+  std::promise<pid_t> started;
+  int result = 777; uint32_t error = 0;
+  auto waiter = object_ref<XHostThread>(new XHostThread(kernel, 128 * 1024, 0, [&] {
+    started.set_value(static_cast<pid_t>(syscall(SYS_gettid)));
+    result = NetDll_select_entry(1, 0, ppc_ptr_t<x_fd_set>::from_host(&reads),
+                                 nullptr, nullptr, nullptr);
+    error = XThread::GetLastError();
+    return 0;
+  }));
+  Check(XSUCCEEDED(waiter->Create()), "select retire thread");
+  const auto path = "/proc/self/task/" + std::to_string(started.get_future().get()) + "/syscall";
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  bool blocked = false;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (auto* input = std::fopen(path.c_str(), "r")) {
+      long number = -1;
+      blocked = std::fscanf(input, "%ld", &number) == 1 && number == SYS_ppoll;
+      std::fclose(input);
+      if (blocked) break;
+    }
+    std::this_thread::yield();
+  }
+  // Close even if the observation failed so this regression never strands an
+  // owned waiter. The descriptor remains pinned throughout result translation.
+  Check(NetDll_closesocket_entry(1, handle) == 0, "guest close wakes select");
+  uint64_t timeout = static_cast<uint64_t>(-100000000ll);
+  Check(waiter->Wait(0, 0, 0, &timeout) == 0, "select waiter drained after close");
+  Check(blocked, "actual guest select was blocked in ppoll");
+  Check(result == -1 && error == 10038, "retired select returns WSAENOTSOCK");
+  Check(std::memcmp(&reads, &before, sizeof(reads)) == 0, "retired select guest set unchanged");
+  Check(operation.retired() && fcntl(static_cast<int>(descriptor), F_GETFD) >= 0,
+        "select original native descriptor retained");
+  operation = {};
+  Check(fcntl(static_cast<int>(descriptor), F_GETFD) == -1 && errno == EBADF,
+        "select native descriptor retired after last lease");
+  waiter.reset(); receiver.reset();
+  std::cout << "Linux blocked guest select retirement checks passed\n";
+}
+
 #endif
 
 int main(int argc, char** argv) {
@@ -421,6 +504,8 @@ int main(int argc, char** argv) {
       if (!stale) {
         RunLinuxSocketAbi(runtime.kernel_state());
         RunLinuxFatalReceive(runtime.kernel_state());
+        RunLinuxSelectGuestIdentity(runtime.kernel_state());
+        RunLinuxSelectRetirement(runtime.kernel_state());
       }
 #endif
     } catch (const std::exception& e) {

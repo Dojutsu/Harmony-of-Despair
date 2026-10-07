@@ -320,3 +320,30 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
     add_test(NAME function_memory_consumer COMMAND function_memory_consumer_test)
     set_tests_properties(function_memory_consumer PROPERTIES LABELS "linux;guest_fault;codegen" TIMEOUT 60)
 endif()
+
+# Native descriptor retirement uses real bounded blocking syscalls on loopback.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    add_executable(socket_retirement_test system/socket_retirement_test.cpp)
+    target_link_libraries(socket_retirement_test PRIVATE rexruntime)
+    target_compile_options(socket_retirement_test PRIVATE -UREXGLUE_ENABLE_PROFILING)
+    target_link_options(socket_retirement_test PRIVATE "-Wl,-z,now")
+    set_target_properties(socket_retirement_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>
+        INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
+    add_test(NAME socket_retirement COMMAND socket_retirement_test)
+    set_tests_properties(socket_retirement PROPERTIES LABELS "linux;network;guest_socket" TIMEOUT 75)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    add_executable(socket_retirement_race_test system/socket_retirement_race_test.cpp)
+    target_link_libraries(socket_retirement_race_test PRIVATE rexruntime)
+    target_compile_options(socket_retirement_race_test PRIVATE -UREXGLUE_ENABLE_PROFILING)
+    target_link_options(socket_retirement_race_test PRIVATE "-Wl,-z,now")
+    set_target_properties(socket_retirement_race_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>
+        INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
+    add_test(NAME socket_retirement_race COMMAND socket_retirement_race_test)
+    add_test(NAME socket_connect_retirement COMMAND socket_retirement_race_test --connect-close)
+    add_test(NAME socket_accept_retirement COMMAND socket_retirement_race_test --accept-close)
+    set_tests_properties(socket_retirement_race socket_connect_retirement socket_accept_retirement PROPERTIES LABELS "linux;network;guest_socket;security" TIMEOUT 15)
+endif()
