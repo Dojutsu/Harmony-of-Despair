@@ -100,9 +100,29 @@ struct PrivateLanAuthority::State {
   Bytes32 fingerprint{};mutable std::mutex mutex;std::map<uint64_t,Member> members;
   std::map<std::pair<uint64_t,uint64_t>,Pair> pairs;
   std::set<std::pair<uint64_t,std::string>> retired;
+  uint64_t revision=1;bool active=true;
 };
-PrivateLanAuthority::PrivateLanAuthority(std::unique_ptr<State> state):state_(std::move(state)){}
-PrivateLanAuthority::~PrivateLanAuthority()=default;
+PrivateLanAuthority::PrivateLanAuthority(std::shared_ptr<State> state):state_(std::move(state)){}
+PrivateLanAuthority::~PrivateLanAuthority() {std::lock_guard lock(state_->mutex);state_->active=false;}
+struct PrivateLanAuthority::Admission::Draft {
+  std::shared_ptr<State> owner;uint64_t base_revision=0;bool committed=false;
+  std::map<uint64_t,Member> members;std::map<std::pair<uint64_t,uint64_t>,Pair> pairs;
+};
+PrivateLanAuthority::Admission::Admission(std::unique_ptr<Draft> draft):draft_(std::move(draft)){}
+PrivateLanAuthority::Admission::~Admission()=default;
+bool PrivateLanAuthority::Admission::Commit() noexcept {
+  return CommitIf([]() noexcept {return true;});
+}
+bool PrivateLanAuthority::Admission::CommitIfRaw(bool (*publish)(void*) noexcept,void* context) noexcept {
+  try {
+    if(draft_->committed)return false;
+    auto& owner=*draft_->owner;std::lock_guard lock(owner.mutex);
+    if(!owner.active||!owner.invitation->Current()||owner.revision!=draft_->base_revision||owner.revision==UINT64_MAX)return false;
+    if(!publish(context))return false;
+    owner.members.swap(draft_->members);owner.pairs.swap(draft_->pairs);++owner.revision;
+    draft_->committed=true;return true;
+  }catch(...){return false;}
+}
 std::unique_ptr<PrivateLanAuthority> PrivateLanAuthority::Create(uint32_t title,
     ArbitrationIdentity identity,LanAddress endpoint,std::shared_ptr<const PrivateLanInvitation> invitation) {
 #if REX_PLATFORM_GNU_LINUX
@@ -110,7 +130,7 @@ std::unique_ptr<PrivateLanAuthority> PrivateLanAuthority::Create(uint32_t title,
       !Nonzero(identity.exchange_key)||!Nonzero(identity.incarnation)||!PrivateEndpoint(endpoint)||
       !invitation||!invitation->host()||!invitation->Current()||invitation->host_xuid()!=identity.host_xuid)return {};
   try {
-    auto state=std::make_unique<State>();state->title=title;state->identity=identity;state->invitation=std::move(invitation);
+    auto state=std::make_shared<State>();state->title=title;state->identity=identity;state->invitation=std::move(invitation);
     auto hash=Fingerprint(title,identity);if(!hash)return {};state->fingerprint=*hash;
     Member host;host.join.xuid=identity.host_xuid;host.join.machine_id=identity.host_machine_id;
     host.join.endpoint=endpoint;host.logical=htonl(0xf0000001);
@@ -122,57 +142,62 @@ std::unique_ptr<PrivateLanAuthority> PrivateLanAuthority::Create(uint32_t title,
   (void)title;(void)identity;(void)endpoint;(void)invitation;return {};
 #endif
 }
-bool PrivateLanAuthority::Admit(const PrivateLanJoinClaim& claim,std::span<const uint8_t> proof,Clock::time_point now) {
+std::unique_ptr<PrivateLanAuthority::Admission> PrivateLanAuthority::Prepare(
+    const PrivateLanJoinClaim& claim,std::span<const uint8_t> proof,Clock::time_point now) {
 #if REX_PLATFORM_GNU_LINUX
   if(!claim.xuid||claim.xuid==state_->identity.host_xuid||!claim.machine_id||!PrivateEndpoint(claim.endpoint)||
       !Nonzero(claim.challenge)||!Nonzero(std::span(claim.request_id).first(8))||
-      !Get(claim.request_id.data()+8,8)||!Nonzero(claim.client_public_key))return false;
+      !Get(claim.request_id.data()+8,8)||!Nonzero(claim.client_public_key))return {};
   try {
     auto transcript=PrivateLanJoinTranscript(state_->title,state_->identity,claim);
-    if(!state_->invitation->Verify(claim.xuid,"lan-private-join-claim-v1",transcript,proof))return false;
-    std::lock_guard lock(state_->mutex);
-    if(auto old=state_->members.find(claim.xuid);old!=state_->members.end()) {
-      auto& member=old->second;
-      if(!SameAdmission(member,claim)||!std::equal(claim.request_id.begin(),claim.request_id.begin()+8,member.join.request_id.begin())||
-          now-member.last_fresh_rpc>=std::chrono::seconds(60))return false;
-      const auto previous=Get(member.join.request_id.data()+8,8),sequence=Get(claim.request_id.data()+8,8);
-      if(sequence<previous)return false;
-      if(sequence>previous) {member.join.request_id=claim.request_id;member.last_fresh_rpc=now;}
-      return true;
+    if(!state_->invitation->Verify(claim.xuid,"lan-private-join-claim-v1",transcript,proof))return {};
+    auto draft=std::make_unique<Admission::Draft>();draft->owner=state_;
+    {
+      std::lock_guard lock(state_->mutex);
+      if(!state_->active||state_->revision==UINT64_MAX)return {};
+      draft->base_revision=state_->revision;draft->members=state_->members;draft->pairs=state_->pairs;
+      if(auto old=draft->members.find(claim.xuid);old!=draft->members.end()) {
+        auto& member=old->second;
+        if(!SameAdmission(member,claim)||!std::equal(claim.request_id.begin(),claim.request_id.begin()+8,member.join.request_id.begin())||
+            now-member.last_fresh_rpc>=std::chrono::seconds(60))return {};
+        const auto previous=Get(member.join.request_id.data()+8,8),sequence=Get(claim.request_id.data()+8,8);
+        if(sequence<previous)return {};
+        if(sequence>previous) {member.join.request_id=claim.request_id;member.last_fresh_rpc=now;}
+        return std::unique_ptr<Admission>(new Admission(std::move(draft)));
+      }
+      if(state_->members.size()>=6||state_->retired.size()+state_->members.size()-1>=256||
+          state_->retired.contains({claim.xuid,Hex(claim.challenge)}))return {};
     }
-    if(state_->members.size()>=6||state_->retired.size()+state_->members.size()-1>=256||
-        state_->retired.contains({claim.xuid,Hex(claim.challenge)}))return false;
-    for(const auto& [xuid,member]:state_->members)
-      if(member.join.machine_id==claim.machine_id||member.join.endpoint==claim.endpoint)return false;
-    // Reject low-order/invalid X25519 public keys before publishing authority.
-    const std::array<uint8_t,1> probe{1};if(!SealArbitrationPayload(claim.client_public_key,probe,transcript))return false;
+    // Fresh provider work and all allocations precede publication. The exact
+    // revision will be checked again at Commit after roster/scope preflight.
+    for(const auto& [xuid,member]:draft->members)
+      if(member.join.machine_id==claim.machine_id||member.join.endpoint==claim.endpoint)return {};
+    const std::array<uint8_t,1> probe{1};if(!SealArbitrationPayload(claim.client_public_key,probe,transcript))return {};
     Member member;member.join=claim;member.last_fresh_rpc=now;
-    if(!Random(member.nonce)||!Random(member.generation)||!Random(member.capability))return false;
-    const auto clients=state_->invitation->clients();
-    const auto ordinal=std::find(clients.begin(),clients.end(),claim.xuid);
-    if(ordinal==clients.end())return false;
+    if(!Random(member.nonce)||!Random(member.generation)||!Random(member.capability))return {};
+    const auto clients=state_->invitation->clients();const auto ordinal=std::find(clients.begin(),clients.end(),claim.xuid);
+    if(ordinal==clients.end()) { return {}; }
     member.logical=htonl(0xf0000002+uint32_t(ordinal-clients.begin()));
-    // Prepare a complete replacement before committing; allocation/provider
-    // failure cannot leave half a member or regenerate an existing pair key.
-    auto members=state_->members;auto pairs=state_->pairs;
-    for(const auto& [xuid,previous]:members) {
-      (void)previous;Pair pair;
-      if(!Random(pair.link)||!Random(pair.capability)||!Random(pair.traffic))return false;
-      const auto ordered=std::minmax(xuid,claim.xuid);pairs.emplace(std::make_pair(ordered.first,ordered.second),pair);
+    for(const auto& [xuid,previous]:draft->members) {
+      (void)previous;Pair pair;if(!Random(pair.link)||!Random(pair.capability)||!Random(pair.traffic))return {};
+      const auto ordered=std::minmax(xuid,claim.xuid);draft->pairs.emplace(std::make_pair(ordered.first,ordered.second),pair);
     }
-    members.emplace(claim.xuid,member);state_->members.swap(members);state_->pairs.swap(pairs);return true;
-  }catch(...){return false;}
+    draft->members.emplace(claim.xuid,member);return std::unique_ptr<Admission>(new Admission(std::move(draft)));
+  }catch(...){return {};}
 #else
-  (void)claim;(void)proof;(void)now;return false;
+  (void)claim;(void)proof;(void)now;return {};
 #endif
+}
+bool PrivateLanAuthority::Admit(const PrivateLanJoinClaim& claim,std::span<const uint8_t> proof,Clock::time_point now) {
+  auto admission=Prepare(claim,proof,now);return admission&&admission->Commit();
 }
 bool PrivateLanAuthority::Remove(uint64_t client) {
   if(client==state_->identity.host_xuid)return false;
   std::lock_guard lock(state_->mutex);
-  auto member=state_->members.find(client);if(member==state_->members.end()||state_->retired.size()>=256)return false;
+  auto member=state_->members.find(client);if(!state_->active||state_->revision==UINT64_MAX||member==state_->members.end()||state_->retired.size()>=256)return false;
   try {
     state_->retired.emplace(client,Hex(member->second.join.challenge));
-    state_->members.erase(member);
+    state_->members.erase(member);++state_->revision;
     std::erase_if(state_->pairs,[&](const auto& pair){return pair.first.first==client||pair.first.second==client;});
     return true;
   }catch(...){return false;}
@@ -180,6 +205,7 @@ bool PrivateLanAuthority::Remove(uint64_t client) {
 std::vector<uint64_t> PrivateLanAuthority::Expire(Clock::time_point now) {
   try {
     std::lock_guard lock(state_->mutex);
+    if(!state_->active||state_->revision==UINT64_MAX)return {};
     std::vector<uint64_t> expired;
     for(const auto& [xuid,member]:state_->members)
       if(xuid!=state_->identity.host_xuid&&now-member.last_fresh_rpc>=std::chrono::seconds(60))expired.push_back(xuid);
@@ -192,32 +218,54 @@ std::vector<uint64_t> PrivateLanAuthority::Expire(Clock::time_point now) {
       std::erase_if(pairs,[&](const auto& pair){return pair.first.first==xuid||pair.first.second==xuid;});
     }
     if(retired.size()>256)return {};
-    state_->members.swap(members);state_->pairs.swap(pairs);state_->retired.swap(retired);return expired;
+    state_->members.swap(members);state_->pairs.swap(pairs);state_->retired.swap(retired);++state_->revision;return expired;
   }catch(...){return {};}
 }
-std::optional<std::vector<uint8_t>> PrivateLanAuthority::Ticket(uint64_t local,uint32_t lease) const {
-  if(lease<1000||lease>60000||!state_->invitation->Current())return std::nullopt;
+namespace {
+std::optional<std::vector<uint8_t>> EncodeAuthorityTicket(const auto& context,const auto& members,const auto& pairs,
+    uint64_t local,uint32_t lease) {
+  if(lease<1000||lease>60000||!context.invitation->Current())return std::nullopt;
   try {
-    std::lock_guard lock(state_->mutex);auto member=state_->members.find(local);if(member==state_->members.end())return std::nullopt;
-    const auto now=Clock::now();
-    for(const auto& [xuid,current]:state_->members)
-      if(xuid!=state_->identity.host_xuid&&now-current.last_fresh_rpc>=std::chrono::seconds(60))return std::nullopt;
-    std::vector<uint8_t> bytes;bytes.reserve(kTicketHeader+(state_->members.size()-1)*kTicketPeer);
-    const std::array<uint8_t,8> header{'H','P','L','T',1,uint8_t(state_->members.size()-1),0,0};Append(bytes,header);
-    Append(bytes,state_->fingerprint);Put(bytes,state_->identity.host_xuid,8);Put(bytes,local,8);
+    const auto member=members.find(local);if(member==members.end())return std::nullopt;
+    const auto now=PrivateLanAuthority::Clock::now();
+    for(const auto& [xuid,current]:members)
+      if(xuid!=context.identity.host_xuid&&now-current.last_fresh_rpc>=std::chrono::seconds(60))return std::nullopt;
+    std::vector<uint8_t> bytes;
+    struct CleanTemporary {
+      std::vector<uint8_t>& bytes;
+      ~CleanTemporary() {
+#if REX_PLATFORM_GNU_LINUX
+        if(!bytes.empty())OPENSSL_cleanse(bytes.data(),bytes.size());
+#endif
+      }
+    } cleanse{bytes};
+    bytes.reserve(kTicketHeader+(members.size()-1)*kTicketPeer);
+    const std::array<uint8_t,8> header{'H','P','L','T',1,uint8_t(members.size()-1),0,0};Append(bytes,header);
+    Append(bytes,context.fingerprint);Put(bytes,context.identity.host_xuid,8);Put(bytes,local,8);
     Append(bytes,member->second.nonce);Append(bytes,member->second.generation);Append(bytes,member->second.capability);
     const auto append_ip=[&](uint32_t ip){const auto* data=reinterpret_cast<const uint8_t*>(&ip);bytes.insert(bytes.end(),data,data+4);};
     append_ip(member->second.logical);Put(bytes,lease,4);
-    for(const auto& [peer_xuid,peer]:state_->members) {
+    for(const auto& [peer_xuid,peer]:members) {
       if(peer_xuid==local)continue;
       const auto ordered=std::minmax(local,peer_xuid);
-      const auto& pair=state_->pairs.at({ordered.first,ordered.second});
+      const auto& pair=pairs.at({ordered.first,ordered.second});
       Put(bytes,peer_xuid,8);Append(bytes,peer.nonce);Append(bytes,peer.generation);Append(bytes,pair.link);
       Append(bytes,pair.capability);Append(bytes,pair.traffic);append_ip(peer.logical);append_ip(peer.join.endpoint.ipv4);
       Put(bytes,peer.join.endpoint.port,2);Put(bytes,0,2);
     }
-    return bytes;
+    return std::optional<std::vector<uint8_t>>(std::move(bytes));
   }catch(...){return std::nullopt;}
+}
+} // namespace
+std::optional<std::vector<uint8_t>> PrivateLanAuthority::Ticket(uint64_t local,uint32_t lease) const {
+  std::lock_guard lock(state_->mutex);if(!state_->active)return std::nullopt;
+  return EncodeAuthorityTicket(*state_,state_->members,state_->pairs,local,lease);
+}
+std::optional<std::vector<uint8_t>> PrivateLanAuthority::Admission::Ticket(uint64_t local,uint32_t lease) const {
+  if(draft_->committed)return std::nullopt;
+  {std::lock_guard lock(draft_->owner->mutex);
+    if(!draft_->owner->active||draft_->owner->revision!=draft_->base_revision)return std::nullopt;}
+  return EncodeAuthorityTicket(*draft_->owner,draft_->members,draft_->pairs,local,lease);
 }
 std::optional<PrivateLanGameplayTicket> ParsePrivateLanGameplayTicket(uint32_t title,
     const ArbitrationIdentity& identity,uint64_t local,std::span<const uint8_t> bytes,uint16_t guest_port) {

@@ -2,6 +2,8 @@
 #include <rex/system/xam/private_lan_invitation.h>
 #include <rex/system/xam/gameplay_traversal.h>
 #include <rex/system/xam/session_arbitration_crypto.h>
+#include <type_traits>
+#include <functional>
 namespace rex::system::xam {
 struct PrivateLanJoinClaim {
   uint64_t xuid = 0;
@@ -18,6 +20,37 @@ std::vector<uint8_t> PrivateLanJoinTranscript(uint32_t title,
 class PrivateLanAuthority final {
  public:
   using Clock = std::chrono::steady_clock;
+  class Admission final {
+   public:
+    ~Admission();
+    Admission(const Admission&) = delete;
+    Admission& operator=(const Admission&) = delete;
+    // Provisional secret tickets may be sealed/preflighted, but never sent or
+    // installed before Commit succeeds. Destruction discards every staged key.
+    std::optional<std::vector<uint8_t>> Ticket(uint64_t member,uint32_t lease_ms=30000) const;
+    // No network or record locks are held by a prepared admission. Commit
+    // publishes atomically only if no intervening authority mutation occurred.
+    bool Commit() noexcept;
+    // Combine the final bounded, nonthrowing roster/arbitration commit with
+    // authority publication. The callback runs after revision validation and
+    // must not perform network operations or reenter this authority.
+    template<class Commit> requires std::is_nothrow_invocable_r_v<bool,Commit>
+    bool CommitIf(Commit&& publish) noexcept {
+      struct Invocation {std::remove_reference_t<Commit>* callback;};
+      Invocation invocation{std::addressof(publish)};
+      return CommitIfRaw([](void* context) noexcept {
+        return std::invoke(*static_cast<Invocation*>(context)->callback);
+      },std::addressof(invocation));
+    }
+   private:
+    friend class PrivateLanAuthority;
+    struct Draft;
+    explicit Admission(std::unique_ptr<Draft> draft);
+    bool CommitIfRaw(bool (*publish)(void*) noexcept,void* context) noexcept;
+    std::unique_ptr<Draft> draft_;
+  };
+  std::unique_ptr<Admission> Prepare(const PrivateLanJoinClaim& claim,
+      std::span<const uint8_t> proof,Clock::time_point now=Clock::now());
   static std::unique_ptr<PrivateLanAuthority> Create(uint32_t title,
       ArbitrationIdentity identity, LanAddress host_endpoint,
       std::shared_ptr<const PrivateLanInvitation> invitation);
@@ -39,8 +72,8 @@ class PrivateLanAuthority final {
   std::optional<std::vector<uint8_t>> Ticket(uint64_t member, uint32_t lease_ms = 30000) const;
  private:
   struct State;
-  explicit PrivateLanAuthority(std::unique_ptr<State> state);
-  std::unique_ptr<State> state_;
+  explicit PrivateLanAuthority(std::shared_ptr<State> state);
+  std::shared_ptr<State> state_;
 };
 struct PrivateLanGameplayTicket {
   GameplayAuthorization authorization;

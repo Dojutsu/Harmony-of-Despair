@@ -159,6 +159,29 @@ void Run(){
   changed=second;std::fill(changed.request_id.begin()+8,changed.request_id.end(),0);
   Check(!expiry_authority->Admit(changed,proof(*invitations.second,changed)),"zero renewal sequence rejected");
   Check(expiry_authority->Expire(started+std::chrono::seconds(180))==std::vector<uint64_t>{2},"renewed member still expires without another fresh RPC");
+  auto transaction=PrivateLanAuthority::Create(title,identity,{htonl(INADDR_LOOPBACK),30001},invitations.host);
+  Check(bool(transaction),"staged private authority");
+  auto prepared=transaction->Prepare(third,proof(*invitations.third,third));
+  Check(bool(prepared)&&bool(prepared->Ticket(3)),"preflight obtains provisional encrypted-ticket inputs");
+  Check(!transaction->Ticket(3),"prepared member is invisible to live authority");
+  prepared.reset();Check(!transaction->Ticket(3),"failed roster/provider preflight discards complete admission");
+  prepared=transaction->Prepare(third,proof(*invitations.third,third));
+  Check(bool(prepared),"staged final commit fixture");bool roster_published=false;
+  Check(!prepared->CommitIf([]() noexcept {return false;})&&!transaction->Ticket(3),"failed roster/arbitration commit cannot publish keys or membership");
+  Check(prepared->CommitIf([&]() noexcept {roster_published=true;return true;})&&roster_published,"nonthrowing roster/arbitration and private authority publish together");
+  Check(bool(transaction->Ticket(3))&&!prepared->Commit()&&!prepared->Ticket(3),"staged commit is exactly once and cannot issue obsolete draft tickets");
+  prepared=transaction->Prepare(third,proof(*invitations.third,third));
+  Check(bool(prepared)&&transaction->Remove(3),"intervening departure fixture");roster_published=false;
+  Check(!prepared->CommitIf([&]() noexcept {roster_published=true;return true;})&&!roster_published,"stale authority prevents external roster/arbitration effects");
+  Check(!transaction->Ticket(3),"stale prepared admission cannot resurrect retired member");
+  auto abandoned=PrivateLanAuthority::Create(title,identity,{htonl(INADDR_LOOPBACK),30001},invitations.host);
+  prepared=abandoned->Prepare(third,proof(*invitations.third,third));Check(bool(prepared),"owner lifetime draft");
+  abandoned.reset();Check(!prepared->Commit()&&!prepared->Ticket(3),"destroyed authority invalidates outstanding draft without dangling storage");
+  auto renewal=PrivateLanAuthority::Create(title,identity,{htonl(INADDR_LOOPBACK),30001},invitations.host);
+  third.request_id[15]=1;Check(renewal->Admit(third,proof(*invitations.third,third),started),"staged renewal fixture");
+  third.request_id[15]=2;prepared=renewal->Prepare(third,proof(*invitations.third,third),started+std::chrono::seconds(59));
+  Check(bool(prepared),"fresh renewal can preflight without publication");prepared.reset();
+  Check(renewal->Expire(started+std::chrono::seconds(60))==std::vector<uint64_t>{3},"discarded renewal cannot refresh host membership");
   std::cout<<checks<<" private LAN authority, three-pair datagram, replay/rejoin and ticket parser checks passed\n";
 }
 #endif

@@ -184,16 +184,17 @@ TEST_CASE("private LAN invitation tickets protect three real independent runtime
         for(uint64_t client:{2,3}) {
           auto bytes=Load(root/("claim-"+std::to_string(client)),102);if(!bytes||bytes->size()!=102)continue;
           auto [claim,proof]=ReadClaim(*bytes);
-          if(!authority->Admit(claim,proof)) {
+          auto admission=authority->Prepare(claim,proof);
+          if(!admission) {
             Mark(root,"rejected-"+std::to_string(client));
             if(removed&&client==2&&!std::filesystem::exists(root/"rejoin2"))Mark(root,"retired-replay-rejected");
             continue;
           }
           REQUIRE(claim.xuid==client);
-          auto ticket=authority->Ticket(client);REQUIRE(ticket);
+          auto ticket=admission->Ticket(client);REQUIRE(ticket);
           const auto aad=PrivateLanJoinTranscript(kPrivateFixtureTitle,identity,claim);
           auto envelope=SealPrivateLanPayload(*invitation,client,claim.client_public_key,*ticket,aad);
-          OPENSSL_cleanse(ticket->data(),ticket->size());REQUIRE(envelope);
+          OPENSSL_cleanse(ticket->data(),ticket->size());REQUIRE(envelope);REQUIRE(admission->Commit());
           Save(root/("reply-"+std::to_string(client)),EnvelopeBytes(*envelope,claim.request_id));
         }
         auto bytes=authority->Ticket(1);REQUIRE(bytes);
