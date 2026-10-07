@@ -15,6 +15,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <string>
 
 #include <fcntl.h>
@@ -463,6 +464,34 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
     return kFileMappingHandleInvalid;
   }
   return static_cast<FileMappingHandle>(ashmem_fd);
+#elif REX_PLATFORM_GNU_LINUX
+  // The guest arena is private to this process. A named shm object could be
+  // reopened by another instance or collide with an existing object's name.
+  // Anonymous backing also keeps guest contents out of the shared namespace.
+  if (!length || length > static_cast<size_t>(std::numeric_limits<off_t>::max())) {
+    return kFileMappingHandleInvalid;
+  }
+  switch (access) {
+    case PageAccess::kReadOnly:
+    case PageAccess::kReadWrite:
+    case PageAccess::kExecuteReadOnly:
+    case PageAccess::kExecuteReadWrite:
+      break;
+    default:
+      return kFileMappingHandleInvalid;
+  }
+  const int fd = memfd_create("rex-guest-arena", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  if (fd < 0) {
+    return kFileMappingHandleInvalid;
+  }
+  // Size seals prevent truncation from invalidating live mappings; ordinary
+  // guest writes and mapping/protection admission retain their existing policy.
+  if (fchmod(fd, 0600) || rex_ftruncate64(fd, static_cast<off_t>(length)) ||
+      fcntl(fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) < 0) {
+    close(fd);
+    return kFileMappingHandleInvalid;
+  }
+  return static_cast<FileMappingHandle>(fd);
 #else
   int oflag;
   switch (access) {
@@ -502,7 +531,7 @@ void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::pat
   ForgetMappingHandle(static_cast<int>(handle));
 #endif
   close(static_cast<int>(handle));
-#if !REX_PLATFORM_ANDROID
+#if !REX_PLATFORM_ANDROID && !REX_PLATFORM_GNU_LINUX
   auto full_path = MakeShmName(path);
   shm_unlink(full_path.c_str());
 #endif

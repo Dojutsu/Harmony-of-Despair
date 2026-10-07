@@ -211,6 +211,7 @@ endif()
 target_sources(unit_tests PRIVATE input/scripted_input_test.cpp)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(unit_tests PRIVATE core/private_backing_test.cpp)
     add_executable(object_wait_trace_test kernel/object_wait_trace_test.cpp)
     target_link_libraries(object_wait_trace_test PRIVATE rexruntime)
     target_compile_options(object_wait_trace_test PRIVATE -UREXGLUE_ENABLE_PROFILING)
