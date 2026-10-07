@@ -141,3 +141,15 @@
 0x8266DF58 = {}
 # data refs=2, first reference=0x82005EE0
 0x8267DB28 = {}
+
+# The stage task optionally notifies screen types 34/35 after readiness. The
+# scene manager's normal idle state clears its four cache slots and uses -1 as
+# the active index. The original path then dereferences the resulting null
+# pointer at guest 0x80. Skip only this absent-screen notification and retain the
+# existing task return path; valid screen objects keep the original behavior.
+[[midasm_hook]]
+address = 0x8247A4C8
+name = "HarmonySkipAbsentSceneNotification"
+registers = ["r9"]
+jump_address_on_true = 0x8247B9BC
+after_instruction = false

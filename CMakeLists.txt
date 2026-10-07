@@ -26,6 +26,7 @@ endif()
 set(HARMONYRECOMP_SOURCES
     src/main.cpp
     src/game_data.cpp
+    src/scene_cache_hook.cpp
 )
 
 if(WIN32)
@@ -91,6 +92,28 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(linux_user_paths_tests tests/linux_user_paths_test.cpp)
     target_include_directories(linux_user_paths_tests PRIVATE src)
     add_test(NAME linux-user-paths COMMAND linux_user_paths_tests)
+
+    # Compile the actual generated notification block with its authored hook.
+    # A second copy removes only the hook to retain the original fault oracle.
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(_scene_cache_generated "${CMAKE_CURRENT_BINARY_DIR}/scene_cache_hook_generated.inc")
+    set(_scene_cache_original "${CMAKE_CURRENT_BINARY_DIR}/scene_cache_hook_original.inc")
+    add_custom_command(OUTPUT "${_scene_cache_generated}" "${_scene_cache_original}"
+        COMMAND ${Python3_EXECUTABLE} -B
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/extract_scene_cache_hook.py"
+            --source "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/harmonyrecomp_recomp.3.cpp"
+            --config "${CMAKE_CURRENT_SOURCE_DIR}/default_tu2_overrides.toml"
+            --output "${_scene_cache_generated}" --original-output "${_scene_cache_original}"
+        DEPENDS tests/extract_scene_cache_hook.py default_tu2_overrides.toml
+            generated/default/harmonyrecomp_recomp.3.cpp
+        VERBATIM)
+    add_executable(scene_cache_hook_tests tests/scene_cache_hook_test.cpp
+        src/scene_cache_hook.cpp "${_scene_cache_generated}" "${_scene_cache_original}")
+    target_include_directories(scene_cache_hook_tests PRIVATE src generated/default
+        "${CMAKE_CURRENT_BINARY_DIR}")
+    target_link_libraries(scene_cache_hook_tests PRIVATE rex::runtime)
+    add_test(NAME scene-cache-hook COMMAND scene_cache_hook_tests)
+    set_tests_properties(scene-cache-hook PROPERTIES LABELS "title;scene" TIMEOUT 30)
 endif()
 add_executable(game_data_tests
     tests/game_data_tests.cpp

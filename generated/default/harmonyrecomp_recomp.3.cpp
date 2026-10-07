@@ -11305,6 +11305,8 @@ loc_8246E278:
 	goto loc_8246E270;
 }
 
+extern bool HarmonySkipAbsentSceneNotification(PPCRegister& r9);
+
 DEFINE_REX_FUNC(sub_82479998) {
 	REX_FUNC_PROLOGUE();
 	PPCRegister temp{};
@@ -13014,6 +13016,11 @@ loc_8247A450:
 	// lwzx r9,r11,r10
 	ctx.r9.u64 = REX_LOAD_U32(ctx.r11.u32 + ctx.r10.u32);
 loc_8247A4C8:
+	if (HarmonySkipAbsentSceneNotification(ctx.r9)) {
+		goto loc_8247B9BC;
+	}
+	else {
+	}
 	// lwz r11,128(r9)
 	ctx.r11.u64 = REX_LOAD_U32(ctx.r9.u32 + 128);
 	// cmpwi cr6,r11,34
