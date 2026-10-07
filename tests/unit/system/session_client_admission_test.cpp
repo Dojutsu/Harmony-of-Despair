@@ -10,6 +10,9 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <sstream>
+#include <spdlog/sinks/ostream_sink.h>
+#include <rex/logging.h>
 #include <string>
 #include <thread>
 #include <vector>
@@ -2013,6 +2016,21 @@ TEST_CASE("configured invite reaches immutable READY result using its own endpoi
   bool one_listener = false;
   bool no_listener = false;
   bool failed_join = false;
+  bool runtime_override = false;
+  bool accepted_read_race = false;
+  SECTION("runtime API releases membership guards before retiring an accepted read lease") {
+    use_lan = true;
+    one_listener = true;
+    runtime_override = true;
+    accepted_read_race = true;
+    REXCVAR_SET(session_directory_invite_code, "");
+  }
+  SECTION("runtime API reaches accepted-record handoff on its own loopback endpoint") {
+    use_lan = true;
+    one_listener = true;
+    runtime_override = true;
+    REXCVAR_SET(session_directory_invite_code, "");
+  }
   SECTION("public NAT route") {}
   SECTION("same-LAN route without public ACK") { use_lan = true; }
   SECTION("main-menu listener receives native invite before Online opens") {
@@ -2110,6 +2128,10 @@ TEST_CASE("configured invite reaches immutable READY result using its own endpoi
   SessionManager manager(nullptr, 39310, std::move(dependencies));
   manager_ptr = &manager;
   manager.OnTitleTransition(kTitle);
+  if (runtime_override) {
+    REQUIRE(manager.UpdateRuntimeInviteCode("abc234") == RuntimeInviteUpdateResult::kStarted);
+    CHECK(REXCVAR_GET(session_directory_invite_code).empty());
+  }
   REQUIRE(issued_gate.WaitUntilEntered());
 
   // These mutable public Search selectors must not redirect the claimed invite.
@@ -2143,6 +2165,45 @@ TEST_CASE("configured invite reaches immutable READY result using its own endpoi
   REQUIRE(accepted);
   REQUIRE(SerializeAcceptedInviteRecord(*ready));
   CHECK(accepted->record() == *SerializeAcceptedInviteRecord(*ready));
+  if (accepted_read_race) {
+    std::future<RuntimeInviteUpdateResult> replacing;
+    std::future<ConfiguredInviteLifecycleState> state_snapshot;
+    std::future<std::shared_ptr<SessionRecord>> creating_host;
+    struct ReleaseAcceptedRead {
+      std::optional<AcceptedInviteStore::ReadLease>& lease;
+      ~ReleaseAcceptedRead() { lease.reset(); }
+    } release_read{accepted};
+    replacing = std::async(std::launch::async, [&] {
+      return manager.UpdateRuntimeInviteCode("DEF345");
+    });
+    state_snapshot = std::async(std::launch::async, [&] {
+      const auto deadline = Clock::now() + std::chrono::seconds(2);
+      while (Clock::now() < deadline) {
+        const auto state = manager.configured_invite_state();
+        if (state == ConfiguredInviteLifecycleState::kCancelled) return state;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      return manager.configured_invite_state();
+    });
+    REQUIRE(state_snapshot.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    CHECK(state_snapshot.get() == ConfiguredInviteLifecycleState::kCancelled);
+    CHECK(replacing.wait_for(std::chrono::milliseconds(30)) == std::future_status::timeout);
+    // Accepted-record retirement may wait for this reader, while a real title
+    // membership commit must remain free to acquire registry and record locks.
+    creating_host = std::async(std::launch::async, [&] {
+      return manager.registry().Create(kLocalXuid, "RacingHost", {}, 1, 6, 0);
+    });
+    REQUIRE(creating_host.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    REQUIRE(creating_host.get());
+    accepted.reset();
+    REQUIRE(replacing.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    CHECK(replacing.get() == RuntimeInviteUpdateResult::kLiveSession);
+    CHECK(manager.runtime_invite_code() == "ABC234");
+    CHECK_FALSE(manager.accepted_invites().Snapshot(0));
+    CHECK_FALSE(manager.ready_configured_invite());
+    manager.ShutdownAsyncActivity();
+    return;
+  }
   accepted.reset();
   CHECK(ready->operation.title_id == kTitle);
   CHECK(ready->operation.local_user_index == 0);
@@ -2426,6 +2487,404 @@ TEST_CASE("shutdown joins an active configured invite worker exactly once",
   manager.ShutdownAsyncActivity();
   CHECK(attempts.load() == 0);
   CHECK_FALSE(manager.ready_configured_invite());
+}
+
+struct RuntimeInviteBarrierRelease {
+  StageBarrier& barrier;
+  ~RuntimeInviteBarrierRelease() { barrier.Release(); }
+};
+
+SessionManagerDependencies RuntimeInviteTestDependencies() {
+  SessionManagerDependencies value;
+  value.user_identity = [](uint32_t user) -> std::optional<uint64_t> {
+    return user == 0 ? std::optional<uint64_t>(kLocalXuid) : std::nullopt;
+  };
+  value.current_title_id = [] { return kTitle; };
+  value.invite_join_attempt_transport = [](std::string_view, uint32_t)
+      -> std::optional<DirectoryInviteJoinAttempt> { return std::nullopt; };
+  return value;
+}
+
+TEST_CASE("runtime invite validates context and clears only its private override",
+          "[session][runtime-invite][privacy]") {
+  ConfiguredInviteCvarFixture cvars("");
+  auto dependencies = RuntimeInviteTestDependencies();
+  std::atomic<uint32_t> title{kTitle};
+  dependencies.current_title_id = [&] { return title.load(); };
+  SessionManager manager(nullptr, 39401, std::move(dependencies));
+  CHECK(manager.runtime_invite_code().empty());
+  CHECK(manager.UpdateRuntimeInviteCode("ABC234") == RuntimeInviteUpdateResult::kUnavailable);
+  for (std::string_view invalid : {"ABCDE", "ABCDEFG", "ABC23!", " ABC23", "ABCI23", "ABC23\\", "ABC23\n"})
+    CHECK(manager.UpdateRuntimeInviteCode(invalid) == RuntimeInviteUpdateResult::kInvalidCode);
+  manager.OnTitleTransition(kTitle);
+  REQUIRE(manager.UpdateRuntimeInviteCode("abc234") == RuntimeInviteUpdateResult::kStarted);
+  CHECK(manager.runtime_invite_code() == "ABC234");
+  CHECK(REXCVAR_GET(session_directory_invite_code).empty());
+  CHECK(manager.UpdateRuntimeInviteCode("") == RuntimeInviteUpdateResult::kCleared);
+  CHECK(manager.runtime_invite_code().empty());
+  CHECK_FALSE(manager.ready_configured_invite());
+  CHECK_FALSE(manager.accepted_invites().Snapshot(0));
+  CHECK_FALSE(manager.discovery().HasClientAdmission(0));
+  REQUIRE(manager.UpdateRuntimeInviteCode("DEF345") == RuntimeInviteUpdateResult::kStarted);
+  manager.OnTitleTermination();
+  CHECK(manager.runtime_invite_code().empty());
+  CHECK(manager.UpdateRuntimeInviteCode("ABC234") == RuntimeInviteUpdateResult::kUnavailable);
+  manager.OnTitleTransition(kTitle);
+  CHECK(manager.runtime_invite_code().empty());
+  REQUIRE(manager.UpdateRuntimeInviteCode("XYZ679") == RuntimeInviteUpdateResult::kStarted);
+  title = kTitle + 1;
+  manager.OnTitleTransition(kTitle + 1);
+  CHECK(manager.runtime_invite_code().empty());
+  REQUIRE(manager.UpdateRuntimeInviteCode("ABC234") == RuntimeInviteUpdateResult::kStarted);
+  manager.ShutdownAsyncActivity();
+  CHECK(manager.runtime_invite_code().empty());
+  CHECK(manager.UpdateRuntimeInviteCode("DEF345") == RuntimeInviteUpdateResult::kUnavailable);
+  CHECK(REXCVAR_GET(session_directory_invite_code).empty());
+}
+
+TEST_CASE("runtime invite clear suppresses startup code until a fresh title lifetime",
+          "[session][runtime-invite][privacy][clear]") {
+  ConfiguredInviteCvarFixture cvars("ABC234");
+  SessionManager manager(nullptr, 39410, RuntimeInviteTestDependencies());
+  manager.OnTitleTransition(kTitle);
+  REQUIRE(manager.runtime_invite_code() == "ABC234");
+  REQUIRE(manager.UpdateRuntimeInviteCode("") == RuntimeInviteUpdateResult::kCleared);
+  CHECK(manager.runtime_invite_code().empty());
+  CHECK(REXCVAR_GET(session_directory_invite_code) == "ABC234");
+  manager.OnTitleTransition(kTitle);
+  CHECK(manager.runtime_invite_code().empty());
+  CHECK(manager.configured_invite_state() == ConfiguredInviteLifecycleState::kUnclaimed);
+  CHECK_FALSE(manager.ready_configured_invite());
+  CHECK_FALSE(manager.accepted_invites().Snapshot(0));
+  CHECK_FALSE(manager.discovery().HasClientAdmission(0));
+  manager.OnTitleTermination();
+  CHECK(manager.runtime_invite_code().empty());
+  manager.OnTitleTransition(kTitle);
+  CHECK(manager.runtime_invite_code() == "ABC234");
+  CHECK(REXCVAR_GET(session_directory_invite_code) == "ABC234");
+  manager.ShutdownAsyncActivity();
+  CHECK(manager.runtime_invite_code().empty());
+}
+
+TEST_CASE("runtime invite refuses missing local identity and mismatched title",
+          "[session][runtime-invite][identity]") {
+  ConfiguredInviteCvarFixture cvars("");
+  std::atomic<uint64_t> user{0};
+  std::atomic<uint32_t> title{kTitle};
+  auto dependencies = RuntimeInviteTestDependencies();
+  dependencies.user_identity = [&](uint32_t) -> std::optional<uint64_t> {
+    if (!user.load()) return std::nullopt;
+    return user.load();
+  };
+  dependencies.current_title_id = [&] { return title.load(); };
+  SessionManager manager(nullptr, 39402, std::move(dependencies));
+  manager.OnTitleTransition(kTitle);
+  CHECK(manager.UpdateRuntimeInviteCode("ABC234") == RuntimeInviteUpdateResult::kUnavailable);
+  user = kLocalXuid;
+  title = kTitle + 1;
+  CHECK(manager.UpdateRuntimeInviteCode("ABC234") == RuntimeInviteUpdateResult::kUnavailable);
+  title = kTitle;
+  REQUIRE(manager.UpdateRuntimeInviteCode("ABC234") == RuntimeInviteUpdateResult::kStarted);
+  manager.ShutdownAsyncActivity();
+}
+
+TEST_CASE("runtime invite rejects active host and live joined local membership",
+          "[session][runtime-invite][live-session]") {
+  ConfiguredInviteCvarFixture cvars("");
+  SessionManager manager(nullptr, 39403, RuntimeInviteTestDependencies());
+  manager.OnTitleTransition(kTitle);
+  auto hosted = manager.registry().Create(kLocalXuid, "LocalHost", {}, 1, 6, 0);
+  REQUIRE(hosted);
+  CHECK(manager.UpdateRuntimeInviteCode("ABC234") == RuntimeInviteUpdateResult::kLiveSession);
+  CHECK(manager.UpdateRuntimeInviteCode("") == RuntimeInviteUpdateResult::kLiveSession);
+  CHECK(manager.runtime_invite_code().empty());
+  REQUIRE(manager.registry().Delete(hosted->info.id));
+  auto observed = CorrelatedSession(ConfiguredAttempt(), {htonl(INADDR_LOOPBACK), 39413});
+  // The helper builds a host-owned advertisement; remote discovery projection
+  // must mark that host remote before testing our own joined local membership.
+  observed.members.front().local = false;
+  auto joined = manager.registry().UpsertDiscovered(std::move(observed));
+  REQUIRE(joined);
+  SessionMember local{kLocalXuid, "LocalClient", 0, true, false, false};
+  REQUIRE(manager.registry().JoinBatch(joined, std::span(&local, 1)));
+  CHECK(manager.UpdateRuntimeInviteCode("ABC234") == RuntimeInviteUpdateResult::kLiveSession);
+  CHECK(manager.runtime_invite_code().empty());
+  REQUIRE(manager.registry().Leave(joined->info.id, kLocalXuid));
+  REQUIRE(manager.UpdateRuntimeInviteCode("ABC234") == RuntimeInviteUpdateResult::kStarted);
+  manager.ShutdownAsyncActivity();
+}
+
+TEST_CASE("runtime invite cancellation joins old worker without committing a replacement",
+          "[session][runtime-invite][cancellation][race]") {
+  ConfiguredInviteCvarFixture cvars("");
+  StageBarrier worker_gate;
+  std::promise<void> cancellation_visible;
+  auto visible = cancellation_visible.get_future();
+  std::atomic<bool> signalled{false};
+  std::atomic<uint32_t> workers{0};
+  auto dependencies = RuntimeInviteTestDependencies();
+  dependencies.configured_invite_stage_observer = [&](ConfiguredInviteStage stage,
+      const ConfiguredInviteOperationIdentity&) {
+    if (stage == ConfiguredInviteStage::kWorkerStarted) { ++workers; worker_gate.ArriveAndWait(); }
+    if (stage == ConfiguredInviteStage::kCancellationVisible && !signalled.exchange(true))
+      cancellation_visible.set_value();
+  };
+  SessionManager manager(nullptr, 39404, std::move(dependencies));
+  std::future<RuntimeInviteUpdateResult> replacing;
+  std::future<RuntimeInviteUpdateResult> queued;
+  RuntimeInviteBarrierRelease release{worker_gate};
+  manager.OnTitleTransition(kTitle);
+  REQUIRE(manager.UpdateRuntimeInviteCode("ABC234") == RuntimeInviteUpdateResult::kStarted);
+  REQUIRE(worker_gate.WaitUntilEntered());
+  std::stop_source replacement_stop;
+  replacing = std::async(std::launch::async, [&] {
+    return manager.UpdateRuntimeInviteCode("DEF345", replacement_stop.get_token());
+  });
+  REQUIRE(visible.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  CHECK(replacing.wait_for(std::chrono::milliseconds(30)) == std::future_status::timeout);
+  CHECK(manager.runtime_invite_code() == "ABC234");
+  std::stop_source queued_stop;
+  queued = std::async(std::launch::async, [&] {
+    return manager.UpdateRuntimeInviteCode("XYZ679", queued_stop.get_token());
+  });
+  queued_stop.request_stop();
+  REQUIRE(queued.wait_for(std::chrono::milliseconds(250)) == std::future_status::ready);
+  CHECK(queued.get() == RuntimeInviteUpdateResult::kCancelled);
+  replacement_stop.request_stop();
+  worker_gate.Release();
+  REQUIRE(replacing.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  CHECK(replacing.get() == RuntimeInviteUpdateResult::kCancelled);
+  CHECK(manager.runtime_invite_code() == "ABC234");
+  CHECK(workers.load() == 1);
+  CHECK_FALSE(manager.ready_configured_invite());
+  CHECK_FALSE(manager.accepted_invites().Snapshot(0));
+  CHECK_FALSE(manager.discovery().HasClientAdmission(0));
+  manager.ShutdownAsyncActivity();
+}
+
+TEST_CASE("runtime invite rechecks live membership after old worker drain",
+          "[session][runtime-invite][live-session][race]") {
+  ConfiguredInviteCvarFixture cvars("");
+  StageBarrier worker_gate;
+  std::promise<void> cancellation_visible;
+  auto visible = cancellation_visible.get_future();
+  std::atomic<bool> signalled{false};
+  auto dependencies = RuntimeInviteTestDependencies();
+  dependencies.configured_invite_stage_observer = [&](ConfiguredInviteStage stage,
+      const ConfiguredInviteOperationIdentity&) {
+    if (stage == ConfiguredInviteStage::kWorkerStarted) worker_gate.ArriveAndWait();
+    if (stage == ConfiguredInviteStage::kCancellationVisible && !signalled.exchange(true))
+      cancellation_visible.set_value();
+  };
+  SessionManager manager(nullptr, 39405, std::move(dependencies));
+  std::future<RuntimeInviteUpdateResult> replacing;
+  RuntimeInviteBarrierRelease release{worker_gate};
+  manager.OnTitleTransition(kTitle);
+  REQUIRE(manager.UpdateRuntimeInviteCode("ABC234") == RuntimeInviteUpdateResult::kStarted);
+  REQUIRE(worker_gate.WaitUntilEntered());
+  replacing = std::async(std::launch::async, [&] { return manager.UpdateRuntimeInviteCode("DEF345"); });
+  REQUIRE(visible.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  auto hosted = manager.registry().Create(kLocalXuid, "RacingHost", {}, 1, 6, 0);
+  REQUIRE(hosted);
+  worker_gate.Release();
+  REQUIRE(replacing.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  CHECK(replacing.get() == RuntimeInviteUpdateResult::kLiveSession);
+  CHECK(manager.runtime_invite_code() == "ABC234");
+  CHECK_FALSE(manager.ready_configured_invite());
+  manager.ShutdownAsyncActivity();
+}
+
+TEST_CASE("runtime invite replacement drains stale completion before a new generation",
+          "[session][runtime-invite][stale][race]") {
+  ConfiguredInviteCvarFixture cvars("");
+  StageBarrier old_callback, new_callback;
+  std::promise<void> cancellation_visible;
+  auto visible = cancellation_visible.get_future();
+  std::promise<void> second_cancellation;
+  auto second_visible = second_cancellation.get_future();
+  std::atomic<uint32_t> cancellation_count{0};
+  std::atomic<uint32_t> discoveries{0}, completed{0};
+  std::mutex identities_mutex;
+  std::vector<ConfiguredInviteOperationIdentity> identities;
+  auto dependencies = RuntimeInviteTestDependencies();
+  dependencies.invite_join_attempt_transport = [](std::string_view code, uint32_t)
+      -> std::optional<DirectoryInviteJoinAttempt> {
+    auto value = ConfiguredAttempt();
+    if (code == "DEF345") {
+      value.attempt.session_id = "session-b"; value.session.session_id = "session-b";
+      value.attempt.attempt_id = "11112222333344445555666677778888";
+      value.attempt.capability = "88887777666655554444333322221111";
+    }
+    return value;
+  };
+  dependencies.join_attempt_completion_transport = [&](const DirectoryTraversalAttempt&) { ++completed; };
+  dependencies.configured_invite_discovery = [&](LanDiscoveryService&,
+      const DirectoryInviteJoinAttempt& value, uint32_t, const std::function<bool()>& current,
+      const std::function<void(ConfiguredInviteStage)>&) -> std::optional<ConfiguredInviteDiscoveryResult> {
+    if (++discoveries == 1) { old_callback.ArriveAndWait(); CHECK_FALSE(current()); }
+    else new_callback.ArriveAndWait();
+    return ConfiguredInviteDiscoveryResult{
+        CorrelatedSession(value, {htonl(INADDR_LOOPBACK), 39416}), 0};
+  };
+  dependencies.configured_invite_stage_observer = [&](ConfiguredInviteStage stage,
+      const ConfiguredInviteOperationIdentity& identity) {
+    if (stage == ConfiguredInviteStage::kAttemptIssued) {
+      std::lock_guard lock(identities_mutex); identities.push_back(identity);
+    }
+    if (stage == ConfiguredInviteStage::kCancellationVisible) {
+      const auto count = ++cancellation_count;
+      if (count == 1) cancellation_visible.set_value();
+      if (count == 2) second_cancellation.set_value();
+    }
+  };
+  SessionManager manager(nullptr, 39406, std::move(dependencies));
+  std::future<RuntimeInviteUpdateResult> replacing;
+  std::future<void> shutdown;
+  RuntimeInviteBarrierRelease release_old{old_callback}, release_new{new_callback};
+  manager.OnTitleTransition(kTitle);
+  REQUIRE(manager.UpdateRuntimeInviteCode("ABC234") == RuntimeInviteUpdateResult::kStarted);
+  REQUIRE(old_callback.WaitUntilEntered());
+  replacing = std::async(std::launch::async, [&] { return manager.UpdateRuntimeInviteCode("DEF345"); });
+  REQUIRE(visible.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  old_callback.Release();
+  REQUIRE(replacing.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  CHECK(replacing.get() == RuntimeInviteUpdateResult::kStarted);
+  REQUIRE(new_callback.WaitUntilEntered());
+  {
+    std::lock_guard lock(identities_mutex);
+    REQUIRE(identities.size() == 2);
+    CHECK(identities[0].operation_token != identities[1].operation_token);
+    CHECK(identities[0].title_generation != identities[1].title_generation);
+    CHECK(identities[0].invite_code == "ABC234");
+    CHECK(identities[1].invite_code == "DEF345");
+  }
+  CHECK(manager.runtime_invite_code() == "DEF345");
+  CHECK_FALSE(manager.ready_configured_invite());
+  CHECK_FALSE(manager.accepted_invites().Snapshot(0));
+  shutdown = std::async(std::launch::async, [&] { manager.ShutdownAsyncActivity(); });
+  REQUIRE(second_visible.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  new_callback.Release();
+  REQUIRE(shutdown.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  shutdown.get();
+  CHECK(completed.load() == 2);
+}
+
+TEST_CASE("runtime invite shutdown defeats a replacement waiting on old worker drain",
+          "[session][runtime-invite][shutdown][cancellation][race]") {
+  ConfiguredInviteCvarFixture cvars("");
+  StageBarrier worker_gate;
+  std::promise<void> cancellation_visible;
+  auto visible = cancellation_visible.get_future();
+  std::atomic<bool> signalled{false};
+  auto dependencies = RuntimeInviteTestDependencies();
+  dependencies.configured_invite_stage_observer = [&](ConfiguredInviteStage stage,
+      const ConfiguredInviteOperationIdentity&) {
+    if (stage == ConfiguredInviteStage::kWorkerStarted) worker_gate.ArriveAndWait();
+    if (stage == ConfiguredInviteStage::kCancellationVisible && !signalled.exchange(true))
+      cancellation_visible.set_value();
+  };
+  SessionManager manager(nullptr, 39407, std::move(dependencies));
+  std::future<RuntimeInviteUpdateResult> replacing;
+  std::future<void> shutdown;
+  RuntimeInviteBarrierRelease release{worker_gate};
+  manager.OnTitleTransition(kTitle);
+  REQUIRE(manager.UpdateRuntimeInviteCode("ABC234") == RuntimeInviteUpdateResult::kStarted);
+  REQUIRE(worker_gate.WaitUntilEntered());
+  replacing = std::async(std::launch::async, [&] { return manager.UpdateRuntimeInviteCode("DEF345"); });
+  REQUIRE(visible.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  shutdown = std::async(std::launch::async, [&] { manager.ShutdownAsyncActivity(); });
+  const auto deadline = Clock::now() + std::chrono::seconds(2);
+  while (!manager.runtime_invite_code().empty() && Clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  REQUIRE(manager.runtime_invite_code().empty());
+  CHECK(manager.UpdateRuntimeInviteCode("XYZ679") == RuntimeInviteUpdateResult::kUnavailable);
+  worker_gate.Release();
+  REQUIRE(replacing.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  CHECK(replacing.get() == RuntimeInviteUpdateResult::kUnavailable);
+  REQUIRE(shutdown.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  shutdown.get();
+  CHECK_FALSE(manager.ready_configured_invite());
+  CHECK_FALSE(manager.accepted_invites().Snapshot(0));
+  CHECK_FALSE(manager.discovery().HasClientAdmission(0));
+}
+
+TEST_CASE("runtime invite identity is rechecked after cancelling the old worker",
+          "[session][runtime-invite][identity][race]") {
+  ConfiguredInviteCvarFixture cvars("");
+  StageBarrier worker_gate;
+  std::promise<void> cancellation_visible;
+  auto visible = cancellation_visible.get_future();
+  std::atomic<bool> signalled{false};
+  std::atomic<uint64_t> user{kLocalXuid};
+  auto dependencies = RuntimeInviteTestDependencies();
+  dependencies.user_identity = [&](uint32_t) -> std::optional<uint64_t> { return user.load(); };
+  dependencies.configured_invite_stage_observer = [&](ConfiguredInviteStage stage,
+      const ConfiguredInviteOperationIdentity&) {
+    if (stage == ConfiguredInviteStage::kWorkerStarted) worker_gate.ArriveAndWait();
+    if (stage == ConfiguredInviteStage::kCancellationVisible && !signalled.exchange(true))
+      cancellation_visible.set_value();
+  };
+  SessionManager manager(nullptr, 39408, std::move(dependencies));
+  std::future<RuntimeInviteUpdateResult> replacing;
+  RuntimeInviteBarrierRelease release{worker_gate};
+  manager.OnTitleTransition(kTitle);
+  REQUIRE(manager.UpdateRuntimeInviteCode("ABC234") == RuntimeInviteUpdateResult::kStarted);
+  REQUIRE(worker_gate.WaitUntilEntered());
+  replacing = std::async(std::launch::async, [&] { return manager.UpdateRuntimeInviteCode("DEF345"); });
+  REQUIRE(visible.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  user = kLocalXuid + 1;
+  worker_gate.Release();
+  REQUIRE(replacing.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  CHECK(replacing.get() == RuntimeInviteUpdateResult::kUnavailable);
+  // Retain the cancelled owner's configured override without exposing it to
+  // the replacement identity. Only the original owner can see it again.
+  CHECK(manager.runtime_invite_code().empty());
+  user = kLocalXuid;
+  CHECK(manager.runtime_invite_code() == "ABC234");
+  CHECK_FALSE(manager.ready_configured_invite());
+  CHECK_FALSE(manager.accepted_invites().Snapshot(0));
+  manager.ShutdownAsyncActivity();
+}
+
+TEST_CASE("runtime invite input is absent from verbose native lifecycle logs",
+          "[session][runtime-invite][privacy][logging]") {
+  ConfiguredInviteCvarFixture cvars("");
+  std::ostringstream captured;
+  auto logger = rex::GetLogger(rex::log::sys());
+  REQUIRE(logger);
+  auto saved_sinks = logger->sinks();
+  const auto saved_level = logger->level();
+  struct RestoreLogger {
+    std::shared_ptr<spdlog::logger> logger;
+    std::vector<spdlog::sink_ptr> sinks;
+    spdlog::level::level_enum level;
+    ~RestoreLogger() { logger->sinks() = std::move(sinks); logger->set_level(level); }
+  } restore{logger, saved_sinks, saved_level};
+  auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(captured);
+  logger->sinks() = {sink};
+  logger->set_level(spdlog::level::trace);
+  std::promise<void> cleanup;
+  auto cleaned = cleanup.get_future();
+  std::atomic<bool> signalled{false};
+  auto dependencies = RuntimeInviteTestDependencies();
+  dependencies.configured_invite_stage_observer = [&](ConfiguredInviteStage stage,
+      const ConfiguredInviteOperationIdentity&) {
+    if (stage == ConfiguredInviteStage::kCleanupComplete && !signalled.exchange(true))
+      cleanup.set_value();
+  };
+  {
+    SessionManager manager(nullptr, 39409, std::move(dependencies));
+    manager.OnTitleTransition(kTitle);
+    REQUIRE(manager.UpdateRuntimeInviteCode("qwert7") == RuntimeInviteUpdateResult::kStarted);
+    REQUIRE(cleaned.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    manager.ShutdownAsyncActivity();
+  }
+  logger->flush();
+  const auto output = captured.str();
+  CHECK(output.find("QWERT7") == std::string::npos);
+  CHECK(output.find("qwert7") == std::string::npos);
+  CHECK(output.find("CONFIGURED_INVITE_CLAIMED") != std::string::npos);
+  CHECK(REXCVAR_GET(session_directory_invite_code).empty());
 }
 
 }  // namespace

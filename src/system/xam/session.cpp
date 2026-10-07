@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstring>
 #include <random>
+#include <system_error>
 #include <thread>
 #include <unordered_set>
 
@@ -1119,6 +1120,22 @@ std::shared_ptr<SessionRecord> SessionRegistry::UpsertDiscovered(SessionRecord r
   if (change_observer_)
     change_observer_(session->info.id);
   return session;
+}
+
+bool SessionRegistry::WithNoLiveLocalMember(const std::function<void()>& mutation) {
+  std::lock_guard registry_lock(mutex_);
+  std::vector<std::unique_lock<std::recursive_mutex>> record_locks;
+  record_locks.reserve(sessions_.size());
+  for (const auto& [id, session] : sessions_) {
+    if (!session) continue;
+    record_locks.emplace_back(*session->mutex);
+    if (session->state != SessionState::kDeleted &&
+        std::any_of(session->members.begin(), session->members.end(),
+                    [](const auto& member) { return member.local; }))
+      return false;
+  }
+  mutation();
+  return true;
 }
 
 bool SessionRegistry::CommitJoinedRecord(const std::shared_ptr<SessionRecord>& expected,
@@ -3209,8 +3226,7 @@ void SessionManager::ObserveConfiguredInviteStage(
 bool SessionManager::StartConfiguredInviteOperation(uint32_t title_id) {
   if (!title_id || async_shutdown_.load(std::memory_order_acquire))
     return false;
-  auto normalized = NormalizeDirectoryInviteCode(
-      REXCVAR_GET(session_directory_invite_code));
+  auto normalized = NormalizeDirectoryInviteCode(runtime_invite_code());
   auto local_xuid = user_identity_ ? user_identity_(0) : std::nullopt;
   if (!normalized || !local_xuid || !*local_xuid)
     return false;
@@ -3246,15 +3262,31 @@ bool SessionManager::StartConfiguredInviteOperation(uint32_t title_id) {
               operation->identity.title_generation, title_id, *local_xuid);
 
   discovery_.SetLocalUserIdentity(0, operation->identity.local_xuid);
-  std::jthread worker([this, operation] {
-    {
-      std::unique_lock lock(operation->worker_mutex);
-      operation->worker_cv.wait(lock,
-                                [&] { return operation->worker_published; });
+  try {
+    std::jthread worker([this, operation] {
+      {
+        std::unique_lock lock(operation->worker_mutex);
+        operation->worker_cv.wait(lock,
+                                  [&] { return operation->worker_published; });
+      }
+      RunConfiguredInviteOperation(operation);
+    });
+    operation->PublishWorker(std::move(worker));
+  } catch (const std::system_error&) {
+    // Cancellation must never wait for an unpublished worker after native
+    // thread creation fails. Publish the empty worker before retiring claim.
+    operation->PublishWorker({});
+    std::lock_guard lock(configured_invite_mutex_);
+    if (configured_invite_operation_ == operation) {
+      configured_invite_operation_.reset();
+      configured_invite_claim_token_ = 0;
+      configured_invite_state_ = ConfiguredInviteLifecycleState::kFailed;
     }
-    RunConfiguredInviteOperation(operation);
-  });
-  operation->PublishWorker(std::move(worker));
+    REXSYS_WARN("INVITE_DIAG op={} gen={} WORKER_CREATION_FAILED",
+                operation->identity.operation_token,
+                operation->identity.title_generation);
+    return false;
+  }
   return true;
 }
 
@@ -3454,42 +3486,135 @@ void SessionManager::RunConfiguredInviteOperation(
   cleanup();
 }
 
+std::shared_ptr<SessionManager::ConfiguredInviteOperation>
+SessionManager::RetireConfiguredInviteOperationLocked() {
+  auto operation = configured_invite_operation_;
+  if (!operation) return {};
+  configured_invite_state_ = ConfiguredInviteLifecycleState::kCancelled;
+  ready_configured_invite_.reset();
+  return operation;
+}
+
+void SessionManager::DrainConfiguredInviteOperation(
+    const std::shared_ptr<ConfiguredInviteOperation>& operation) {
+  if (!operation) return;
+  // An existing guest read lease may finish here. Never wait for that lease
+  // while holding the registry/record guards used by runtime replacement.
+  if (auto identity = accepted_invites_.Identity(operation->identity.local_user_index);
+      identity && identity->operation_token == operation->identity.operation_token)
+    accepted_invites_.Invalidate(*identity);
+  operation->RequestStop();
+  ObserveConfiguredInviteStage(operation, ConfiguredInviteStage::kCancellationVisible);
+  // Retire the exact admission before joining: a late HTTP completion may not
+  // restore accepted authority after cancellation is visible.
+  discovery_.StopClientAdmission(operation->identity.local_user_index);
+  operation->WaitUntilPublishedAndJoin();
+  std::lock_guard lock(configured_invite_mutex_);
+  if (configured_invite_operation_ == operation)
+    configured_invite_operation_.reset();
+  if (configured_invite_claim_token_ == operation->identity.operation_token)
+    configured_invite_claim_token_ = 0;
+}
+
 void SessionManager::CancelConfiguredInviteOperation() {
   std::shared_ptr<ConfiguredInviteOperation> operation;
   {
     std::lock_guard lock(configured_invite_mutex_);
-    operation = configured_invite_operation_;
-    if (!operation)
-      return;
-    configured_invite_state_ = ConfiguredInviteLifecycleState::kCancelled;
-    ready_configured_invite_.reset();
-    if (auto identity = accepted_invites_.Identity(
-            operation->identity.local_user_index);
-        identity && identity->operation_token ==
-                        operation->identity.operation_token)
-      accepted_invites_.Invalidate(*identity);
+    operation = RetireConfiguredInviteOperationLocked();
   }
-  operation->RequestStop();
-  ObserveConfiguredInviteStage(operation,
-                               ConfiguredInviteStage::kCancellationVisible);
-  // Removing the exact admission context before joining prevents an in-flight
-  // HTTP response from restoring authority after cancellation became visible.
-  discovery_.StopClientAdmission(operation->identity.local_user_index);
-  operation->WaitUntilPublishedAndJoin();
+  DrainConfiguredInviteOperation(operation);
+}
+
+std::string SessionManager::runtime_invite_code() const {
+  std::optional<std::string> override;
+  std::optional<uint64_t> owner;
   {
     std::lock_guard lock(configured_invite_mutex_);
-    if (configured_invite_operation_ == operation)
-      configured_invite_operation_.reset();
-    if (configured_invite_claim_token_ ==
-        operation->identity.operation_token)
-      configured_invite_claim_token_ = 0;
+    if (!configured_invite_active_title_id_ || async_shutdown_.load(std::memory_order_acquire))
+      return {};
+    override = runtime_invite_override_;
+    owner = runtime_invite_override_xuid_;
   }
+  if (override) {
+    const auto user = user_identity_ ? user_identity_(0) : std::nullopt;
+    if (user != owner || async_shutdown_.load(std::memory_order_acquire)) return {};
+    return *override;
+  }
+  return NormalizeDirectoryInviteCode(REXCVAR_GET(session_directory_invite_code)).value_or("");
+}
+
+RuntimeInviteUpdateResult SessionManager::UpdateRuntimeInviteCode(
+    std::string_view code, std::stop_token cancellation) {
+  const auto normalized = code.empty() ? std::optional<std::string>(std::string{})
+                                      : NormalizeDirectoryInviteCode(code);
+  if (!normalized) return RuntimeInviteUpdateResult::kInvalidCode;
+  std::unique_lock control_lock(configured_invite_control_mutex_, std::defer_lock);
+  while (!control_lock.try_lock_for(std::chrono::milliseconds(10))) {
+    if (cancellation.stop_requested()) return RuntimeInviteUpdateResult::kCancelled;
+    if (async_shutdown_.load(std::memory_order_acquire))
+      return RuntimeInviteUpdateResult::kUnavailable;
+  }
+  if (cancellation.stop_requested()) return RuntimeInviteUpdateResult::kCancelled;
+  if (async_shutdown_.load(std::memory_order_acquire))
+    return RuntimeInviteUpdateResult::kUnavailable;
+  uint32_t title_id;
+  {
+    std::lock_guard lock(configured_invite_mutex_);
+    title_id = configured_invite_active_title_id_;
+  }
+  const auto user = user_identity_ ? user_identity_(0) : std::nullopt;
+  const auto current_title = current_title_id_ ? current_title_id_() : 0;
+  if (!title_id || !user || !*user || (kernel_state_ && current_title != title_id) ||
+      (current_title && current_title != title_id))
+    return RuntimeInviteUpdateResult::kUnavailable;
+
+  std::shared_ptr<ConfiguredInviteOperation> old_operation;
+  {
+    std::lock_guard lock(configured_invite_mutex_);
+    if (!registry_.WithNoLiveLocalMember([&] {
+          old_operation = RetireConfiguredInviteOperationLocked();
+        }))
+      return RuntimeInviteUpdateResult::kLiveSession;
+  }
+  // No registry, record, invite or guest-global lock is held while cancelling
+  // admission, invoking the stage observer or joining the old worker.
+  DrainConfiguredInviteOperation(old_operation);
+  if (cancellation.stop_requested()) return RuntimeInviteUpdateResult::kCancelled;
+  if (async_shutdown_.load(std::memory_order_acquire))
+    return RuntimeInviteUpdateResult::kUnavailable;
+  const auto current_user = user_identity_ ? user_identity_(0) : std::nullopt;
+  const auto rechecked_title = current_title_id_ ? current_title_id_() : 0;
+  if (current_user != user || (kernel_state_ && rechecked_title != title_id) ||
+      (rechecked_title && rechecked_title != title_id))
+    return RuntimeInviteUpdateResult::kUnavailable;
+  bool committed = false;
+  {
+    std::lock_guard lock(configured_invite_mutex_);
+    if (configured_invite_active_title_id_ != title_id)
+      return RuntimeInviteUpdateResult::kUnavailable;
+    if (!registry_.WithNoLiveLocalMember([&] {
+          if (cancellation.stop_requested() || async_shutdown_.load(std::memory_order_acquire))
+            return;
+          runtime_invite_override_ = *normalized;
+          runtime_invite_override_xuid_ = *user;
+          ++configured_invite_title_generation_;
+          configured_invite_state_ = ConfiguredInviteLifecycleState::kUnclaimed;
+          ready_configured_invite_.reset();
+          committed = true;
+        }))
+      return RuntimeInviteUpdateResult::kLiveSession;
+  }
+  if (!committed)
+    return cancellation.stop_requested() ? RuntimeInviteUpdateResult::kCancelled
+                                         : RuntimeInviteUpdateResult::kUnavailable;
+  if (normalized->empty()) return RuntimeInviteUpdateResult::kCleared;
+  return StartConfiguredInviteOperation(title_id) ? RuntimeInviteUpdateResult::kStarted
+                                               : RuntimeInviteUpdateResult::kUnavailable;
 }
 
 void SessionManager::OnTitleTransition(uint32_t title_id) {
   std::lock_guard control_lock(configured_invite_control_mutex_);
-  auto configured_code = NormalizeDirectoryInviteCode(
-      REXCVAR_GET(session_directory_invite_code));
+  auto configured_code = NormalizeDirectoryInviteCode(runtime_invite_code());
   auto local_xuid = user_identity_ ? user_identity_(0) : std::nullopt;
   {
     std::lock_guard lock(configured_invite_mutex_);
@@ -3511,6 +3636,11 @@ void SessionManager::OnTitleTransition(uint32_t title_id) {
   {
     std::lock_guard lock(configured_invite_mutex_);
     ++configured_invite_title_generation_;
+    if (configured_invite_active_title_id_ && configured_invite_active_title_id_ != title_id) {
+      runtime_invite_override_.reset();
+      runtime_invite_override_xuid_.reset();
+    }
+    configured_invite_active_title_id_ = title_id;
     configured_invite_state_ = ConfiguredInviteLifecycleState::kUnclaimed;
   }
   StartConfiguredInviteOperation(title_id);
@@ -3525,6 +3655,9 @@ void SessionManager::OnTitleTermination() {
   discovery_.SetTitleId(0);
   std::lock_guard lock(configured_invite_mutex_);
   ++configured_invite_title_generation_;
+  configured_invite_active_title_id_ = 0;
+  runtime_invite_override_.reset();
+  runtime_invite_override_xuid_.reset();
   configured_invite_state_ = ConfiguredInviteLifecycleState::kUnclaimed;
   ready_configured_invite_.reset();
 }
@@ -3533,12 +3666,18 @@ void SessionManager::ShutdownAsyncActivity() {
   std::unique_lock lock(async_shutdown_mutex_);
   if (async_shutdown_complete_)
     return;
-  std::lock_guard control_lock(configured_invite_control_mutex_);
   async_shutdown_.store(true, std::memory_order_release);
+  std::lock_guard control_lock(configured_invite_control_mutex_);
   CancelConfiguredInviteOperation();
   accepted_invites_.Close();
   discovery_.StopAllClientAdmissions();
   discovery_.PollClientAdmissions();
+  {
+    std::lock_guard invite_lock(configured_invite_mutex_);
+    configured_invite_active_title_id_ = 0;
+    runtime_invite_override_.reset();
+    runtime_invite_override_xuid_.reset();
+  }
   async_shutdown_complete_ = true;
 }
 

@@ -9,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -303,6 +304,10 @@ class SessionRegistry {
                           SessionRecord updated, const std::function<bool()>& object_current);
 
  private:
+  friend class SessionManager;
+  // Runs only a local lifecycle mutation while registry/record membership is
+  // stable. The callback must not wait, call observers or perform I/O.
+  bool WithNoLiveLocalMember(const std::function<void()>& mutation);
   static uint64_t IdKey(const std::array<uint8_t, 8>& id);
   uint64_t machine_id_ = 0;
   mutable std::mutex mutex_;
@@ -416,6 +421,15 @@ class XSession final : public XObject {
   std::atomic<std::shared_ptr<SessionRecord>> record_;
 };
 
+enum class RuntimeInviteUpdateResult {
+  kStarted,
+  kCleared,
+  kInvalidCode,
+  kLiveSession,
+  kUnavailable,
+  kCancelled,
+};
+
 class SessionManager {
  public:
   SessionManager(KernelState* kernel_state, uint16_t discovery_port,
@@ -431,6 +445,10 @@ class SessionManager {
   void OnTitleTransition(uint32_t title_id);
   void OnTitleTermination();
   void ShutdownAsyncActivity();
+  // Native title-lifetime override; never writes the startup CVAR or config.
+  RuntimeInviteUpdateResult UpdateRuntimeInviteCode(
+      std::string_view code, std::stop_token cancellation = {});
+  std::string runtime_invite_code() const;
   ConfiguredInviteLifecycleState configured_invite_state() const;
   std::optional<ReadyConfiguredInvite> ready_configured_invite() const;
   AcceptedInviteStore& accepted_invites() { return accepted_invites_; }
@@ -443,6 +461,9 @@ class SessionManager {
   struct ConfiguredInviteOperation;
   bool StartConfiguredInviteOperation(uint32_t title_id);
   void CancelConfiguredInviteOperation();
+  std::shared_ptr<ConfiguredInviteOperation> RetireConfiguredInviteOperationLocked();
+  void DrainConfiguredInviteOperation(
+      const std::shared_ptr<ConfiguredInviteOperation>& operation);
   void RunConfiguredInviteOperation(
       const std::shared_ptr<ConfiguredInviteOperation>& operation);
   bool IsConfiguredInviteOperationCurrent(
@@ -471,12 +492,15 @@ class SessionManager {
   LanDiscoveryService discovery_;
   AcceptedInviteStore accepted_invites_;
   mutable std::mutex configured_invite_mutex_;
-  mutable std::mutex configured_invite_control_mutex_;
+  mutable std::timed_mutex configured_invite_control_mutex_;
   std::shared_ptr<ConfiguredInviteOperation> configured_invite_operation_;
   ConfiguredInviteLifecycleState configured_invite_state_ =
       ConfiguredInviteLifecycleState::kUnclaimed;
   std::optional<ReadyConfiguredInvite> ready_configured_invite_;
   uint64_t configured_invite_title_generation_ = 0;
+  uint32_t configured_invite_active_title_id_ = 0;
+  std::optional<std::string> runtime_invite_override_;
+  std::optional<uint64_t> runtime_invite_override_xuid_;
   uint64_t next_configured_invite_operation_token_ = 0;
   uint64_t configured_invite_claim_token_ = 0;
   std::atomic<bool> async_shutdown_{false};
