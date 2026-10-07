@@ -85,6 +85,19 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     enable_language(ASM)
     target_sources(rexcore PRIVATE guest_access_posix.cpp guest_access_amd64.S guest_fault_state.cpp guest_memory_posix.cpp)
+
+    if(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
+        # These checked-access paths live in the runtime's bounded PIC image.
+        # Keep the large code model for generated host and guest DLL targets;
+        # their independent link policy remains in rexglue_helpers.cmake.
+        # Small PIC uses shorter image-relative references. Direct GOT calls
+        # preserve the runtime's eager binding without PLT trampolines on each
+        # guest access. The linker verifies the signed relocation range.
+        set_property(SOURCE
+            guest_access_posix.cpp guest_fault_state.cpp guest_memory_posix.cpp
+            memory_posix.cpp seh_posix.cpp
+            APPEND PROPERTY COMPILE_OPTIONS -mcmodel=small -fno-plt)
+    endif()
 endif()
 
 # Xenos data-format layer (stateless; headers under include/rex/graphics/).
