@@ -60,6 +60,10 @@ struct ClientWireMember {
   uint64_t xuid;
   uint32_t flags;
   char name[16];
+  uint64_t machine_id;
+  uint32_t gameplay_ipv4;
+  uint16_t gameplay_port;
+  uint16_t reserved;
 };
 
 struct ClientDiscoveryPacket {
@@ -80,6 +84,20 @@ struct ClientDiscoveryPacket {
   uint32_t member_count;
   char host_name[16];
   ClientWireMember members[8];
+  uint64_t nonce;
+  uint64_t host_machine_id;
+  uint8_t incarnation[16];
+  uint8_t attempt[16];
+  uint8_t credential[16];
+  uint8_t authentication[16];
+  uint64_t revision;
+  uint32_t registered_mask;
+  uint32_t reserved3;
+  uint8_t client_public_key[32];
+  uint8_t server_public_key[32];
+  uint8_t credential_iv[12];
+  uint8_t credential_tag[16];
+  uint8_t request_id[16];
 };
 struct ClientInviteLanPacket {
   char magic[4];
@@ -103,12 +121,15 @@ ClientDiscoveryPacket ClientAdvertisement(const SessionRecord& session) {
   std::lock_guard lock(*session.mutex);
   ClientDiscoveryPacket packet{};
   packet.magic = htonl(0x5245584Cu);
-  packet.version = htons(1);
+  packet.version = htons(2);
   packet.type = 2;
   packet.title_id = htonl(kTitle);
   std::memcpy(packet.session_id, session.info.id.data(), sizeof(packet.session_id));
   std::memcpy(packet.session_key, session.info.key.data(), sizeof(packet.session_key));
   packet.host_xuid = ClientSwap64(session.host_xuid);
+  packet.nonce = ClientSwap64(session.nonce);
+  packet.host_machine_id = ClientSwap64(session.host_machine_id);
+  std::copy(session.arbitration_incarnation.begin(), session.arbitration_incarnation.end(), packet.incarnation);
   packet.host_ipv4 = session.info.host_address.ipv4;
   packet.host_port = htons(session.info.host_address.port);
   packet.flags = htonl(session.flags);
@@ -513,7 +534,7 @@ struct ConfiguredInviteNetworkFixture {
             if (lan_response && selector && request_proof &&
                 std::memcmp(probe.selector, selector->data(), 16) == 0 &&
                 std::memcmp(probe.proof, request_proof->data(), 16) == 0) {
-              std::array<uint8_t, 42> tuple{};
+              std::array<uint8_t, 74> tuple{};
               size_t offset = 0;
               auto append = [&](const void* data, size_t size) {
                 std::memcpy(tuple.data() + offset, data, size);
@@ -525,6 +546,9 @@ struct ConfiguredInviteNetworkFixture {
               append(&advertisement.host_xuid, 8);
               append(&advertisement.host_ipv4, 4);
               append(&advertisement.host_port, 2);
+              append(&advertisement.nonce, 8);
+              append(&advertisement.host_machine_id, 8);
+              append(advertisement.incarnation, 16);
               const auto proof = InviteLanAuthenticationTag(
                   kAttempt, "invite-lan-response-v1", tuple);
               if (proof) {
@@ -2057,8 +2081,8 @@ TEST_CASE("configured invite reaches immutable READY result using its own endpoi
   CHECK(ready->xnaddr.ethernet_address ==
         advertised.info.ethernet_address);
   CHECK(ready->xnaddr.online_address == advertised.info.online_address);
-  // The LAN advertisement format intentionally does not carry the host nonce.
-  CHECK(ready->nonce == 0);
+  // Modern LAN advertisements preserve the exact host registration nonce.
+  CHECK(ready->nonce == advertised.nonce);
   if (failed_join) {
     // XGI deletes its client session object after a failed downstream join.
     // The invite was already delivered; a healthy lease must not notify again.

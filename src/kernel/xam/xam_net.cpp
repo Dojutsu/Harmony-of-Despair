@@ -37,6 +37,8 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xevent.h>
 #include <rex/system/xam/session.h>
+#include <rex/system/xam/session_arbitration_guest.h>
+#include <rex/memory/mapping_lease.h>
 #include <rex/system/xam/gameplay_traversal.h>
 #include <rex/system/xsocket.h>
 #include <rex/system/xthread.h>
@@ -884,9 +886,34 @@ u32 NetDll_XNetGetDebugXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
   return XnAddrStatus::XNET_GET_XNADDR_NONE;
 }
 
-u32 NetDll_XNetXnAddrToMachineId_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr, mapped_u32 id_ptr) {
-  // Tell the caller we're not signed in to live (non-zero ret)
-  return 1;
+u32 NetDll_XNetXnAddrToMachineId_entry(u32 caller, u32 addr_address, u32 id_address) {
+  // The ABI output is ULONGLONG, not DWORD. Read/write the exact guest ranges
+  // before dereferencing either pointer; unknown or ambiguous identities fail.
+  auto* memory = REX_KERNEL_STATE()->memory();
+#if REX_PLATFORM_GNU_LINUX
+  memory::GuestMemoryAccessPin pin(memory->access_control());
+  if (!pin.memory()) return 0x2726; // WSAEFAULT
+  memory = pin.memory();
+#endif
+  std::array<uint8_t, 36> address{};
+  if (!CopyArbitrationGuestInput(memory, addr_address, address)) return 0x2726;
+  XnAddrIdentity identity;
+  std::copy_n(address.begin() + 10, identity.ethernet_address.size(), identity.ethernet_address.begin());
+  std::copy_n(address.begin() + 16, identity.online_address.size(), identity.online_address.begin());
+  uint32_t ipv4 = 0, online_ipv4 = 0;
+  std::memcpy(&ipv4, address.data(), sizeof(ipv4));
+  std::memcpy(&online_ipv4, address.data() + 4, sizeof(online_ipv4));
+  if (!ipv4) ipv4 = online_ipv4;
+  const uint16_t port = uint16_t((uint16_t(address[8]) << 8) | address[9]);
+  const auto machine_id = REX_KERNEL_STATE()->session_manager()->registry().FindArbitrationMachineId(
+      identity, ipv4, port, REX_KERNEL_STATE()->user_profile()->xuid());
+  if (!machine_id || !*machine_id) return 0x2741; // WSAEHOSTUNREACH
+  std::array<uint8_t, 8> result{};
+  auto value = *machine_id;
+  for (size_t i = 0; i < result.size(); ++i) {
+    result[result.size() - i - 1] = uint8_t(value); value >>= 8;
+  }
+  return CopyArbitrationGuestOutput(memory, id_address, result) ? 0 : 0x2726;
 }
 
 void NetDll_XNetInAddrToString_entry(u32 caller, u32 address, mapped_string string_out,

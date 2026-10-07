@@ -20,6 +20,7 @@
 #include <rex/system/xam/accepted_invite.h>
 #include <rex/system/xam/online_status.h>
 #include <rex/system/xam/session_directory.h>
+#include <rex/system/xam/session_arbitration.h>
 #include <rex/system/xobject.h>
 
 namespace rex::system {
@@ -133,9 +134,12 @@ struct SessionMember {
   bool private_slot = false;
   bool ready = false;
   std::shared_ptr<const GameplayAdmissionBinding> gameplay_admission;
+  uint64_t machine_id = 0;
+  LanAddress gameplay_address{};
 };
 
 struct SessionRecord;
+class ArbitrationClientBinding;
 
 enum class DiscoveryAdmissionSource { kPublicDiscovery, kInviteGrant };
 
@@ -177,6 +181,12 @@ struct SessionRecord {
   std::string traversal_attempt_id;
   std::string traversal_capability;
   uint64_t nonce = 0;
+  uint64_t host_machine_id = 0;
+  ArbitrationToken arbitration_incarnation{};
+  std::shared_ptr<SessionArbitrationAuthority> arbitration;
+  ArbitrationToken arbitration_local_attempt{};
+  uint64_t arbitration_revision = 0;
+  mutable std::shared_ptr<ArbitrationClientBinding> arbitration_client;
   uint64_t host_xuid = 0;
   std::string host_name;
   uint32_t flags = 0;
@@ -263,8 +273,12 @@ using ConfiguredInviteDiscoveryOperation =
 class SessionRegistry {
  public:
   using ChangeObserver = std::function<void(const std::array<uint8_t, 8>&)>;
-  explicit SessionRegistry(ChangeObserver observer = {})
-      : change_observer_(std::move(observer)) {}
+  explicit SessionRegistry(ChangeObserver observer = {});
+  uint64_t local_machine_id() const { return machine_id_; }
+  std::optional<uint64_t> FindArbitrationMachineId(const XnAddrIdentity& identity,
+      uint32_t ipv4, uint16_t port, uint64_t local_xuid) const;
+  bool CommitArbitration(const std::shared_ptr<SessionRecord>& expected,
+      const ArbitrationIdentity& identity, uint64_t revision, const std::function<bool()>& publish);
   std::shared_ptr<SessionRecord> Create(uint64_t host_xuid, std::string host_name,
                                         LanAddress host_address, uint32_t flags,
                                         uint32_t public_slots, uint32_t private_slots);
@@ -284,9 +298,12 @@ class SessionRegistry {
   bool Start(const std::array<uint8_t, 8>& id);
   bool End(const std::array<uint8_t, 8>& id);
   std::shared_ptr<SessionRecord> UpsertDiscovered(SessionRecord record);
+  bool CommitJoinedRecord(const std::shared_ptr<SessionRecord>& expected,
+                          SessionRecord updated, const std::function<bool()>& object_current);
 
  private:
   static uint64_t IdKey(const std::array<uint8_t, 8>& id);
+  uint64_t machine_id_ = 0;
   mutable std::mutex mutex_;
   std::unordered_map<uint64_t, std::shared_ptr<SessionRecord>> sessions_;
   // Retain IDs created by this instance for its lifetime. This prevents a
@@ -313,6 +330,7 @@ class LanDiscoveryService {
 
   bool Advertise(const std::shared_ptr<SessionRecord>& session);
   void SetTitleId(uint32_t title_id);
+  void SetArbitrationMachineId(uint64_t machine_id);
   void SetLocalUserIdentity(uint32_t local_user_index, std::optional<uint64_t> xuid);
   ClientAdmissionPrepareResult PrepareClientAdmission(
       uint32_t local_user_index, const DirectoryTraversalAttempt& attempt,
@@ -353,6 +371,8 @@ class LanDiscoveryService {
       const DirectoryTraversalAttempt& attempt,
       uint64_t client_admission_lifecycle_token,
       uint32_t local_user_index = 0);
+  std::optional<ArbitrationSnapshot> RegisterArbitration(
+      const std::shared_ptr<SessionRecord>& session, uint64_t local_xuid, uint64_t nonce);
   static uint32_t DetermineLanIpv4();
 
  private:
@@ -388,11 +408,11 @@ class XSession final : public XObject {
   explicit XSession(KernelState* kernel_state);
   ~XSession() override;
   bool Initialize();
-  std::shared_ptr<SessionRecord> record() const { return record_; }
+  std::shared_ptr<SessionRecord> record() const { return record_.load(std::memory_order_acquire); }
   void set_record(std::shared_ptr<SessionRecord> record);
 
  private:
-  std::shared_ptr<SessionRecord> record_;
+  std::atomic<std::shared_ptr<SessionRecord>> record_;
 };
 
 class SessionManager {

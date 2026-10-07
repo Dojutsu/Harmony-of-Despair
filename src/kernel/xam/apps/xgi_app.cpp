@@ -15,6 +15,8 @@
 #include <rex/kernel/xam/apps/xgi_app.h>
 #include <rex/logging.h>
 #include <rex/system/xam/session.h>
+#include <rex/system/xam/session_arbitration_guest.h>
+#include <rex/memory/mapping_lease.h>
 #include <rex/thread.h>
 
 namespace rex {
@@ -137,6 +139,18 @@ SessionInfo LoadSessionInfo(const GuestSessionInfo* input) {
 }
 XSession* LookupSession(KernelState* state, uint32_t object_ptr) {
   return state->session_manager()->LookupObject(object_ptr);
+}
+// Native bodies retain their originally stashed primary handle after alias
+// duplication/close. Inventory lookup retains under the object-table lock and
+// is used only for this uncommon stale-primary case, never raw-map Retain.
+object_ref<XSession> LookupArbitrationSession(KernelState* state, uint32_t native_address,
+                                            uint32_t primary_handle) {
+  auto object = state->object_table()->LookupObject<XSession>(primary_handle);
+  if (object && object->guest_object() == native_address) return object;
+  const auto candidates = state->object_table()->GetObjectsByType<XSession>();
+  for (const auto& candidate : candidates)
+    if (candidate->guest_object() == native_address) return candidate;
+  return {};
 }
 X_HRESULT WriteSearchResults(KernelState* state, uint32_t output_ptr, uint32_t output_size,
                              uint32_t max_results, bool refresh_network,
@@ -350,6 +364,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
         LanAddress address{LanDiscoveryService::DetermineLanIpv4(), 3074};
         session = manager.registry().Create(profile->xuid(), profile->name(), address, flags,
                                             num_slots_public, num_slots_private);
+        if (!session) return X_E_FAIL;
         StoreSessionInfo(guest_info, session->info);
         if (!manager.discovery().Advertise(session)) {
           REXKRNL_ERROR("XGISessionCreateImpl: failed to advertise LAN session");
@@ -408,8 +423,9 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       REXKRNL_DEBUG("{}({:08X}, count={}, xuids={:08X}, users={:08X}, private={:08X})",
                     is_local ? "XGISessionJoinLocal" : "XGISessionJoinRemote", session_ptr,
                     user_count, xuid_array_ptr, user_index_array, private_slots_array);
-      auto* object = LookupSession(kernel_state_, session_ptr);
-      if (!object || !object->record() || !user_count)
+      auto object = LookupArbitrationSession(kernel_state_, session_ptr, 0);
+      auto session = object ? object->record() : nullptr;
+      if (!object || !session || !user_count)
         return X_E_INVALIDARG;
       if (user_count > UINT32_MAX / 4 ||
           (private_slots_array &&
@@ -419,7 +435,6 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
           (is_local && user_index_array &&
            !ReadableJoinArray(memory_, user_index_array, user_count, 4)))
         return X_E_INVALIDARG;
-      auto session = object->record();
       if (is_local && session->host_xuid != kernel_state_->user_profile()->xuid())
         REXKRNL_INFO("INVITE_DIAG XGI_JOIN_BEGIN xbox_session={:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X} members={}",
                      session->info.id[0], session->info.id[1],
@@ -480,10 +495,12 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
           updated_member.name = kernel_state_->user_profile()->name();
         }
       }
-      kernel_state_->session_manager()->registry().UpsertDiscovered(
-          std::move(*updated));
-      session = kernel_state_->session_manager()->registry().Find(session->info.id);
-      object->set_record(session);
+      const bool committed = kernel_state_->session_manager()->registry().CommitJoinedRecord(
+          session, std::move(*updated), [&] {
+            return object->record() == session &&
+                LookupArbitrationSession(kernel_state_, session_ptr, 0).get() == object.get();
+          });
+      if (!committed) return X_E_FAIL;
       REXKRNL_INFO(
           "GAMEPLAY_XGI_COMPLETION_CALL user={} local_xuid={:016X} host_xuid={:016X} "
           "session_present={}",
@@ -727,20 +744,79 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       return X_E_SUCCESS;
     }
     case 0x000B001A: {
-      assert_true(!buffer_length || buffer_length == 28);
-
-      uint32_t obj_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
-      uint32_t flags = memory::load_and_swap<uint32_t>(buffer + 4);
-      uint64_t session_nonce = memory::load_and_swap<uint64_t>(buffer + 8);
-      uint32_t session_duration_sec = memory::load_and_swap<uint32_t>(buffer + 16);  // 300
-      uint32_t results_buffer_size = memory::load_and_swap<uint32_t>(buffer + 20);
-      uint32_t results_ptr = memory::load_and_swap<uint32_t>(buffer + 24);
-
-      REXKRNL_DEBUG("XSessionArbitrationRegister({:08X}, {:08X}, {:016X}, {:08X}, {:08X}, {:08X})",
-                    obj_ptr, flags, session_nonce, session_duration_sec, results_buffer_size,
-                    results_ptr);
-
-      return X_E_SUCCESS;
+      std::optional<GuestArbitrationRequest> request;
+      std::array<uint8_t, 16> native_header{};
+#if REX_PLATFORM_GNU_LINUX
+      const auto memory_control = memory_->access_control();
+#endif
+      {
+#if REX_PLATFORM_GNU_LINUX
+        memory::GuestMemoryAccessPin pin(memory_control);
+        if (!pin.memory()) return X_E_INVALIDARG;
+        auto* guest_memory = pin.memory();
+#else
+        auto* guest_memory = memory_;
+#endif
+        request = ReadArbitrationGuestRequest(guest_memory, buffer_ptr, buffer_length);
+        if (!request || request->flags || !request->nonce || !request->session_object ||
+            !request->result_address) return X_E_INVALIDARG;
+        if (request->result_capacity < kArbitrationGuestPreflightSize)
+          return X_ERROR_INSUFFICIENT_BUFFER;
+        if (!PreflightArbitrationGuestOutput(guest_memory, request->result_address,
+                                             request->result_capacity) ||
+            !CopyArbitrationGuestInput(guest_memory, request->session_object, native_header))
+          return X_E_INVALIDARG;
+      }
+      auto header_word = [&](size_t offset) {
+        uint32_t value = 0;
+        for (size_t i = 0; i < 4; ++i) value = (value << 8) | native_header[offset + i];
+        return value;
+      };
+      if (header_word(8) != kXObjSignature) return X_E_INVALIDARG;
+      const auto handle = header_word(12);
+      auto object = LookupArbitrationSession(kernel_state_, request->session_object, handle);
+      if (!object) return X_E_INVALIDARG;
+      const auto session = object->record();
+      if (!session) return X_E_INVALIDARG;
+      const uint64_t local_xuid = kernel_state_->user_profile()->xuid();
+      {
+        std::lock_guard lock(*session->mutex);
+        if (session->state == SessionState::kDeleted || session->nonce != request->nonce)
+          return X_E_INVALIDARG;
+      }
+      REXKRNL_DEBUG("XSessionArbitrationRegister({:08X}, {:08X}, {:016X}, {}, {}, {:08X})",
+                    request->session_object, request->flags, request->nonce,
+                    request->duration_seconds, request->result_capacity, request->result_address);
+      // Duration is recognized as a BE32 input. TU2 passes 300; no registration
+      // expiry is inferred from that title literal. The actual service owns
+      // accepted registration state and returns only real registered members.
+      const auto snapshot = kernel_state_->session_manager()->discovery().RegisterArbitration(
+          session, local_xuid, request->nonce);
+      if (!snapshot) return X_E_FAIL;
+      size_t local_occurrences = 0;
+      for (const auto& registrant : snapshot->registrants)
+        local_occurrences += size_t(std::count(registrant.xuids.begin(), registrant.xuids.end(), local_xuid));
+      if (local_occurrences != 1) return X_E_FAIL;
+      const auto staged = SerializeArbitrationGuestResults(*snapshot, request->result_address);
+      if (!staged || staged->size() > request->result_capacity) return X_E_FAIL;
+#if REX_PLATFORM_GNU_LINUX
+      memory::GuestMemoryAccessPin final_pin(memory_control);
+      if (!final_pin.memory()) return X_E_INVALIDARG;
+      auto* guest_memory = final_pin.memory();
+#else
+      auto* guest_memory = memory_;
+#endif
+      // Registry lifetime validation and guest publication share one bounded
+      // commit. Never hold the global/mapping/record locks across transport.
+      const bool published = kernel_state_->session_manager()->registry().CommitArbitration(
+          session, snapshot->identity, snapshot->revision, [&] {
+            const auto current = LookupArbitrationSession(kernel_state_, request->session_object, handle);
+            return current.get() == object.get() && object->record() == session &&
+                PreflightArbitrationGuestOutput(guest_memory, request->result_address,
+                                                 request->result_capacity) &&
+                CopyArbitrationGuestOutput(guest_memory, request->result_address, *staged);
+          });
+      return published ? X_E_SUCCESS : X_E_FAIL;
     }
     case 0x000B001B: {
       assert_true(!buffer_length || buffer_length == 32);

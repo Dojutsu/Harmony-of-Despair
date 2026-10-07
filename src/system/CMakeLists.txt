@@ -36,6 +36,9 @@ set(REXSYSTEM_SOURCES
     xam/gameplay_traversal.cpp
     xam/online_status.cpp
     xam/session.cpp
+    xam/session_arbitration.cpp
+    xam/session_arbitration_crypto.cpp
+    xam/session_arbitration_guest.cpp
     xam/session_directory.cpp
     xam/user_profile.cpp
 

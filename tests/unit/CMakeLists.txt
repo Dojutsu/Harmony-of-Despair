@@ -21,6 +21,9 @@ add_executable(unit_tests
     system/function_dispatcher_test.cpp
     system/gameplay_traversal_test.cpp
     system/session_test.cpp
+    system/session_arbitration_test.cpp
+    system/session_arbitration_crypto_test.cpp
+    system/session_arbitration_transport_test.cpp
     system/accepted_invite_test.cpp
     system/session_admission_test.cpp
     system/session_client_admission_test.cpp
@@ -120,6 +123,18 @@ add_executable(xgi_slot_array_test kernel/xgi_slot_array_test.cpp)
 target_link_libraries(xgi_slot_array_test PRIVATE rexruntime)
 set_target_properties(xgi_slot_array_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
 add_test(NAME xgi_slot_array COMMAND xgi_slot_array_test)
+
+add_executable(xgi_arbitration_abi_test kernel/xgi_arbitration_abi_test.cpp)
+target_link_libraries(xgi_arbitration_abi_test PRIVATE rexruntime)
+target_compile_options(xgi_arbitration_abi_test PRIVATE -UREXGLUE_ENABLE_PROFILING)
+set_target_properties(xgi_arbitration_abi_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
+if(UNIX AND NOT APPLE)
+    set_target_properties(xgi_arbitration_abi_test PROPERTIES
+        INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
+endif()
+add_test(NAME xgi_arbitration_abi COMMAND xgi_arbitration_abi_test)
+set_tests_properties(xgi_arbitration_abi PROPERTIES TIMEOUT 30)
 
 add_executable(accepted_invite_kernel_test kernel/accepted_invite_kernel_test.cpp)
 target_link_libraries(accepted_invite_kernel_test PRIVATE rexruntime)

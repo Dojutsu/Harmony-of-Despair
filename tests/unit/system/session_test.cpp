@@ -61,17 +61,20 @@ TEST_CASE("invite LAN proof binds attempt, domain, source and hosted tuple",
   CHECK_FALSE(InviteLanAuthenticationTag("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
                                          "invite-lan-selector-v1"));
 
-  std::array<uint8_t, 42> tuple{};
+  std::array<uint8_t, 74> tuple{};
   tuple[0] = 0x58; // title
   tuple[4] = 1;    // Xbox session ID
   tuple[12] = 2;   // exchange key
   tuple[28] = 3;   // host XUID
   tuple[36] = 10;  // hosted address
   tuple[40] = 0x78; // gameplay port
+  tuple[42]=1; // registration nonce
+  tuple[50]=2; // host machine
+  tuple[58]=3; // incarnation
   const auto proof = InviteLanAuthenticationTag(attempt, "invite-lan-response-v1", tuple);
   REQUIRE(proof);
   CHECK(InviteLanAuthenticationTag(other, "invite-lan-response-v1", tuple) != proof);
-  for (const size_t field : std::array<size_t, 6>{0, 4, 12, 28, 36, 40}) {
+  for (const size_t field : std::array<size_t, 9>{0, 4, 12, 28, 36, 40, 42, 50, 58}) {
     auto altered = tuple;
     altered[field] ^= 1;
     CHECK(InviteLanAuthenticationTag(attempt, "invite-lan-response-v1", altered) != proof);

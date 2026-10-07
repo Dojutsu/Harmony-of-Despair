@@ -19,6 +19,7 @@
 
 #include <rex/system/xam/nat_probe.h>
 #include <rex/system/xam/session.h>
+#include <rex/system/xam/session_arbitration_crypto.h>
 #include <rex/cvar.h>
 
 namespace rex::system::xam {
@@ -184,7 +185,7 @@ struct NatFixture {
   }
 };
 
-using DiscoveryWirePacket = std::array<uint8_t, 308>;
+using DiscoveryWirePacket = std::array<uint8_t, 640>;
 
 void PutBigEndian(DiscoveryWirePacket& packet, size_t offset, uint64_t value, size_t width = 4) {
   for (size_t index = 0; index < width; ++index)
@@ -280,16 +281,25 @@ DiscoveryWirePacket JoinPacket(const SessionRecord& session, uint32_t title_id, 
                                bool private_slot) {
   DiscoveryWirePacket packet{};
   PutBigEndian(packet, 0, 0x5245584Cu);
-  PutBigEndian(packet, 4, 1, 2);
+  PutBigEndian(packet, 4, 2, 2);
   packet[6] = 3;
   PutBigEndian(packet, 8, title_id);
   std::memcpy(packet.data() + 12, session.info.id.data(), 8);
   std::memcpy(packet.data() + 20, session.info.key.data(), 16);
   PutBigEndian(packet, 36, session.host_xuid, 8);
+  PutBigEndian(packet, 436, session.nonce, 8);
+  PutBigEndian(packet, 444, session.host_machine_id, 8);
+  std::copy(session.arbitration_incarnation.begin(), session.arbitration_incarnation.end(),packet.begin()+452);
   PutBigEndian(packet, 64, 1);
   PutBigEndian(packet, 84, xuid, 8);
   PutBigEndian(packet, 92, private_slot ? 2 : 0);
   std::memcpy(packet.data() + 96, "WirePlayer", 10);
+  PutBigEndian(packet, 112, 0x100000000ull+xuid, 8);
+  PutBigEndian(packet, 124, 3074, 2);
+  PutBigEndian(packet, 468, 0x200000000ull+xuid, 8);
+  PutBigEndian(packet,624,0x300000000ull+xuid,8);
+  const auto key=NewArbitrationKey(); REQUIRE(key);
+  std::copy(key->public_key().begin(),key->public_key().end(),packet.begin()+532);
   return packet;
 }
 }  // namespace

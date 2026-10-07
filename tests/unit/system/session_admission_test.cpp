@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <rex/system/xam/session.h>
+#include <rex/system/xam/session_arbitration_crypto.h>
 #include <array>
 #include <barrier>
 #include <thread>
@@ -157,7 +158,7 @@ TEST_CASE("preexisting invalid host accounting is not made worse", "[session][ad
 
 namespace rex::system::xam {
 namespace {
-using Packet = std::array<uint8_t, 308>; // Version-1 fixed wire layout; 84 + 8*28.
+using Packet = std::array<uint8_t, 640>; // Version2:84 +8*44 +96 registration bytes.
 #if REX_PLATFORM_WIN32
 using TestSocket = SOCKET;
 constexpr auto bad_socket = INVALID_SOCKET;
@@ -229,14 +230,19 @@ struct LocalDiscoveryConfig {
   }
 };
 Packet Query(uint32_t title) {
-  Packet p{}; Put(p, 0, 0x5245584c); Put(p, 4, 1, 2); p[6] = 1; Put(p, 8, title);
+  Packet p{}; Put(p, 0, 0x5245584c); Put(p, 4, 2, 2); p[6] = 1; Put(p, 8, title);
   return p;
 }
 Packet JoinPacket(Packet base, uint64_t xuid, bool priv = false) {
   base[6] = 3; Put(base, 64, 1);
-  std::fill(base.begin()+84, base.end(), 0);
+  std::fill(base.begin()+84, base.begin()+436, 0);
+  std::fill(base.begin()+468, base.end(), 0);
   Put(base, 84, xuid, 8); Put(base, 92, priv ? 2 : 0);
   std::memcpy(base.data()+96, "WirePlayer", 10);
+  Put(base,112,0x100000000ull+xuid,8); Put(base,124,3074,2);
+  Put(base,468,0x200000000ull+xuid,8); Put(base,624,0x300000000ull+xuid,8);
+  const auto key=NewArbitrationKey(); REQUIRE(key);
+  std::copy(key->public_key().begin(),key->public_key().end(),base.begin()+532);
   return base;
 }
 }
@@ -261,7 +267,7 @@ TEST_CASE("discovery admission validates identity and ignores private wire claim
   CHECK_FALSE(Transfer(socket.fd, port, wrong)); assert_count(1,0);
   wrong = JoinPacket(*base, 2); Put(wrong,8,title+1);
   CHECK_FALSE(Transfer(socket.fd, port, wrong)); assert_count(1,0);
-  wrong = JoinPacket(*base, 2); Put(wrong,4,2,2);
+  wrong = JoinPacket(*base, 2); Put(wrong,4,1,2);
   CHECK_FALSE(Transfer(socket.fd, port, wrong)); assert_count(1,0);
   wrong = JoinPacket(*base, 2); Put(wrong,36,9,8);
   CHECK_FALSE(Transfer(socket.fd, port, wrong)); assert_count(1,0);
@@ -272,20 +278,38 @@ TEST_CASE("discovery admission validates identity and ignores private wire claim
   CHECK_FALSE(Transfer(socket.fd, port, wrong)); assert_count(1,0);
   wrong = JoinPacket(*base, 2); Put(wrong,92,8);
   CHECK_FALSE(Transfer(socket.fd, port, wrong)); assert_count(1,0);
-  REQUIRE(Transfer(socket.fd, port, JoinPacket(*base, 2, true))); assert_count(2,0);
+  const auto admitted_two = JoinPacket(*base, 2, true);
+  REQUIRE(Transfer(socket.fd, port, admitted_two)); assert_count(2,0);
+  // Same observed socket/challenge with another ephemeral key cannot fetch
+  // the admitted member's continuity credential.
+  auto different_key = JoinPacket(*base,2,true);
+  CHECK_FALSE(Transfer(socket.fd,port,different_key)); assert_count(2,0);
   REQUIRE(Transfer(socket.fd, port, JoinPacket(*base, 3))); assert_count(3,0);
   REQUIRE(Transfer(socket.fd, port, JoinPacket(*base, 4))); assert_count(4,0);
   CHECK_FALSE(Transfer(socket.fd, port, JoinPacket(*base, 5, true))); assert_count(4,0);
   std::string before;
   { std::lock_guard lock(*r->mutex); before = Members(*r); }
-  auto retry = JoinPacket(*base, 2, true); Put(retry,92,6); retry[96]='X';
+  auto retry = admitted_two; Put(retry,92,6); retry[96]='X';
   REQUIRE(Transfer(socket.fd, port, retry)); assert_count(4,0);
   { std::lock_guard lock(*r->mutex); CHECK(Members(*r) == before); }
-  auto leave = JoinPacket(*base, 3); leave[6]=4;
+  auto authenticated_leave = [&](uint64_t xuid) {
+    auto request = JoinPacket(*base, xuid); request[6] = 4;
+    const auto identity = r->arbitration->identity();
+    const auto token = r->arbitration->CredentialForVerification(identity, xuid, 0x100000000ull+xuid);
+    REQUIRE(token);
+    constexpr char digits[] = "0123456789abcdef"; std::string key;
+    for (uint8_t byte : *token) { key += digits[byte >> 4]; key += digits[byte & 15]; }
+    const auto tag = InviteLanAuthenticationTag(key, "session-leave-v2", request);
+    REQUIRE(tag); std::copy(tag->begin(),tag->end(),request.begin()+500);
+    return request;
+  };
+  auto unauthenticated_leave = JoinPacket(*base,3); unauthenticated_leave[6]=4;
+  CHECK_FALSE(Transfer(socket.fd,port,unauthenticated_leave)); assert_count(4,0);
+  auto leave = authenticated_leave(3);
   REQUIRE(Transfer(socket.fd, port, leave)); assert_count(3,0);
   REQUIRE(registry.Join(r->info.id, Member(6, true))); assert_count(3,1);
   REQUIRE(Transfer(socket.fd, port, JoinPacket(*base, 6))); assert_count(3,1);
-  leave = JoinPacket(*base, 6); leave[6]=4;
+  leave = authenticated_leave(6);
   REQUIRE(Transfer(socket.fd, port, leave)); assert_count(3,0);
   // Registry and discovery compete under the same record lock.
   std::barrier start(2); bool title_joined = false;
@@ -306,17 +330,15 @@ TEST_CASE("advertisement decode rejects duplicate and impossible rosters",
   std::memcpy(valid.data()+12, session->info.id.data(), 8);
   std::memcpy(valid.data()+20, session->info.key.data(), 16);
   Put(valid,36,1,8); Put(valid,48,3074,2); Put(valid,56,4); Put(valid,60,2); Put(valid,64,2);
-  Put(valid,84,1,8); Put(valid,112,2,8);
-  for (int variant=0; variant<9; ++variant) {
+  Put(valid,84,1,8); Put(valid,128,2,8);
+  for (int variant=0; variant<7; ++variant) {
     INFO("variant=" << variant);
     Packet response=valid;
-    if(variant==1) Put(response,112,1,8); // Duplicate XUID.
+    if(variant==1) Put(response,128,1,8); // Duplicate XUID.
     if(variant==2) Put(response,64,9); // Wire capacity exceeded, not clamped.
     if(variant==3) Put(response,56,1); // Two public members in one public slot.
-    if(variant==4) { Put(response,120,2); Put(response,60,0); } // Private overflow.
-    if(variant==5) Put(response,112,0,8);
-    if(variant==6) response[12]^=1; // Exact-session response check.
-    if(variant==7) Put(response,112,3,8); // Does not acknowledge requested member.
+    if(variant==4) { Put(response,136,2); Put(response,60,0); } // Private overflow.
+    if(variant==5) Put(response,128,0,8);
     Socket server; REQUIRE(server.fd!=bad_socket);
     auto addr=Address(0); REQUIRE(bind(server.fd,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))==0);
 #if REX_PLATFORM_WIN32
@@ -325,20 +347,26 @@ TEST_CASE("advertisement decode rejects duplicate and impossible rosters",
     socklen_t length=sizeof(addr);
 #endif
     REQUIRE(getsockname(server.fd,reinterpret_cast<sockaddr*>(&addr),&length)==0);
-    SessionRecord target=*session;
-    target.discovery_address={htonl(INADDR_LOOPBACK),ntohs(addr.sin_port)};
+    std::atomic<bool> responded=false;
     std::jthread reply([&] {
       sockaddr_in source{};
       if(Receive(server.fd,source,1000)) {
         std::vector<uint8_t> wire(response.begin(), response.end());
-        if (variant == 8) wire.push_back(0xA5); // Valid prefix, oversized frame.
+        if (variant == 6) wire.push_back(0xA5); // Valid prefix, oversized frame.
         sendto(server.fd,reinterpret_cast<const char*>(wire.data()),int(wire.size()),0,
                reinterpret_cast<sockaddr*>(&source),sizeof(source));
+        responded=true;
       }
     });
-    LanDiscoveryService client(title, 39058);
-    auto result=client.Join(target,Member(2),100);
-    CHECK(result.has_value() == (variant==0));
+    LanDiscoveryService client(title, ntohs(addr.sin_port));
+    // Discovery observations are display metadata; they cannot create a
+    // private joined binding. Authenticated exact-session join/retry is
+    // exercised against two real services in session_arbitration_transport.
+    const auto result=client.Search(100,4);
+    CHECK(responded);
+    CHECK((result.size()==1) == (variant==0));
+    if(!result.empty()) CHECK_FALSE(result[0].arbitration_client);
   }
+
 }
 } // namespace rex::system::xam

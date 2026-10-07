@@ -1,4 +1,5 @@
 #include <rex/system/xam/session.h>
+#include <rex/system/xam/session_arbitration_crypto.h>
 
 #include <algorithm>
 #include <atomic>
@@ -11,6 +12,7 @@
 #include <rex/logging.h>
 #include <rex/cvar.h>
 #include <rex/system/kernel_state.h>
+#include <rex/thread.h>
 #include <rex/system/xam/nat_probe.h>
 
 #if REX_PLATFORM_GNU_LINUX
@@ -38,6 +40,33 @@ static constexpr SOCKET kInvalidSocket = -1;
 #endif
 
 namespace rex::system::xam {
+
+// A joined record owns its continuity token and separate registration socket.
+// Discovery's retained descriptor can be retired without aliasing this socket.
+class ArbitrationClientBinding final {
+ public:
+  ~ArbitrationClientBinding() {
+    if (socket == kInvalidSocket) return;
+#if REX_PLATFORM_WIN32
+    closesocket(socket);
+#else
+    close(socket);
+#endif
+  }
+  std::mutex mutex;
+  SOCKET socket = kInvalidSocket;
+  ArbitrationIdentity identity{};
+  uint64_t xuid = 0;
+  uint64_t machine_id = 0;
+  ArbitrationToken credential{};
+  ArbitrationToken challenge{};
+  ArbitrationToken attempt{};
+  std::optional<EphemeralArbitrationKey> key;
+  std::chrono::steady_clock::time_point created = std::chrono::steady_clock::now();
+  std::atomic<bool> confirmed = false;
+  std::atomic<bool> credential_received = false;
+  LanAddress target{};
+};
 
 std::optional<LanAddress> LateTraversalQueryState::TakeAcknowledgedPeer(
     bool search_active, std::optional<LanAddress> acknowledged_peer) {
@@ -95,11 +124,13 @@ REXCVAR_DEFINE_STRING(
 
 namespace {
 constexpr uint32_t kDiscoveryMagic = 0x5245584Cu;
-constexpr uint16_t kDiscoveryVersion = 1;
+constexpr uint16_t kDiscoveryVersion = 2;
 constexpr uint8_t kQuery = 1;
 constexpr uint8_t kAdvertisement = 2;
 constexpr uint8_t kJoin = 3;
 constexpr uint8_t kLeave = 4;
+constexpr uint8_t kRegister = 5;
+constexpr uint8_t kRegisterReply = 6;
 constexpr size_t kMaxWireMembers = 8;
 
 enum class MemberUpdateSource {
@@ -160,7 +191,11 @@ bool ApplyMemberBatch(SessionRecord& session, std::span<const SessionMember> mem
     }
     // Ordinary title metadata updates preserve the existing admission instance.
     // Removing and subsequently recreating a member does not inherit it.
-    if (it != candidate.end()) member.gameplay_admission = it->gameplay_admission;
+    if (it != candidate.end()) {
+      member.gameplay_admission = it->gameplay_admission;
+      member.machine_id = it->machine_id;
+      member.gameplay_address = it->gameplay_address;
+    }
     if (it == candidate.end())
       candidate.push_back(std::move(member));
     else
@@ -169,6 +204,14 @@ bool ApplyMemberBatch(SessionRecord& session, std::span<const SessionMember> mem
   if (!ValidMemberAccounting(candidate, session.max_public_slots,
                              session.max_private_slots))
     return reject("CAPACITY_OR_DUPLICATE_ROSTER");
+  if (session.arbitration_client) {
+    const auto same_members = candidate.size() == session.members.size() &&
+        std::all_of(candidate.begin(),candidate.end(),[&](const auto& member) {
+          return std::any_of(session.members.begin(),session.members.end(),
+              [&](const auto& previous) { return previous.xuid == member.xuid; });
+        });
+    if (!same_members) session.arbitration_revision = 0;
+  }
   session.members.swap(candidate);
   if (source != MemberUpdateSource::kTitleAllocatedPool) {
     const auto private_count = std::count_if(session.members.begin(), session.members.end(),
@@ -202,6 +245,10 @@ struct WireMember {
   uint64_t xuid;
   uint32_t flags;
   char name[16];
+  uint64_t machine_id;
+  uint32_t gameplay_ipv4;
+  uint16_t gameplay_port;
+  uint16_t reserved;
 };
 struct DiscoveryPacket {
   uint32_t magic;
@@ -221,6 +268,20 @@ struct DiscoveryPacket {
   uint32_t member_count;
   char host_name[16];
   WireMember members[kMaxWireMembers];
+  uint64_t nonce;
+  uint64_t host_machine_id;
+  uint8_t incarnation[16];
+  uint8_t attempt[16];
+  uint8_t credential[16]; // Only admitted unicast join replies carry encrypted token bytes.
+  uint8_t authentication[16];
+  uint64_t revision;
+  uint32_t registered_mask;
+  uint32_t reserved3;
+  uint8_t client_public_key[32];
+  uint8_t server_public_key[32];
+  uint8_t credential_iv[12];
+  uint8_t credential_tag[16];
+  uint8_t request_id[16]; // Fresh RPC correlation, separate from durable registration attempt.
 };
 struct InviteLanPacket {
   char magic[4];
@@ -232,6 +293,8 @@ struct InviteLanPacket {
 };
 #pragma pack(pop)
 static_assert(sizeof(InviteLanPacket) == 40);
+static_assert(sizeof(DiscoveryPacket) == 640);
+static_assert(sizeof(DiscoveryPacket) < 1200);
 
 constexpr uint8_t kInviteLanRequest = 1;
 constexpr uint8_t kInviteLanResponse = 2;
@@ -297,8 +360,8 @@ std::array<uint8_t, 6> InviteLanSourceBytes(LanAddress source) {
   return bytes;
 }
 
-std::array<uint8_t, 42> InviteLanTupleBytes(const DiscoveryPacket& packet) {
-  std::array<uint8_t, 42> bytes{};
+std::array<uint8_t, 74> InviteLanTupleBytes(const DiscoveryPacket& packet) {
+  std::array<uint8_t, 74> bytes{};
   size_t offset = 0;
   auto append = [&](const void* data, size_t size) {
     std::memcpy(bytes.data() + offset, data, size);
@@ -310,6 +373,9 @@ std::array<uint8_t, 42> InviteLanTupleBytes(const DiscoveryPacket& packet) {
   append(&packet.host_xuid, 8);
   append(&packet.host_ipv4, 4);
   append(&packet.host_port, 2);
+  append(&packet.nonce, 8);
+  append(&packet.host_machine_id, 8);
+  append(packet.incarnation, 16);
   return bytes;
 }
 
@@ -342,6 +408,69 @@ uint64_t Swap64(uint64_t value) {
   const uint32_t low = htonl(static_cast<uint32_t>(value));
   return (uint64_t(low) << 32) | high;
 }
+ArbitrationIdentity WireIdentity(const DiscoveryPacket& packet) {
+  ArbitrationIdentity result;
+  std::copy_n(packet.session_id, 8, result.session_id.begin());
+  std::copy_n(packet.session_key, 16, result.exchange_key.begin());
+  std::copy_n(packet.incarnation, 16, result.incarnation.begin());
+  result.nonce = Swap64(packet.nonce);
+  result.host_xuid = Swap64(packet.host_xuid);
+  result.host_machine_id = Swap64(packet.host_machine_id);
+  return result;
+}
+ArbitrationIdentity RecordIdentity(const SessionRecord& record) {
+  return {record.info.id, record.info.key, record.arbitration_incarnation,
+          record.nonce, record.host_xuid, record.host_machine_id};
+}
+ArbitrationToken WireToken(const uint8_t* data) {
+  ArbitrationToken result{}; std::copy_n(data, result.size(), result.begin()); return result;
+}
+bool NonzeroToken(const ArbitrationToken& value) { return value != ArbitrationToken{}; }
+std::array<uint8_t, 148> JoinCredentialAAD(const DiscoveryPacket& packet) {
+  std::array<uint8_t, 148> bytes{}; size_t offset = 0;
+  const auto append = [&](const void* data, size_t length) {
+    std::memcpy(bytes.data()+offset, data, length); offset += length;
+  };
+  append(&packet.title_id,4); append(packet.session_id,8); append(packet.session_key,16);
+  append(&packet.host_xuid,8); append(&packet.nonce,8); append(&packet.host_machine_id,8);
+  append(packet.incarnation,16); append(&packet.members[0].xuid,8);
+  append(&packet.members[0].machine_id,8); append(packet.attempt,16);
+  append(packet.client_public_key,32); append(packet.request_id,16); return bytes;
+}
+ArbitrationPublicKey WirePublicKey(const uint8_t* bytes) {
+  ArbitrationPublicKey key{}; std::copy_n(bytes,key.size(),key.begin()); return key;
+}
+
+std::string TokenHex(const ArbitrationToken& token) {
+  constexpr char digits[] = "0123456789abcdef";
+  std::string key; key.reserve(32);
+  for (uint8_t byte : token) { key += digits[byte >> 4]; key += digits[byte & 15]; }
+  return key;
+}
+// Initial retries must retain both the challenge and the client's ephemeral
+// public key. A new key cannot obtain an already admitted peer's token through
+// the bounded unauthenticated lost-reply retry seam.
+std::optional<ArbitrationToken> BoundJoinChallenge(const DiscoveryPacket& packet) {
+  const auto challenge = WireToken(packet.attempt);
+  if (!NonzeroToken(challenge)) return std::nullopt;
+  return InviteLanMac(TokenHex(challenge), "session-admission-challenge-v2", packet.client_public_key);
+}
+bool SignPacket(DiscoveryPacket& packet, const ArbitrationToken& credential,
+                std::string_view domain) {
+  if (!NonzeroToken(credential)) return false;
+  const auto key = TokenHex(credential);
+  std::memset(packet.authentication, 0, sizeof(packet.authentication));
+  const auto tag = InviteLanMac(key, domain,
+      {reinterpret_cast<const uint8_t*>(&packet), sizeof(packet)});
+  if (!tag) return false;
+  std::copy(tag->begin(), tag->end(), packet.authentication); return true;
+}
+bool VerifyPacket(const DiscoveryPacket& packet, const ArbitrationToken& credential,
+                  std::string_view domain) {
+  auto expected = packet;
+  return SignPacket(expected, credential, domain) &&
+      InviteLanEqual(packet.authentication, expected.authentication, 16);
+}
 void CloseSocket(SOCKET value) {
   if (value == kInvalidSocket)
     return;
@@ -373,7 +502,10 @@ bool SetNonBlocking(SOCKET value) {
   return ioctlsocket(value, FIONBIO, &enabled) == 0;
 #else
   int flags = fcntl(value, F_GETFL, 0);
-  return flags >= 0 && fcntl(value, F_SETFL, flags | O_NONBLOCK) == 0;
+  const int descriptor_flags = fcntl(value,F_GETFD,0);
+  return flags >= 0 && descriptor_flags >= 0 &&
+      fcntl(value,F_SETFD,descriptor_flags | FD_CLOEXEC) == 0 &&
+      fcntl(value, F_SETFL, flags | O_NONBLOCK) == 0;
 #endif
 }
 bool IsPrivateLanIpv4(uint32_t network_address) {
@@ -410,6 +542,9 @@ DiscoveryPacket Encode(const SessionRecord& session, uint32_t title_id) {
   std::memcpy(packet.session_id, session.info.id.data(), 8);
   std::memcpy(packet.session_key, session.info.key.data(), 16);
   packet.host_xuid = Swap64(session.host_xuid);
+  packet.nonce = Swap64(session.nonce);
+  packet.host_machine_id = Swap64(session.host_machine_id);
+  std::copy(session.arbitration_incarnation.begin(), session.arbitration_incarnation.end(), packet.incarnation);
   packet.host_ipv4 = session.info.host_address.ipv4;
   packet.host_port = htons(session.info.host_address.port);
   packet.flags = htonl(session.flags);
@@ -420,6 +555,10 @@ DiscoveryPacket Encode(const SessionRecord& session, uint32_t title_id) {
   for (size_t i = 0; i < std::min(session.members.size(), kMaxWireMembers); ++i) {
     const auto& source = session.members[i];
     packet.members[i].xuid = Swap64(source.xuid);
+    packet.members[i].machine_id = Swap64(source.machine_id);
+    const auto address = source.xuid == session.host_xuid ? session.info.host_address : source.gameplay_address;
+    packet.members[i].gameplay_ipv4 = address.ipv4;
+    packet.members[i].gameplay_port = htons(address.port);
     packet.members[i].flags = htonl((source.local ? 1u : 0u) | (source.private_slot ? 2u : 0u) |
                                     (source.ready ? 4u : 0u));
     std::strncpy(packet.members[i].name, source.name.c_str(), sizeof(packet.members[i].name) - 1);
@@ -429,12 +568,16 @@ DiscoveryPacket Encode(const SessionRecord& session, uint32_t title_id) {
 std::optional<SessionRecord> Decode(const DiscoveryPacket& packet, uint32_t title_id,
                                     uint32_t source_ipv4) {
   if (ntohl(packet.magic) != kDiscoveryMagic || ntohs(packet.version) != kDiscoveryVersion ||
-      packet.type != kAdvertisement || ntohl(packet.title_id) != title_id)
+      packet.type != kAdvertisement || ntohl(packet.title_id) != title_id ||
+      packet.reserved || packet.reserved2 || packet.reserved3)
     return std::nullopt;
   SessionRecord session;
   std::memcpy(session.info.id.data(), packet.session_id, 8);
   std::memcpy(session.info.key.data(), packet.session_key, 16);
   session.host_xuid = Swap64(packet.host_xuid);
+  session.nonce = Swap64(packet.nonce);
+  session.host_machine_id = Swap64(packet.host_machine_id);
+  std::copy_n(packet.incarnation, 16, session.arbitration_incarnation.begin());
   const auto xnaddr = ReconstructXnAddrIdentity(session.host_xuid);
   session.info.ethernet_address = xnaddr.ethernet_address;
   session.info.online_address = xnaddr.online_address;
@@ -449,13 +592,16 @@ std::optional<SessionRecord> Decode(const DiscoveryPacket& packet, uint32_t titl
     return std::nullopt;
   for (uint32_t i = 0; i < count; ++i) {
     uint32_t flags = ntohl(packet.members[i].flags);
-    if (flags & ~7u)
+    if ((flags & ~7u) || packet.members[i].reserved)
       return std::nullopt;
     session.members.push_back(
         {Swap64(packet.members[i].xuid),
          std::string(packet.members[i].name,
                      strnlen(packet.members[i].name, sizeof(packet.members[i].name))),
          0, false, (flags & 2) != 0, (flags & 4) != 0});
+    session.members.back().machine_id = Swap64(packet.members[i].machine_id);
+    session.members.back().gameplay_address = {packet.members[i].gameplay_ipv4,
+                                              ntohs(packet.members[i].gameplay_port)};
   }
   if (session.members.empty())
     session.members.push_back({session.host_xuid, session.host_name, 0, false, false, false});
@@ -467,7 +613,8 @@ std::optional<SessionRecord> Decode(const DiscoveryPacket& packet, uint32_t titl
 std::optional<SessionRecord> Exchange(const SessionRecord& session, const SessionMember* member,
                                       uint8_t type, uint32_t title_id, uint16_t discovery_port,
                                       uint32_t timeout_ms,
-                                      SOCKET retained_socket = kInvalidSocket) {
+                                      SOCKET retained_socket = kInvalidSocket,
+                                      std::shared_ptr<ArbitrationClientBinding> binding = {}) {
   if (!EnsureSocketRuntime())
     return std::nullopt;
   const bool owns_socket = retained_socket == kInvalidSocket;
@@ -481,13 +628,33 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
   }
   SetNonBlocking(socket);
   auto packet = Encode(session, title_id);
+  const auto request_id = NewArbitrationToken();
+  if (!request_id) { if (owns_socket) CloseSocket(socket); return std::nullopt; }
+  std::copy(request_id->begin(),request_id->end(),packet.request_id);
   packet.type = type;
   if (member) {
     packet.member_count = htonl(1);
     std::memset(packet.members, 0, sizeof(packet.members));
     packet.members[0].xuid = Swap64(member->xuid);
+    packet.members[0].machine_id = Swap64(binding ? binding->machine_id : member->machine_id);
+    packet.members[0].gameplay_port = htons(uint16_t(REXCVAR_GET(lan_gameplay_port) ? REXCVAR_GET(lan_gameplay_port) : 3074));
     packet.members[0].flags = htonl((member->private_slot ? 2u : 0u) | (member->ready ? 4u : 0u));
     std::strncpy(packet.members[0].name, member->name.c_str(), sizeof(packet.members[0].name) - 1);
+  }
+  if (binding) {
+    std::copy(binding->challenge.begin(), binding->challenge.end(), packet.attempt);
+    if (type == kJoin) {
+      if (!binding->key || !binding->key->valid()) {
+        if (owns_socket) CloseSocket(socket);
+        return std::nullopt;
+      }
+      std::copy(binding->key->public_key().begin(), binding->key->public_key().end(), packet.client_public_key);
+    }
+    if ((type == kLeave || NonzeroToken(binding->credential)) &&
+        !SignPacket(packet, binding->credential, type == kJoin ? "session-join-v2" : "session-leave-v2")) {
+      if (owns_socket) CloseSocket(socket);
+      return std::nullopt;
+    }
   }
   sockaddr_in target{};
   target.sin_family = AF_INET;
@@ -510,7 +677,13 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
               member ? member->xuid : 0);
   auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   std::optional<SessionRecord> result;
+  auto next_send = std::chrono::steady_clock::now() + std::chrono::milliseconds(125);
   while (std::chrono::steady_clock::now() < deadline) {
+    if (std::chrono::steady_clock::now() >= next_send) {
+      sendto(socket, reinterpret_cast<const char*>(&packet), sizeof(packet), 0,
+             reinterpret_cast<sockaddr*>(&target), sizeof(target));
+      next_send = std::chrono::steady_clock::now() + std::chrono::milliseconds(125);
+    }
     sockaddr_in source{};
     socket_len_t length = sizeof(source);
     DiscoveryPacket response{};
@@ -521,7 +694,26 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
       NatProbeTick(socket);
       continue;
     }
-    if (count == sizeof(response)) {
+    if (count == sizeof(response) && source.sin_addr.s_addr == target.sin_addr.s_addr &&
+        source.sin_port == target.sin_port) {
+      if (WireIdentity(response) != RecordIdentity(session) || WireToken(response.request_id) != *request_id) continue;
+      if (binding) {
+        auto credential = binding->credential;
+        if (type == kJoin) {
+          if (!binding->key || WirePublicKey(response.client_public_key) != binding->key->public_key()) continue;
+          ArbitrationCredentialEnvelope envelope;
+          envelope.server_public_key = WirePublicKey(response.server_public_key);
+          envelope.ciphertext = WireToken(response.credential);
+          std::copy_n(response.credential_iv,12,envelope.iv.begin());
+          envelope.tag = WireToken(response.credential_tag);
+          const auto opened = OpenArbitrationCredential(*binding->key,envelope,JoinCredentialAAD(packet));
+          if (!opened) continue;
+          credential = *opened;
+        }
+        if (WireToken(response.attempt) != binding->challenge ||
+            !VerifyPacket(response, credential, type == kJoin ? "session-join-reply-v2" : "session-leave-reply-v2")) continue;
+        if (type == kJoin) { binding->credential = credential; binding->credential_received = true; }
+      }
       result = Decode(response, title_id, source.sin_addr.s_addr);
       if (result) {
         // Preserve the endpoint that successfully reached this session. A
@@ -532,6 +724,10 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
         result->traversal_session_id = session.traversal_session_id;
         result->traversal_attempt_id = session.traversal_attempt_id;
         result->traversal_capability = session.traversal_capability;
+        if (binding && type == kJoin) {
+          binding->target = {source.sin_addr.s_addr, ntohs(source.sin_port)};
+          result->arbitration_client = binding;
+        }
       }
       if (result && (result->info.id != session.info.id || result->info.key != session.info.key ||
                      result->host_xuid != session.host_xuid))
@@ -639,6 +835,9 @@ uint32_t SessionRecord::OpenPrivateSlots() const {
   std::lock_guard lock(*mutex);
   return max_private_slots > FilledPrivateSlots() ? max_private_slots - FilledPrivateSlots() : 0;
 }
+SessionRegistry::SessionRegistry(ChangeObserver observer)
+    : machine_id_(NewArbitrationMachineId().value_or(0)), change_observer_(std::move(observer)) {}
+
 uint64_t SessionRegistry::IdKey(const std::array<uint8_t, 8>& id) {
   uint64_t key;
   std::memcpy(&key, id.data(), 8);
@@ -649,14 +848,19 @@ std::shared_ptr<SessionRecord> SessionRegistry::Create(uint64_t host_xuid, std::
                                                        uint32_t public_slots,
                                                        uint32_t private_slots) {
   auto session = std::make_shared<SessionRecord>();
-  std::random_device random;
-  do {
-    for (auto& byte : session->info.id)
-      byte = uint8_t(random());
-  } while (!IdKey(session->info.id));
-  for (auto& byte : session->info.key)
-    byte = uint8_t(random());
-  session->nonce = (uint64_t(random()) << 32) | random();
+  const auto random_id = NewArbitrationToken();
+  const auto random_key = NewArbitrationToken();
+  const auto incarnation = NewArbitrationToken();
+  const auto local_credential = NewArbitrationToken();
+  const auto nonce = NewArbitrationMachineId();
+  if (!machine_id_ || !random_id || !random_key || !incarnation || !local_credential || !nonce)
+    return nullptr;
+  std::copy_n(random_id->begin(), session->info.id.size(), session->info.id.begin());
+  if (!IdKey(session->info.id)) return nullptr;
+  session->info.key = *random_key;
+  session->nonce = *nonce;
+  session->host_machine_id = machine_id_;
+  session->arbitration_incarnation = *incarnation;
   session->host_xuid = host_xuid;
   session->host_name = std::move(host_name);
   session->info.host_address = host_address;
@@ -667,8 +871,14 @@ std::shared_ptr<SessionRecord> SessionRegistry::Create(uint64_t host_xuid, std::
   session->max_public_slots = public_slots;
   session->max_private_slots = private_slots;
   session->members.push_back({host_xuid, session->host_name, 0, true, false, false});
+  session->members.back().machine_id = machine_id_;
+  session->members.back().gameplay_address = host_address;
+  session->arbitration = std::make_shared<SessionArbitrationAuthority>(
+      ArbitrationIdentity{session->info.id, session->info.key, *incarnation, session->nonce,
+                          host_xuid, machine_id_}, *local_credential);
   std::lock_guard lock(mutex_);
   auto id_key = IdKey(session->info.id);
+  if (sessions_.contains(id_key) || local_session_ids_.contains(id_key)) return nullptr;
   local_session_ids_.insert(id_key);
   sessions_[id_key] = session;
   return session;
@@ -681,6 +891,7 @@ bool SessionRegistry::Delete(const std::array<uint8_t, 8>& id) {
       return false;
     std::lock_guard session_lock(*it->second->mutex);
     it->second->state = SessionState::kDeleted;
+    if (it->second->arbitration) it->second->arbitration->Invalidate();
     it->second->NotifyStatus();
     sessions_.erase(it);
   }
@@ -698,6 +909,7 @@ size_t SessionRegistry::DeleteHostedBy(uint64_t host_xuid) {
       if (it->second->host_xuid == host_xuid) {
         deleted.push_back(it->second->info.id);
         it->second->state = SessionState::kDeleted;
+        if (it->second->arbitration) it->second->arbitration->Invalidate();
         it->second->NotifyStatus();
         it = sessions_.erase(it);
         ++removed;
@@ -718,6 +930,8 @@ size_t SessionRegistry::UpdateHostedPort(uint64_t host_xuid, uint16_t port) {
     std::lock_guard session_lock(*session->mutex);
     if (session->host_xuid == host_xuid && session->state != SessionState::kDeleted) {
       session->info.host_address.port = port;
+      for (auto& member : session->members)
+        if (member.xuid == host_xuid) member.gameplay_address = session->info.host_address;
       ++updated;
     }
   }
@@ -781,6 +995,10 @@ bool SessionRegistry::Leave(const std::array<uint8_t, 8>& id, uint64_t xuid) {
   std::lock_guard lock(*session->mutex);
   size_t before = session->members.size();
   std::erase_if(session->members, [&](const auto& m) { return m.xuid == xuid; });
+  if (session->arbitration) session->arbitration->Remove(xuid);
+  if (session->arbitration_client && session->arbitration_client->xuid == xuid)
+    session->arbitration_client.reset();
+  session->arbitration_revision = 0;
   if (before != session->members.size()) session->NotifyStatus();
   return before != session->members.size();
 }
@@ -817,6 +1035,10 @@ bool SessionRegistry::End(const std::array<uint8_t, 8>& id) {
   return true;
 }
 std::shared_ptr<SessionRecord> SessionRegistry::UpsertDiscovered(SessionRecord record) {
+  // Public discovery can create a fresh observation after a user leaves.
+  // A joined/pending binding must instead publish through the exact retained
+  // record commit, so late joined output can never create or revive a record.
+  if (record.arbitration_client) return nullptr;
   auto session = std::make_shared<SessionRecord>(std::move(record));
   {
     std::lock_guard lock(mutex_);
@@ -831,12 +1053,90 @@ std::shared_ptr<SessionRecord> SessionRegistry::UpsertDiscovered(SessionRecord r
       if (!existing->second->traversal_attempt_id.empty() &&
           session->traversal_attempt_id.empty())
         return existing->second;
+      if (existing->second->arbitration_client && !session->arbitration_client) {
+        if (RecordIdentity(*existing->second) != RecordIdentity(*session)) return nullptr;
+        return existing->second;
+      }
     }
     sessions_[id_key] = session;
   }
   if (change_observer_)
     change_observer_(session->info.id);
   return session;
+}
+
+bool SessionRegistry::CommitJoinedRecord(const std::shared_ptr<SessionRecord>& expected,
+    SessionRecord updated, const std::function<bool()>& object_current) {
+  if (!expected || !object_current || !updated.arbitration_client || !updated.arbitration_client->confirmed) return false;
+  auto global_lock = rex::thread::global_critical_region::AcquireDirect();
+  std::lock_guard registry_lock(mutex_);
+  const auto found = sessions_.find(IdKey(expected->info.id));
+  if (found == sessions_.end() || found->second != expected) return false;
+  std::lock_guard record_lock(*expected->mutex);
+  if (expected->state == SessionState::kDeleted || expected->arbitration ||
+      RecordIdentity(*expected) != RecordIdentity(updated) ||
+      expected->arbitration_client != updated.arbitration_client ||
+      !object_current() || !ValidMemberAccounting(updated.members,updated.max_public_slots,updated.max_private_slots)) return false;
+  expected->info = updated.info;
+  expected->discovery_address = updated.discovery_address;
+  expected->host_name = std::move(updated.host_name);
+  expected->flags = updated.flags;
+  expected->max_public_slots = updated.max_public_slots;
+  expected->max_private_slots = updated.max_private_slots;
+  expected->members = std::move(updated.members);
+  expected->arbitration_revision = 0;
+  expected->NotifyStatus();
+  return true;
+}
+
+bool SessionRegistry::CommitArbitration(const std::shared_ptr<SessionRecord>& expected,
+    const ArbitrationIdentity& identity, uint64_t revision, const std::function<bool()>& publish) {
+  if (!expected || !publish) return false;
+  auto global = rex::thread::global_critical_region::AcquireDirect();
+  std::lock_guard registry_lock(mutex_);
+  const auto found = sessions_.find(IdKey(identity.session_id));
+  if (found == sessions_.end() || found->second != expected) return false;
+  std::lock_guard record_lock(*expected->mutex);
+  if (expected->state == SessionState::kDeleted ||
+      expected->info.id != identity.session_id || expected->info.key != identity.exchange_key ||
+      expected->nonce != identity.nonce || expected->host_xuid != identity.host_xuid ||
+      expected->host_machine_id != identity.host_machine_id ||
+      expected->arbitration_incarnation != identity.incarnation) return false;
+  if (!revision) return false;
+  if (expected->arbitration) {
+    const auto current = expected->arbitration->Snapshot();
+    if (!current || current->identity != identity || current->revision != revision) return false;
+  } else if (expected->arbitration_revision != revision) return false;
+  if (!publish()) return false;
+  if (expected->state == SessionState::kLobby) {
+    expected->state = SessionState::kRegistration;
+    expected->NotifyStatus();
+  }
+  return true;
+}
+
+std::optional<uint64_t> SessionRegistry::FindArbitrationMachineId(
+    const XnAddrIdentity& identity, uint32_t ipv4, uint16_t port, uint64_t local_xuid) const {
+  if (!ipv4 || !port || !local_xuid) return std::nullopt;
+  std::optional<uint64_t> result;
+  if (machine_id_ && port == 3074 && identity == ReconstructXnAddrIdentity(local_xuid) &&
+      ipv4 == LanDiscoveryService::DetermineLanIpv4()) result = machine_id_;
+  std::lock_guard registry_lock(mutex_);
+  for (const auto& [key, session] : sessions_) {
+    std::lock_guard record_lock(*session->mutex);
+    if (session->state == SessionState::kDeleted) continue;
+    for (const auto& member : session->members) {
+      if (!member.machine_id || identity != ReconstructXnAddrIdentity(member.xuid)) continue;
+      const auto address = member.xuid == session->host_xuid ? session->info.host_address : member.gameplay_address;
+      // XNetGetTitleXnAddr exposes3074 to the title even when native UDP
+      // port mapping uses a different bound port. Both are explicit aliases
+      // of this exact known machine/IP; no arbitrary-port match is allowed.
+      if (ipv4 != address.ipv4 || (port != address.port && port != 3074)) continue;
+      if (result && *result != member.machine_id) return std::nullopt;
+      result = member.machine_id;
+    }
+  }
+  return result;
 }
 
 class LanDiscoveryService::Impl {
@@ -939,8 +1239,23 @@ class LanDiscoveryService::Impl {
     }
   }
   void Run() {
+    auto next_expiration = std::chrono::steady_clock::time_point{};
     while (running) {
       NatProbeTick(socket);
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= next_expiration && advertised) {
+        std::lock_guard record_lock(*advertised->mutex);
+        if (advertised->arbitration) {
+          const auto expired = advertised->arbitration->ExpireUnconfirmed(now);
+          if (!expired.empty()) {
+            std::erase_if(advertised->members,[&](const auto& member) {
+              return std::find(expired.begin(),expired.end(),member.xuid) != expired.end();
+            });
+            advertised->NotifyStatus();
+          }
+        }
+        next_expiration = now + std::chrono::milliseconds(250);
+      }
       sockaddr_in source{};
       socket_len_t length = sizeof(source);
       DiscoveryPacket query{};
@@ -1000,10 +1315,58 @@ class LanDiscoveryService::Impl {
       bool valid = count == sizeof(query) && ntohl(query.magic) == kDiscoveryMagic &&
                    ntohs(query.version) == kDiscoveryVersion && ntohl(query.title_id) == title_id &&
                    advertised;
+      if (valid && query.type == kRegister) {
+        std::optional<ArbitrationSnapshot> snapshot;
+        ArbitrationToken credential{};
+        std::optional<DiscoveryPacket> reply;
+        {
+          std::lock_guard record_lock(*advertised->mutex);
+          const auto identity = WireIdentity(query);
+          const auto xuid = Swap64(query.members[0].xuid);
+          const auto machine = Swap64(query.members[0].machine_id);
+          if (advertised->state != SessionState::kDeleted && advertised->arbitration &&
+              identity == RecordIdentity(*advertised) && ntohl(query.member_count) == 1 &&
+              !query.reserved && !query.reserved2 && !query.reserved3 &&
+              query.members[0].flags == 0 && query.members[0].reserved == 0 &&
+              !NonzeroToken(WireToken(query.credential)) &&
+              NonzeroToken(WireToken(query.request_id))) {
+            const auto private_token = advertised->arbitration->CredentialForVerification(identity, xuid, machine);
+            if (private_token && VerifyPacket(query, *private_token, "session-register-v2")) {
+              credential = *private_token;
+              const auto status = advertised->arbitration->RegisterFromVerifiedEndpoint(
+                  {identity, xuid, machine, {source.sin_addr.s_addr, ntohs(source.sin_port)},
+                   credential, WireToken(query.attempt)});
+              if (status == ArbitrationStatus::kAccepted || status == ArbitrationStatus::kReplay)
+                snapshot = advertised->arbitration->Snapshot();
+            }
+          }
+          if (snapshot) {
+            auto response = Encode(*advertised, title_id);
+            response.type = kRegisterReply;
+            std::copy_n(query.attempt, 16, response.attempt);
+            std::copy_n(query.request_id,16,response.request_id);
+            response.revision = Swap64(snapshot->revision);
+            uint32_t mask = 0;
+            for (size_t i = 0; i < advertised->members.size() && i < kMaxWireMembers; ++i)
+              for (const auto& registrant : snapshot->registrants)
+                if (registrant.machine_id == advertised->members[i].machine_id &&
+                    registrant.xuids.size() == 1 && registrant.xuids[0] == advertised->members[i].xuid)
+                  mask |= 1u << i;
+            response.registered_mask = htonl(mask);
+            if (SignPacket(response, credential, "session-register-reply-v2")) reply = response;
+          }
+        }
+        if (reply)
+          sendto(socket, reinterpret_cast<const char*>(&*reply), sizeof(*reply), 0,
+                 reinterpret_cast<sockaddr*>(&source), length);
+        continue;
+      }
       if (valid && query.type == kQuery) {
         REXSYS_INFO("LAN discovery: received search query from {:08X}:{}", source.sin_addr.s_addr,
                     ntohs(source.sin_port));
       }
+      ArbitrationToken reply_credential{};
+      std::optional<ArbitrationCredentialEnvelope> reply_envelope;
       if (valid && (query.type == kJoin || query.type == kLeave)) {
         const auto& wire = query.members[0];
         const uint32_t flags = ntohl(wire.flags);
@@ -1021,11 +1384,27 @@ class LanDiscoveryService::Impl {
           // Routing validation is not an admission credential. The only
           // private authority is a separately reserved host grant below.
           valid = advertised->state != SessionState::kDeleted && ntohl(query.member_count) == 1 &&
-                  !query.reserved && !query.reserved2 && !(flags & ~6u) && xuid &&
+                  !query.reserved && !query.reserved2 && !query.reserved3 && !wire.reserved && NonzeroToken(WireToken(query.request_id)) && !(flags & ~6u) && xuid &&
                   xuid != advertised->host_xuid &&
                   Swap64(query.host_xuid) == advertised->host_xuid &&
                   std::memcmp(query.session_id, advertised->info.id.data(), 8) == 0 &&
-                  std::memcmp(query.session_key, advertised->info.key.data(), 16) == 0;
+                  std::memcmp(query.session_key, advertised->info.key.data(), 16) == 0 &&
+                  WireIdentity(query) == RecordIdentity(*advertised) && advertised->arbitration;
+          if (valid && query.type == kLeave) {
+            const auto token = advertised->arbitration->CredentialForVerification(
+                WireIdentity(query), xuid, Swap64(wire.machine_id));
+            valid = token && VerifyPacket(query, *token, "session-leave-v2");
+            if (valid) reply_credential = *token;
+          }
+          if (valid && query.type == kJoin) {
+            valid = !NonzeroToken(WireToken(query.credential));
+            if (valid && NonzeroToken(WireToken(query.authentication))) {
+              const auto token = advertised->arbitration->CredentialForVerification(
+                  WireIdentity(query), xuid, Swap64(wire.machine_id));
+              valid = token && VerifyPacket(query, *token, "session-join-v2");
+              if (valid) reply_credential = *token;
+            }
+          }
           existing = valid && std::any_of(advertised->members.begin(), advertised->members.end(),
                                           [&](const auto& member) { return member.xuid == xuid; });
         }
@@ -1036,11 +1415,21 @@ class LanDiscoveryService::Impl {
                                false,
                                (flags & 2) != 0,
                                (flags & 4) != 0};
+          member.machine_id = Swap64(wire.machine_id);
+          member.gameplay_address = {source.sin_addr.s_addr, ntohs(wire.gameplay_port)};
+          const auto challenge = BoundJoinChallenge(query);
+          const ArbitrationJoinClaim claim{xuid, member.machine_id,
+              {source.sin_addr.s_addr, ntohs(source.sin_port)}, challenge.value_or(ArbitrationToken{}), reply_credential};
+          {
+            std::lock_guard record_lock(*advertised->mutex);
+            valid = member.gameplay_address.port && advertised->arbitration &&
+                advertised->arbitration->CheckAdmission(claim, SessionArbitrationAuthority::Clock::now()).accepted();
+          }
           HostAdmissionReservation reservation;
           DiscoveryAdmissionContext context;
           REXSYS_INFO("INVITE_DIAG HOST_ADMISSION_BEGIN xuid={:016X} private_request={} existing={}",
                       xuid, member.private_slot, existing);
-          if (!existing) {
+          if (valid && !existing) {
             // NAT snapshot -> atomic grant reservation -> membership commit ->
             // finalization. No pair of these lock domains is nested.
             auto matches = NatProbeMatchAcknowledgedDiscoveryAttempts(
@@ -1071,9 +1460,32 @@ class LanDiscoveryService::Impl {
               }
             }
           }
-          if (valid)
-            valid = ApplyDiscoveryMemberBatch(
-                *advertised, std::span<const SessionMember>(&member, 1), context);
+          if (valid) {
+            const auto token = NewArbitrationToken();
+            std::lock_guard record_lock(*advertised->mutex);
+            const auto before = advertised->members;
+            const auto admission = advertised->arbitration ?
+                advertised->arbitration->CheckAdmission(claim, SessionArbitrationAuthority::Clock::now()) : ArbitrationJoinResult{};
+            if (token && admission.accepted()) {
+              const auto credential = admission.status == ArbitrationStatus::kReplay ? admission.credential : *token;
+              reply_envelope = SealArbitrationCredential(WirePublicKey(query.client_public_key),
+                  credential, JoinCredentialAAD(query));
+            }
+            valid = token && admission.accepted() && reply_envelope &&
+                ApplyDiscoveryMemberBatch(*advertised, std::span<const SessionMember>(&member, 1), context);
+            if (valid) {
+              const auto admitted = advertised->arbitration->Admit(claim, *token, SessionArbitrationAuthority::Clock::now());
+              valid = admitted.accepted();
+              if (valid) {
+                reply_credential = admitted.credential;
+                for (auto& current : advertised->members)
+                  if (current.xuid == xuid) {
+                    current.machine_id = member.machine_id;
+                    current.gameplay_address = member.gameplay_address;
+                  }
+              } else advertised->members = before;
+            }
+          }
           if (reservation)
             admission_grants->Finish(reservation, valid);
           if (!valid)
@@ -1091,6 +1503,7 @@ class LanDiscoveryService::Impl {
         } else if (valid) {
           std::lock_guard lock(*advertised->mutex);
           auto before = advertised->members.size();
+          advertised->arbitration->Remove(xuid);
           std::erase_if(advertised->members,
                         [&](const auto& value) { return value.xuid == xuid; });
           if (before != advertised->members.size())
@@ -1098,7 +1511,25 @@ class LanDiscoveryService::Impl {
         }
       }
       if (valid && (query.type == kQuery || query.type == kJoin || query.type == kLeave)) {
-        auto response = Encode(*advertised, title_id);
+        DiscoveryPacket response{};
+        {
+          std::lock_guard record_lock(*advertised->mutex);
+          if (advertised->state == SessionState::kDeleted) continue;
+          response = Encode(*advertised,title_id);
+        }
+        if (query.type == kJoin || query.type == kLeave) {
+          std::copy_n(query.attempt, 16, response.attempt);
+          std::copy_n(query.request_id,16,response.request_id);
+          if (query.type == kJoin) {
+            if (!reply_envelope) continue;
+            std::copy_n(query.client_public_key,32,response.client_public_key);
+            std::copy(reply_envelope->server_public_key.begin(),reply_envelope->server_public_key.end(),response.server_public_key);
+            std::copy(reply_envelope->ciphertext.begin(),reply_envelope->ciphertext.end(),response.credential);
+            std::copy(reply_envelope->iv.begin(),reply_envelope->iv.end(),response.credential_iv);
+            std::copy(reply_envelope->tag.begin(),reply_envelope->tag.end(),response.credential_tag);
+          }
+          if (!SignPacket(response, reply_credential, query.type == kJoin ? "session-join-reply-v2" : "session-leave-reply-v2")) continue;
+        }
         int sent = sendto(socket, reinterpret_cast<const char*>(&response), sizeof(response), 0,
                           reinterpret_cast<sockaddr*>(&source), length);
         if (query.type == kQuery) {
@@ -1112,6 +1543,7 @@ class LanDiscoveryService::Impl {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
   }
+  uint64_t machine_id = NewArbitrationMachineId().value_or(0);
   uint32_t title_id;
   uint16_t port;
   SOCKET socket = kInvalidSocket;
@@ -1143,6 +1575,7 @@ LanDiscoveryService::LanDiscoveryService(
                  std::move(invite_join_attempt_transport),
                  std::move(join_attempt_completion_transport)) {}
 LanDiscoveryService::~LanDiscoveryService() = default;
+void LanDiscoveryService::SetArbitrationMachineId(uint64_t machine_id) { impl_->machine_id = machine_id; }
 void LanDiscoveryService::SetTitleId(uint32_t title_id) {
   directory_.SetClientAdmissionTitle(title_id);
   impl_->title_id = title_id;
@@ -1864,21 +2297,162 @@ std::optional<SessionRecord> LanDiscoveryService::Join(const SessionRecord& sess
     directory_.SetClientAdmissionExchange(member.user_index, true);
   else
     impl_->client_exchange = true;
-  auto result = Exchange(session, &member, kJoin, impl_->title_id, impl_->port, timeout_ms,
-                         admission_socket ? SOCKET(*admission_socket) : impl_->client_socket);
-  if (admission_socket)
-    directory_.SetClientAdmissionExchange(member.user_index, false);
-  else
-    impl_->client_exchange = false;
+  struct ExchangeScope { std::function<void()> release; ~ExchangeScope() { release(); } };
+  const ExchangeScope exchange_scope{[&] {
+    if (admission_socket) directory_.SetClientAdmissionExchange(member.user_index,false);
+    else impl_->client_exchange = false;
+  }};
+  std::shared_ptr<ArbitrationClientBinding> binding;
+  {
+    std::lock_guard record_lock(*session.mutex);
+    if (session.state == SessionState::kDeleted) return std::nullopt;
+    binding = session.arbitration_client;
+    if (binding) {
+      // Never acquire binding mutex while holding record mutex; creation and
+      // confirmation flags use atomics below.
+      if (!binding->confirmed && !binding->credential_received && std::chrono::steady_clock::now() - binding->created >=
+          SessionArbitrationAuthority::kInitialJoinRetryWindow) {
+        session.arbitration_client.reset(); binding.reset();
+      }
+    }
+  }
+  if (!binding) {
+    const auto challenge = NewArbitrationToken();
+    const auto attempt = NewArbitrationToken();
+    auto key = NewArbitrationKey();
+    if (challenge && attempt && key && impl_->machine_id) {
+      binding = std::make_shared<ArbitrationClientBinding>();
+      binding->identity = RecordIdentity(session);
+      binding->xuid = member.xuid; binding->machine_id = impl_->machine_id;
+      binding->challenge = *challenge; binding->attempt = *attempt; binding->key = std::move(key);
+      binding->socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+      if (binding->socket == kInvalidSocket || !BindLanSocket(binding->socket, 0) || !SetNonBlocking(binding->socket)) binding.reset();
+    }
+  }
+  if (binding) {
+    std::lock_guard record_lock(*session.mutex);
+    if (session.state == SessionState::kDeleted) return std::nullopt;
+    if (session.arbitration_client) binding = session.arbitration_client;
+    else session.arbitration_client = binding;
+  }
+  std::optional<SessionRecord> result;
+  if (binding && binding->xuid == member.xuid && binding->identity == RecordIdentity(session)) {
+    std::lock_guard binding_lock(binding->mutex);
+    const auto join_socket = admission_socket ? SOCKET(*admission_socket) :
+        (impl_->client_socket != kInvalidSocket ? impl_->client_socket : binding->socket);
+    const bool already_has_credential = NonzeroToken(binding->credential);
+    result = Exchange(session, &member, kJoin, impl_->title_id, impl_->port, timeout_ms,join_socket,binding);
+    if (result && !already_has_credential)
+      result = Exchange(*result,&member,kJoin,impl_->title_id,impl_->port,
+                        std::min(timeout_ms,250u),join_socket,binding);
+    if (result) binding->confirmed = true;
+  }
   return result;
 }
+std::optional<ArbitrationSnapshot> LanDiscoveryService::RegisterArbitration(
+    const std::shared_ptr<SessionRecord>& session, uint64_t local_xuid, uint64_t nonce) {
+  if (!session || !local_xuid || !nonce) return std::nullopt;
+  std::shared_ptr<ArbitrationClientBinding> binding;
+  DiscoveryPacket packet{};
+  {
+    std::lock_guard record_lock(*session->mutex);
+    if (session->state == SessionState::kDeleted || session->nonce != nonce) return std::nullopt;
+    if (session->arbitration && session->host_xuid == local_xuid) {
+      if (!NonzeroToken(session->arbitration_local_attempt)) {
+        const auto attempt = NewArbitrationToken();
+        if (!attempt) return std::nullopt;
+        session->arbitration_local_attempt = *attempt;
+      }
+      const auto status = session->arbitration->RegisterLocal(local_xuid,
+          session->host_machine_id, nonce, session->arbitration_local_attempt);
+      if (status != ArbitrationStatus::kAccepted && status != ArbitrationStatus::kReplay) return std::nullopt;
+      return session->arbitration->Snapshot();
+    }
+    binding = session->arbitration_client;
+    if (!binding || binding->xuid != local_xuid || binding->identity != RecordIdentity(*session)) return std::nullopt;
+    packet = Encode(*session, impl_->title_id);
+  }
+  std::lock_guard binding_lock(binding->mutex);
+  if (!binding->confirmed || !NonzeroToken(binding->credential) || binding->socket == kInvalidSocket ||
+      !binding->target.ipv4 || !binding->target.port) return std::nullopt;
+  const auto request_id = NewArbitrationToken();
+  if (!request_id) return std::nullopt;
+  std::copy(request_id->begin(),request_id->end(),packet.request_id);
+  packet.type = kRegister;
+  packet.member_count = htonl(1);
+  std::memset(packet.members, 0, sizeof(packet.members));
+  packet.members[0].xuid = Swap64(local_xuid);
+  packet.members[0].machine_id = Swap64(binding->machine_id);
+  std::copy(binding->attempt.begin(), binding->attempt.end(), packet.attempt);
+  if (!SignPacket(packet, binding->credential, "session-register-v2")) return std::nullopt;
+  sockaddr_in target{}; target.sin_family = AF_INET;
+  target.sin_addr.s_addr = binding->target.ipv4; target.sin_port = htons(binding->target.port);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+  auto next_send = std::chrono::steady_clock::time_point{};
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (std::chrono::steady_clock::now() >= next_send) {
+      sendto(binding->socket, reinterpret_cast<const char*>(&packet), sizeof(packet), 0,
+             reinterpret_cast<sockaddr*>(&target), sizeof(target));
+      next_send = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    }
+    DiscoveryPacket response{}; sockaddr_in source{}; socket_len_t length = sizeof(source);
+    const auto count = ReceiveDatagram(binding->socket, reinterpret_cast<char*>(&response), sizeof(response), 0,
+                                       reinterpret_cast<sockaddr*>(&source), &length);
+    if (count == sizeof(response) && source.sin_addr.s_addr == target.sin_addr.s_addr && source.sin_port == target.sin_port &&
+        ntohl(response.magic) == kDiscoveryMagic && ntohs(response.version) == kDiscoveryVersion &&
+        response.type == kRegisterReply && ntohl(response.title_id) == impl_->title_id &&
+        !response.reserved && !response.reserved2 && !response.reserved3 &&
+        WireIdentity(response) == binding->identity && WireToken(response.attempt) == binding->attempt &&
+        WireToken(response.request_id) == *request_id &&
+        !NonzeroToken(WireToken(response.credential)) && VerifyPacket(response, binding->credential, "session-register-reply-v2")) {
+      auto advertisement = response; advertisement.type = kAdvertisement;
+      const auto decoded = Decode(advertisement, impl_->title_id, source.sin_addr.s_addr);
+      const uint32_t count_members = ntohl(response.member_count);
+      const uint32_t mask = ntohl(response.registered_mask);
+      if (!decoded || count_members > kMaxWireMembers || (mask >> count_members) || !Swap64(response.revision)) continue;
+      ArbitrationSnapshot snapshot{binding->identity, Swap64(response.revision), {}};
+      std::unordered_set<uint64_t> machines;
+      bool requester_present = false;
+      for (size_t i = 0; i < decoded->members.size(); ++i) {
+        if (!(mask & (1u << i))) continue;
+        const auto& member = decoded->members[i];
+        if (!member.machine_id || !machines.insert(member.machine_id).second) { snapshot.registrants.clear(); break; }
+        if (member.xuid == local_xuid && member.machine_id == binding->machine_id) requester_present = true;
+        snapshot.registrants.push_back({member.machine_id, 0, {member.xuid}});
+      }
+      if (!requester_present || snapshot.registrants.empty()) continue;
+      std::lock_guard record_lock(*session->mutex);
+      if (session->state == SessionState::kDeleted || session->arbitration_client != binding ||
+          RecordIdentity(*session) != binding->identity || session->nonce != nonce) return std::nullopt;
+      if (snapshot.revision < session->arbitration_revision) continue;
+      for (auto& member : session->members) {
+        const auto found = std::find_if(decoded->members.begin(), decoded->members.end(),
+            [&](const auto& current) { return current.xuid == member.xuid; });
+        if (found != decoded->members.end()) {
+          member.machine_id = found->machine_id;
+          member.gameplay_address = found->gameplay_address;
+        }
+      }
+      session->arbitration_revision = snapshot.revision;
+      return snapshot;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return std::nullopt;
+}
+
 std::optional<SessionRecord> LanDiscoveryService::Leave(const SessionRecord& session, uint64_t xuid,
                                                         uint32_t timeout_ms) {
   SessionMember member;
   member.xuid = xuid;
   impl_->client_exchange = true;
-  auto result = Exchange(session, &member, kLeave, impl_->title_id, impl_->port, timeout_ms,
-                         impl_->client_socket);
+  auto binding = session.arbitration_client;
+  std::optional<SessionRecord> result;
+  if (binding && binding->xuid == xuid) {
+    std::lock_guard binding_lock(binding->mutex);
+    result = Exchange(session, &member, kLeave, impl_->title_id, impl_->port, timeout_ms,
+                      impl_->client_socket, binding);
+  }
   impl_->client_exchange = false;
   return result;
 }
@@ -1982,7 +2556,7 @@ std::optional<uint64_t> ResolveRexGlueLocalUserXuid(
 XSession::XSession(KernelState* state) : XObject(state, kObjectType) {}
 XSession::~XSession() {
   if (kernel_state()) {
-    kernel_state()->session_manager()->ReleaseRecord(record_);
+    kernel_state()->session_manager()->ReleaseRecord(record());
     kernel_state()->session_manager()->UnregisterObject(this);
   }
 }
@@ -1992,12 +2566,14 @@ bool XSession::Initialize() {
   kernel_state()->session_manager()->RegisterObject(this);
   return true;
 }
-void XSession::set_record(std::shared_ptr<SessionRecord> record) {
-  if (record_ && record_ != record)
-    kernel_state()->session_manager()->ReleaseRecord(record_);
-  record_ = std::move(record);
-  kernel_state()->session_manager()->online_status().Attach(this, record_);
+void XSession::set_record(std::shared_ptr<SessionRecord> value) {
+  auto guard = rex::thread::global_critical_region::AcquireDirect();
+  auto previous = record_.exchange(value, std::memory_order_acq_rel);
+  if (previous && previous != value)
+    kernel_state()->session_manager()->ReleaseRecord(previous);
+  kernel_state()->session_manager()->online_status().Attach(this, value);
 }
+
 struct SessionManager::ConfiguredInviteOperation {
   explicit ConfiguredInviteOperation(ConfiguredInviteOperationIdentity value)
       : identity(std::move(value)) {}
@@ -2098,7 +2674,9 @@ SessionManager::SessionManager(KernelState* state, uint16_t discovery_port,
       discovery_(0, discovery_port, {}, user_identity_,
                  std::move(dependencies.client_admission_transport), false,
                  std::move(dependencies.invite_join_attempt_transport),
-                 std::move(dependencies.join_attempt_completion_transport)) {}
+                 std::move(dependencies.join_attempt_completion_transport)) {
+  discovery_.SetArbitrationMachineId(registry_.local_machine_id());
+}
 SessionManager::~SessionManager() {
   ShutdownAsyncActivity();
 }
