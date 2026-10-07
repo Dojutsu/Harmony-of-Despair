@@ -1,19 +1,85 @@
 #include <rex/input/scripted/scripted_input_driver.h>
 
 #include <fstream>
+#include <algorithm>
+#include <cerrno>
+#include <rex/platform.h>
+#if REX_PLATFORM_GNU_LINUX
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+#endif
 #include <rex/logging.h>
 
 namespace rex::input::scripted {
 namespace {
 constexpr DeviceId kDevice = static_cast<DeviceId>(0x53435250);
+#if REX_PLATFORM_GNU_LINUX
+bool ReadOwnedScript(const std::filesystem::path& path, std::string& text,
+                     uint64_t& device, uint64_t& inode, std::string& error) {
+  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+  if (fd < 0) { error = "input script cannot be opened safely"; return false; }
+  struct Close { int fd; ~Close() { ::close(fd); } } close{fd};
+  struct stat before{}, after{};
+  if (::fstat(fd, &before) || !S_ISREG(before.st_mode) || before.st_uid != ::geteuid() ||
+      (before.st_mode & (S_IRWXG | S_IRWXO)) || before.st_size < 0 ||
+      uint64_t(before.st_size) > Timeline::kMaximumBytes) {
+    error = "input script is not a bounded private owned regular file"; return false;
+  }
+  text.assign(Timeline::kMaximumBytes + 1, '\0');
+  size_t offset = 0;
+  while (offset < text.size()) {
+    const auto count = ::read(fd, text.data() + offset, text.size() - offset);
+    if (count < 0) { if (errno == EINTR) continue; error = "input script read failed"; return false; }
+    if (!count) break;
+    offset += static_cast<size_t>(count);
+  }
+  text.resize(offset);
+  if (text.size() > Timeline::kMaximumBytes || ::fstat(fd, &after) ||
+      before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
+      before.st_uid != after.st_uid || before.st_mode != after.st_mode ||
+      before.st_size != after.st_size || uint64_t(after.st_size) != text.size() ||
+      before.st_mtim.tv_sec != after.st_mtim.tv_sec || before.st_mtim.tv_nsec != after.st_mtim.tv_nsec) {
+    error = "input script changed during bounded read"; return false;
+  }
+  device = static_cast<uint64_t>(before.st_dev); inode = static_cast<uint64_t>(before.st_ino);
+  error.clear(); return true;
+}
+#endif
 }
 
 ScriptedInputDriver::ScriptedInputDriver(std::filesystem::path script, Clock clock)
-    : InputDriver(nullptr, 0),
+    : ScriptedInputDriver(std::move(script), std::move(clock), false) {}
+ScriptedInputDriver::ScriptedInputDriver(std::filesystem::path script, Clock clock, bool append_only)
+    : InputDriver(nullptr, 0), external_clock_(bool(clock)),
       clock_(clock ? std::move(clock) : [] { return std::chrono::steady_clock::now(); }),
-      script_(std::move(script)) {}
+      script_(std::move(script)), append_only_(append_only) {}
 
 X_STATUS ScriptedInputDriver::Setup() {
+  if (append_only_) {
+#if REX_PLATFORM_GNU_LINUX
+    std::string text, error;
+    if (!ReadOwnedScript(script_, text, script_device_, script_inode_, error)) {
+      REXLOG_ERROR("Offline controller append setup rejected: {}", error); return X_STATUS_INVALID_PARAMETER;
+    }
+    const auto completed = text.rfind('\n');
+    if (completed == std::string::npos) return X_STATUS_INVALID_PARAMETER;
+    text.resize(completed + 1);
+    if (!timeline_.Parse(text, error)) {
+      REXLOG_ERROR("Offline controller append setup rejected: {}", error); return X_STATUS_INVALID_PARAMETER;
+    }
+    if (!timeline_.ends_neutral()) {
+      REXLOG_ERROR("Offline controller append setup rejected: initial schedule needs a final fully neutral release");
+      return X_STATUS_INVALID_PARAMETER;
+    }
+    accepted_text_ = std::move(text);
+    REXLOG_INFO("Offline controller append-only reload enabled; 250ms cadence, private owned file");
+    return X_STATUS_SUCCESS;
+#else
+    REXLOG_ERROR("Offline controller append-only reload requires Linux"); return X_STATUS_INVALID_PARAMETER;
+#endif
+  }
   std::error_code ec;
   if (!std::filesystem::is_regular_file(script_, ec) || ec) {
     REXLOG_ERROR("Scripted input requires a regular local file");
@@ -36,6 +102,40 @@ X_STATUS ScriptedInputDriver::Setup() {
   return X_STATUS_SUCCESS;
 }
 
+void ScriptedInputDriver::ReportReloadError(const std::string& error) {
+  if (last_reload_error_ != error) {
+    REXLOG_WARN("Offline controller append rejected; accepted schedule retained: {}", error);
+    last_reload_error_ = error;
+  }
+}
+void ScriptedInputDriver::Reload(std::chrono::steady_clock::time_point now, uint64_t elapsed_ms) {
+  if (!append_only_ || (reload_clock_set_ && now - reloaded_at_ < std::chrono::milliseconds(250))) return;
+  reloaded_at_ = now; reload_clock_set_ = true;
+#if REX_PLATFORM_GNU_LINUX
+  std::string text, error; uint64_t device = 0, inode = 0;
+  if (!ReadOwnedScript(script_, text, device, inode, error)) { ReportReloadError(error); return; }
+  if (device != script_device_ || inode != script_inode_) {
+    ReportReloadError("input script file identity changed"); return;
+  }
+  if (text.size() < accepted_text_.size() || text.compare(0, accepted_text_.size(), accepted_text_) != 0) {
+    ReportReloadError("input script accepted byte prefix changed"); return;
+  }
+  // A newline is the writer's commit boundary. Pending bytes cannot turn a
+  // partially written last integer into an accepted row.
+  const auto completed = text.rfind('\n');
+  if (completed == std::string::npos) { ReportReloadError("input script has no completed rows"); return; }
+  text.resize(completed + 1);
+  if (text.size() == accepted_text_.size()) return;
+  const auto previous = timeline_.frame_count();
+  if (!timeline_.Extend(text, elapsed_ms, error)) { ReportReloadError(error); return; }
+  accepted_text_ = std::move(text); last_reload_error_.clear();
+  REXLOG_INFO("Offline controller append accepted: elapsed_ms={} previous_rows={} rows={}",
+              elapsed_ms, previous, timeline_.frame_count());
+#else
+  (void)elapsed_ms;
+#endif
+}
+
 void ScriptedInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
   DeviceInfo info;
   info.id = kDevice;
@@ -54,10 +154,25 @@ X_RESULT ScriptedInputDriver::Sample(DeviceId id, X_INPUT_STATE* out, bool start
   if (id != kDevice) return X_ERROR_DEVICE_NOT_CONNECTED;
   if (!out) return X_ERROR_BAD_ARGUMENTS;
   std::lock_guard lock(mutex_);
-  if (!started_ && !start_clock) { *out = {}; return X_ERROR_SUCCESS; }
+  if (!started_ && !start_clock) {
+    if (append_only_) Reload(clock_(), 0);
+    *out = {}; return X_ERROR_SUCCESS;
+  }
   const auto now = clock_();
-  if (!started_) { started_at_ = now; started_ = true; }
+  if (!started_) {
+    started_at_ = now; started_ = true;
+#if REX_PLATFORM_GNU_LINUX
+    if (append_only_) {
+      timespec monotonic{};
+      if (::clock_gettime(CLOCK_MONOTONIC, &monotonic) == 0)
+        REXLOG_INFO("Offline controller append clock: monotonic_ms={} pid={} device={} inode={} external_clock={}",
+                    uint64_t(monotonic.tv_sec) * 1000 + uint64_t(monotonic.tv_nsec) / 1000000,
+                    ::getpid(), script_device_, script_inode_, external_clock_);
+    }
+#endif
+  }
   const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - started_at_).count();
+  Reload(now, static_cast<uint64_t>(std::max<int64_t>(0, elapsed)));
   uint32_t packet;
   const auto state = timeline_.Sample(static_cast<uint64_t>(elapsed), &packet);
   if (start_clock) {

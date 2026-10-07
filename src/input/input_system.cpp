@@ -33,6 +33,8 @@ REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput
 REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-through");
 REXCVAR_DEFINE_STRING(input_script, "", "Input",
                      "Opt-in offline test controller schedule (local file, starts on first guest poll)");
+REXCVAR_DEFINE_BOOL(input_script_append, false, "Input",
+                    "Opt-in Linux append-only reload of the private owned controller script");
 namespace rex::input {
 
 namespace {
@@ -402,7 +404,8 @@ std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode) {
   auto input = std::make_unique<InputSystem>(nullptr);
 
   if (!tool_mode && !REXCVAR_GET(input_script).empty()) {
-    auto driver = std::make_unique<scripted::ScriptedInputDriver>(REXCVAR_GET(input_script));
+    auto driver = std::make_unique<scripted::ScriptedInputDriver>(REXCVAR_GET(input_script),
+        scripted::ScriptedInputDriver::Clock{}, REXCVAR_GET(input_script_append));
     if (driver->Setup() != X_STATUS_SUCCESS) return nullptr;
     input->AddDriver(std::move(driver));
     input->SetDeviceAssignment(std::make_unique<SlotAssignment>());

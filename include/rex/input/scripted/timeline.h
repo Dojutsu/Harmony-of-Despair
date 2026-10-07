@@ -17,6 +17,10 @@ struct Frame {
   uint16_t buttons = 0;
   uint8_t left_trigger = 0, right_trigger = 0;
   int16_t left_x = 0, left_y = 0, right_x = 0, right_y = 0;
+  bool operator==(const Frame&) const = default;
+  bool IsNeutral() const {
+    return !buttons && !left_trigger && !right_trigger && !left_x && !left_y && !right_x && !right_y;
+  }
 };
 
 class Timeline {
@@ -73,6 +77,35 @@ class Timeline {
     error.clear();
     return true;
   }
+
+  // Validate the complete new schedule before publishing it. Appending never
+  // renumbers an accepted packet or changes already accepted future frames.
+  bool Extend(std::string_view text, uint64_t elapsed_ms, std::string& error) {
+    Timeline candidate;
+    if (!candidate.Parse(text, error)) return false;
+    if (candidate.frames_.size() < frames_.size()) {
+      error = "input script accepted rows were removed"; return false;
+    }
+    for (size_t i = 0; i < frames_.size(); ++i) {
+      if (candidate.frames_[i] != frames_[i]) {
+        error = "input script accepted rows were changed"; return false;
+      }
+    }
+    if (candidate.frames_.size() > frames_.size() &&
+        candidate.frames_[frames_.size()].milliseconds <= elapsed_ms) {
+      error = "input script appended row is not in the future"; return false;
+    }
+    if (candidate.frames_.size() > frames_.size()) {
+      const auto& release = candidate.frames_.back();
+      if (!release.IsNeutral()) {
+        error = "input script extension needs a final fully neutral release"; return false;
+      }
+    }
+    frames_ = std::move(candidate.frames_);
+    error.clear(); return true;
+  }
+  size_t frame_count() const { return frames_.size(); }
+  bool ends_neutral() const { return !frames_.empty() && frames_.back().IsNeutral(); }
 
   Frame Sample(uint64_t elapsed_ms, uint32_t* packet = nullptr) const {
     Frame state;

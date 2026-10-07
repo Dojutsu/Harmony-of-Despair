@@ -12,6 +12,7 @@ class ScriptedInputDriver final : public InputDriver {
  public:
   using Clock = std::function<std::chrono::steady_clock::time_point()>;
   explicit ScriptedInputDriver(std::filesystem::path script, Clock clock = {});
+  ScriptedInputDriver(std::filesystem::path script, Clock clock, bool append_only);
   X_STATUS Setup() override;
   void EnumerateDevices(std::vector<DeviceInfo>& out) override;
   X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out) override;
@@ -23,9 +24,17 @@ class ScriptedInputDriver final : public InputDriver {
 
  private:
   X_RESULT Sample(DeviceId id, X_INPUT_STATE* out, bool start_clock);
+  void Reload(std::chrono::steady_clock::time_point now, uint64_t elapsed_ms);
+  void ReportReloadError(const std::string& error);
+  bool external_clock_ = false;
   Clock clock_;
   std::filesystem::path script_;
   Timeline timeline_;
+  bool append_only_ = false;
+  bool reload_clock_set_ = false;
+  std::chrono::steady_clock::time_point reloaded_at_{};
+  std::string accepted_text_, last_reload_error_;
+  uint64_t script_device_ = 0, script_inode_ = 0;
   std::mutex mutex_;
   bool started_ = false;
   uint32_t logged_ui_packet_ = UINT32_MAX;

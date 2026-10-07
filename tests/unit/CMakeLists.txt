@@ -241,3 +241,19 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             LABELS "kernel;threading" TIMEOUT 15)
     endforeach()
 endif()
+
+# Optional local append-only controller fixture; no devices or network needed.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(scripted_input_reload_test input/scripted_input_reload_test.cpp)
+    target_link_libraries(scripted_input_reload_test PRIVATE rexruntime)
+    set_target_properties(scripted_input_reload_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>
+        INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
+    add_test(NAME scripted_input_reload COMMAND scripted_input_reload_test)
+    set_tests_properties(scripted_input_reload PROPERTIES LABELS "linux;input" TIMEOUT 20)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME scripted_input_append_helper
+        COMMAND "${Python3_EXECUTABLE}" -B
+            "${PROJECT_SOURCE_DIR}/tests/compile/scripted_input_append_test.py")
+    set_tests_properties(scripted_input_append_helper PROPERTIES LABELS "linux;input" TIMEOUT 20)
+endif()
