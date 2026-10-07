@@ -1,0 +1,46 @@
+# Private LAN invitation capabilities
+
+This candidate authenticates possession of a private invitation bound to an
+expected host XUID and one expected client XUID. It does not authenticate Xbox
+Live ownership. The host owns up to five distinct grants; each client receives
+only its own grant. Invited clients cannot use their grant to authenticate
+another client's bootstrap identity.
+
+Generate fresh grants locally, using the XUIDs already configured by the local
+`user_xuid` profile setting:
+
+```
+python3 -B tools/private_lan_invitation.py \
+  --directory /absolute/private/invitations \
+  --host-xuid 0009000000000001 \
+  --client-xuid 0009000000000002 \
+  --client-xuid 0009000000000003
+```
+
+The directory must not exist. The generator creates it with mode 0700 and
+writes `host.hpli` and one `client-<xuid>.hpli` per client with mode 0600. It
+prints only file paths. Transfer each client's file through an existing trusted
+private channel; treat that file as the invitation capability. Keep the host
+file private. Files expire after one day by default; `--expires-in` accepts
+1–604800 seconds. Generate a fresh set for a new invitation group.
+
+The native loader requires an absolute path with no symlink or dot components,
+a same-owner 0700 parent, a same-owner regular single-link non-executable private
+file and exact bounded contents. It rejects expired/far-future invitations,
+duplicate XUIDs, duplicate selectors/secrets, zero identity/key values and
+trailing bytes. Key bytes have no public export API and are cleansed on object
+destruction. The file path is suitable for configuration; the secret bytes are
+never a cvar value, command-line argument, public discovery/session key or log
+message.
+
+Each possession proof is HMAC-SHA-256 truncated to 128 bits. Its domain includes
+host and client XUIDs, invitation selector and expiry, explicit operation-domain
+and transcript lengths, and every transcript byte. Comparisons use the crypto
+provider's constant-time routine. Network callers must include exact session
+incarnation, request challenge, ordered ephemeral keys, endpoints and roles,
+and must validate fresh correlation before accepting a replayed proof.
+
+This checkpoint provides the tested file loader, possession proofs and local
+generator. The discovery/bootstrap and protected gameplay integration remain
+active work; possession-proof unit tests alone do not establish playable LAN
+multiplayer or authenticate an unauthenticated X25519 exchange.
