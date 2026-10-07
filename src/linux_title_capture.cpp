@@ -19,6 +19,11 @@ REXCVAR_DEFINE_UINT32(harmony_capture_interval_ms, 10000, "Debug",
     .range(1000, 60000)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_UINT32(harmony_capture_delay_ms, 0, "Debug",
+                     "Initial delay for bounded offline guest-frame capture, in milliseconds")
+    .range(0, 600000)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 namespace harmony {
 std::jthread StartLinuxTitleCapture(rex::ui::Presenter* presenter) {
   const auto path = std::filesystem::path(REXCVAR_GET(harmony_capture_dir));
@@ -31,7 +36,8 @@ std::jthread StartLinuxTitleCapture(rex::ui::Presenter* presenter) {
   std::filesystem::permissions(path, std::filesystem::perms::owner_all, error);
   if (error) return {};
   const auto interval = std::chrono::milliseconds(REXCVAR_GET(harmony_capture_interval_ms));
-  return std::jthread([presenter, path, interval](std::stop_token stop) {
+  const auto delay = std::chrono::milliseconds(REXCVAR_GET(harmony_capture_delay_ms));
+  return std::jthread([presenter, path, interval, delay](std::stop_token stop) {
     try {
     using namespace std::chrono_literals;
     constexpr size_t kMaximumFrameBytes = 16 * 1024 * 1024;
@@ -40,7 +46,13 @@ std::jthread StartLinuxTitleCapture(rex::ui::Presenter* presenter) {
     std::mutex wait_mutex;
     std::condition_variable_any changed;
     std::unique_lock wait_lock(wait_mutex);
+    // Keep elapsed timestamps anchored to capture startup, including the delay,
+    // so controller/frame correlation retains its original clock.
     const auto started = std::chrono::steady_clock::now();
+    if (delay > 0ms) {
+      changed.wait_for(wait_lock, stop, delay, [] { return false; });
+      if (stop.stop_requested()) return;
+    }
     for (unsigned index = 0; index < 32 && !stop.stop_requested(); ++index) {
       changed.wait_for(wait_lock, stop, interval, [] { return false; });
       if (stop.stop_requested()) break;
