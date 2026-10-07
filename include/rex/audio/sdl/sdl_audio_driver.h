@@ -16,6 +16,8 @@
 #include <stack>
 
 #include <rex/audio/audio_driver.h>
+#include <rex/audio/game_audio_capture.h>
+#include <rex/platform.h>
 #include <rex/thread.h>
 
 #include <SDL3/SDL.h>
@@ -39,6 +41,9 @@ class SDLAudioDriver : public AudioDriver {
 
   SDL_AudioStream* sdl_stream_ = nullptr;
   bool sdl_initialized_ = false;
+#if REX_PLATFORM_GNU_LINUX
+  std::unique_ptr<GameAudioCapture> game_audio_capture_;
+#endif
   uint8_t sdl_device_channels_ = 0;
 
   static const uint32_t frame_frequency_ = 48000;

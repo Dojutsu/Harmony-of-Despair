@@ -27,6 +27,13 @@
 #include <SDL3/SDL.h>
 
 REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
+#if REX_PLATFORM_GNU_LINUX
+REXCVAR_DEFINE_STRING(audio_capture_wav, "", "Audio",
+                     "Opt-in game PCM capture to a fresh absolute file in a private directory");
+REXCVAR_DEFINE_INT32(audio_capture_seconds, 30, "Audio", "Game PCM capture duration (1-30 seconds)");
+REXCVAR_DEFINE_INT32(audio_capture_delay_seconds, 0, "Audio",
+                    "Skip submitted game PCM before capture (0-600 seconds)");
+#endif
 
 namespace rex::audio::sdl {
 
@@ -115,6 +122,30 @@ bool SDLAudioDriver::Initialize() {
     return false;
   }
 
+#if REX_PLATFORM_GNU_LINUX
+  const auto& capture_path = REXCVAR_GET(audio_capture_wav);
+  if (!capture_path.empty()) {
+    try {
+      const auto seconds = REXCVAR_GET(audio_capture_seconds);
+      const auto delay = REXCVAR_GET(audio_capture_delay_seconds);
+      std::string_view error;
+      if (seconds < 1 || seconds > static_cast<int32_t>(Pcm16CaptureBuffer::kMaximumSeconds) ||
+          delay < 0 || delay > static_cast<int32_t>(Pcm16CaptureBuffer::kMaximumDelaySeconds)) {
+        REXAPU_WARN("Game PCM capture duration or delay is out of bounds");
+      } else {
+        game_audio_capture_ = GameAudioCapture::Open(std::filesystem::path(capture_path),
+            static_cast<uint32_t>(seconds), static_cast<uint32_t>(delay), &error);
+        if (game_audio_capture_)
+          REXAPU_INFO("Private game PCM capture enabled: duration={}s delay={}s", seconds, delay);
+        else
+          REXAPU_WARN("Game PCM capture disabled: {}", error);
+      }
+    } catch (...) {
+      // Diagnostics must not prevent an otherwise working audio device from starting.
+      REXAPU_WARN("Game PCM capture disabled: initialization failed");
+    }
+  }
+#endif
   return true;
 }
 
@@ -132,6 +163,20 @@ void SDLAudioDriver::SubmitFrame(uint32_t frame_ptr) {
   }
 
   std::memcpy(output_frame, input_frame, frame_samples_ * sizeof(float));
+
+#if REX_PLATFORM_GNU_LINUX
+  if (game_audio_capture_ && game_audio_capture_->accepting()) {
+    // SubmitFrame runs outside SDL's real-time callback and is serialized by
+    // AudioSystem's client lock. Record only this copied game frame; never open
+    // an input device or read desktop audio. Reuse the SDK stereo fold/gain.
+    std::array<float, channel_samples_ * 2> stereo{};
+    if (!REXCVAR_GET(audio_mute)) {
+      conversion::sequential_6_BE_to_interleaved_2_LE(
+          stereo.data(), output_frame, channel_samples_, GetStereoFold(), GetOutputGain());
+    }
+    game_audio_capture_->Append(stereo);
+  }
+#endif
 
   static uint32_t sdl_submit_count = 0;
   if (sdl_submit_count < 10) {
@@ -156,6 +201,14 @@ void SDLAudioDriver::Shutdown() {
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
     sdl_initialized_ = false;
   }
+#if REX_PLATFORM_GNU_LINUX
+  if (game_audio_capture_) {
+    game_audio_capture_->Close();
+    REXAPU_INFO("Private game PCM capture closed: frames={} written={}",
+                game_audio_capture_->frames(), game_audio_capture_->succeeded());
+    game_audio_capture_.reset();
+  }
+#endif
   std::unique_lock<std::mutex> guard(frames_mutex_);
   while (!frames_unused_.empty()) {
     delete[] frames_unused_.top();
