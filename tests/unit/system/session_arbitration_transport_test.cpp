@@ -222,4 +222,193 @@ TEST_CASE("real LAN registration collects only peers that registered and revokes
   CHECK_FALSE(host.RegisterArbitration(hosted, 10001, hosted->nonce));
   host.StopAdvertising();
 }
+
+namespace {
+// Real owned loopback transport; it neither opens envelopes nor records token
+// bytes. Only reply correlation/MAC failures are introduced locally.
+struct ExpiredJoinRelay {
+  enum class Mode { kDropConfirmation, kTamperExpiry, kOldExpiry, kPass };
+  int frontend = -1, upstream = -1;
+  uint16_t port = 0;
+  sockaddr_in host{}, client{};
+  std::atomic<Mode> mode = Mode::kDropConfirmation;
+  std::atomic<unsigned> expired_replies = 0;
+  std::atomic<bool> tampered = false, injected_old = false, empty_receipt = true;
+  std::jthread thread;
+  explicit ExpiredJoinRelay(uint16_t host_port) {
+    frontend = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    upstream = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    REQUIRE(frontend >= 0); REQUIRE(upstream >= 0);
+    sockaddr_in address{}; address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    REQUIRE(::bind(frontend, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    REQUIRE(::bind(upstream, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    socklen_t size = sizeof(address);
+    REQUIRE(::getsockname(frontend, reinterpret_cast<sockaddr*>(&address), &size) == 0);
+    port = ntohs(address.sin_port);
+    host.sin_family = AF_INET; host.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    host.sin_port = htons(host_port);
+    thread = std::jthread([this](std::stop_token stop) {
+      std::array<uint8_t, 640> packet{}, old_expiry{};
+      bool captured = false;
+      while (!stop.stop_requested()) {
+        pollfd ready[2]{{frontend, POLLIN, 0}, {upstream, POLLIN, 0}};
+        if (::poll(ready, 2, 5) <= 0) continue;
+        sockaddr_in source{}; socklen_t length = sizeof(source);
+        if (ready[0].revents & POLLIN) {
+          const auto count = ::recvfrom(frontend, packet.data(), packet.size(), MSG_TRUNC,
+              reinterpret_cast<sockaddr*>(&source), &length);
+          if (count == static_cast<ssize_t>(packet.size())) {
+            client = source;
+            const bool signed_join = packet[6] == 3 &&
+                std::any_of(packet.begin() + 500, packet.begin() + 516,
+                            [](uint8_t value) { return value != 0; });
+            const auto action = mode.load();
+            if (signed_join && action == Mode::kDropConfirmation) continue;
+            if (signed_join && captured && action == Mode::kOldExpiry) {
+              ::sendto(frontend, old_expiry.data(), old_expiry.size(), 0,
+                       reinterpret_cast<sockaddr*>(&client), sizeof(client));
+              injected_old = true;
+            }
+            ::sendto(upstream, packet.data(), packet.size(), 0,
+                     reinterpret_cast<sockaddr*>(&host), sizeof(host));
+          }
+        }
+        if (ready[1].revents & POLLIN) {
+          length = sizeof(source);
+          const auto count = ::recvfrom(upstream, packet.data(), packet.size(), MSG_TRUNC,
+              reinterpret_cast<sockaddr*>(&source), &length);
+          if (count != static_cast<ssize_t>(packet.size()) ||
+              source.sin_addr.s_addr != host.sin_addr.s_addr || source.sin_port != host.sin_port)
+            continue;
+          if (packet[6] == 7) {
+            ++expired_replies;
+            if (!captured) { old_expiry = packet; captured = true; }
+            // Fixed wire v2: count@64, encrypted token@484, server key/IV/tag@564.
+            if (std::any_of(packet.begin() + 64, packet.begin() + 68,
+                            [](uint8_t value) { return value != 0; }) ||
+                std::any_of(packet.begin() + 484, packet.begin() + 500,
+                            [](uint8_t value) { return value != 0; }) ||
+                std::any_of(packet.begin() + 564, packet.begin() + 624,
+                            [](uint8_t value) { return value != 0; })) empty_receipt = false;
+            const auto action = mode.load();
+            if (action == Mode::kOldExpiry) continue;
+            if (action == Mode::kTamperExpiry) { packet[500] ^= 1; tampered = true; }
+          }
+          ::sendto(frontend, packet.data(), packet.size(), 0,
+                   reinterpret_cast<sockaddr*>(&client), sizeof(client));
+        }
+      }
+    });
+  }
+  ~ExpiredJoinRelay() {
+    thread.request_stop(); if (thread.joinable()) thread.join();
+    if (frontend >= 0) ::close(frontend);
+    if (upstream >= 0) ::close(upstream);
+  }
+};
+struct ExpiryTransportFixture {
+  LocalConfig config;
+  SessionRegistry host_registry, client_registry;
+  uint16_t port = UnusedPort();
+  LanDiscoveryService host{0x58410A7A, port}, client{0x58410A7A, port};
+  std::shared_ptr<SessionRecord> hosted, actual;
+  ExpiredJoinRelay relay{port};
+  SessionMember player{10002, "Client", 0, true, false, false};
+  ExpiryTransportFixture() {
+    host.SetArbitrationMachineId(host_registry.local_machine_id());
+    client.SetArbitrationMachineId(client_registry.local_machine_id());
+    hosted = host_registry.Create(10001, "Host", {htonl(INADDR_LOOPBACK), 3074}, 1, 4, 0);
+    REQUIRE(hosted); REQUIRE(host.Advertise(hosted));
+    SessionRecord discovered = *hosted; discovered.arbitration.reset();
+    discovered.discovery_address = {htonl(INADDR_LOOPBACK), relay.port};
+    actual = client_registry.UpsertDiscovered(std::move(discovered)); REQUIRE(actual);
+  }
+  void LoseConfirmation() {
+    CHECK_FALSE(client.Join(*actual, player, 500));
+    REQUIRE(actual->arbitration_client);
+    CHECK_FALSE(client.RegisterArbitration(actual, player.xuid, hosted->nonce));
+    std::lock_guard lock(*hosted->mutex);
+    REQUIRE(hosted->members.size() == 2);
+    REQUIRE(hosted->arbitration->Snapshot());
+    CHECK(hosted->arbitration->Snapshot()->registrants.empty());
+  }
+  void Retire(bool expire) {
+    std::lock_guard lock(*hosted->mutex);
+    if (expire) {
+      // Controlled host clock exercises the same actual authority expiry and
+      // roster removal transaction as the listener, without a 30s wall sleep.
+      const auto expired = hosted->arbitration->ExpireUnconfirmed(
+          SessionArbitrationAuthority::Clock::now() + std::chrono::seconds(31));
+      REQUIRE(expired == std::vector<uint64_t>{player.xuid});
+    } else REQUIRE(hosted->arbitration->Remove(player.xuid));
+    std::erase_if(hosted->members, [&](const auto& member) { return member.xuid == player.xuid; });
+    hosted->NotifyStatus();
+    CHECK(hosted->members.size() == 1);
+  }
+};
+} // namespace
+
+TEST_CASE("authenticated expired join receipt rotates only the exact pending client binding",
+          "[session][arbitration][network][lan][expiry]") {
+  ExpiryTransportFixture fixture; fixture.LoseConfirmation();
+  const auto old_binding = fixture.actual->arbitration_client;
+  fixture.Retire(true);
+  fixture.relay.mode = ExpiredJoinRelay::Mode::kTamperExpiry;
+  CHECK_FALSE(fixture.client.Join(*fixture.actual, fixture.player, 250));
+  CHECK(fixture.relay.tampered);
+  CHECK(fixture.actual->arbitration_client == old_binding);
+  CHECK_FALSE(fixture.client.RegisterArbitration(fixture.actual, fixture.player.xuid, fixture.hosted->nonce));
+  fixture.relay.mode = ExpiredJoinRelay::Mode::kOldExpiry;
+  CHECK_FALSE(fixture.client.Join(*fixture.actual, fixture.player, 250));
+  CHECK(fixture.relay.injected_old);
+  CHECK(fixture.actual->arbitration_client == old_binding);
+  fixture.relay.mode = ExpiredJoinRelay::Mode::kPass;
+  CHECK_FALSE(fixture.client.Join(*fixture.actual, fixture.player, 500));
+  CHECK_FALSE(fixture.actual->arbitration_client);
+  CHECK(fixture.relay.empty_receipt);
+  CHECK(fixture.relay.expired_replies >= 3);
+  {
+    std::lock_guard lock(*fixture.hosted->mutex);
+    CHECK(fixture.hosted->members.size() == 1);
+    CHECK(fixture.hosted->arbitration->Snapshot()->registrants.empty());
+  }
+  // Only a subsequent ordinary Join creates a new key/challenge/admission.
+  auto joined = fixture.client.Join(*fixture.actual, fixture.player, 500);
+  REQUIRE(joined); REQUIRE(joined->arbitration_client);
+  CHECK(joined->arbitration_client != old_binding);
+  REQUIRE(fixture.client_registry.CommitJoinedRecord(fixture.actual, std::move(*joined), [] { return true; }));
+  auto registration = fixture.client.RegisterArbitration(fixture.actual, fixture.player.xuid, fixture.hosted->nonce);
+  REQUIRE(registration); REQUIRE(registration->registrants.size() == 1);
+  CHECK(registration->registrants[0].xuids == std::vector<uint64_t>{fixture.player.xuid});
+}
+
+TEST_CASE("explicit leave and confirmed joins never produce expired join recovery",
+          "[session][arbitration][network][lan][expiry]") {
+  ExpiryTransportFixture fixture;
+  SECTION("explicit removal stays fail closed without a receipt") {
+    fixture.LoseConfirmation();
+    const auto binding = fixture.actual->arbitration_client;
+    fixture.Retire(false);
+    fixture.relay.mode = ExpiredJoinRelay::Mode::kPass;
+    CHECK_FALSE(fixture.client.Join(*fixture.actual, fixture.player, 300));
+    CHECK(fixture.actual->arbitration_client == binding);
+    CHECK(fixture.relay.expired_replies == 0);
+  }
+  SECTION("confirmed lobby admission survives the unconfirmed deadline") {
+    fixture.relay.mode = ExpiredJoinRelay::Mode::kPass;
+    auto joined = fixture.client.Join(*fixture.actual, fixture.player, 500);
+    REQUIRE(joined);
+    REQUIRE(fixture.client_registry.CommitJoinedRecord(fixture.actual, std::move(*joined), [] { return true; }));
+    const auto binding = fixture.actual->arbitration_client;
+    {
+      std::lock_guard lock(*fixture.hosted->mutex);
+      CHECK(fixture.hosted->arbitration->ExpireUnconfirmed(
+          SessionArbitrationAuthority::Clock::now() + std::chrono::seconds(31)).empty());
+    }
+    auto retried = fixture.client.Join(*fixture.actual, fixture.player, 500);
+    REQUIRE(retried); CHECK(retried->arbitration_client == binding);
+    CHECK(fixture.relay.expired_replies == 0);
+  }
+}
 #endif

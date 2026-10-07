@@ -86,8 +86,8 @@ ArbitrationJoinResult SessionArbitrationAuthority::CheckAdmissionLocked(
   if (!claim.xuid || !claim.machine_id || claim.xuid == identity_.host_xuid ||
       !ValidEndpoint(claim.endpoint) || !Nonzero(claim.challenge))
     return {ArbitrationStatus::kInvalid, {}};
-  if (std::find(retired_.begin(), retired_.begin() + static_cast<ptrdiff_t>(retired_count_),
-                claim.challenge) != retired_.begin() + static_cast<ptrdiff_t>(retired_count_))
+  if (std::any_of(retired_.begin(), retired_.begin() + static_cast<ptrdiff_t>(retired_count_),
+                  [&](const auto& attempt) { return attempt.challenge == claim.challenge; }))
     return {ArbitrationStatus::kRetiredAttempt, {}};
   bool vacant = false;
   for (const auto& member : members_) {
@@ -126,7 +126,11 @@ ArbitrationJoinResult SessionArbitrationAuthority::Admit(
   if (!Nonzero(new_credential)) return {ArbitrationStatus::kInvalid, {}};
   if (std::any_of(members_.begin(), members_.end(), [&](const auto& member) {
         return member.occupied && CredentialEqual(member.credential, new_credential);
-      })) return {ArbitrationStatus::kInvalid, {}};
+      }) || std::any_of(retired_.begin(), retired_.begin() + static_cast<ptrdiff_t>(retired_count_),
+                       [&](const auto& attempt) {
+                         return Nonzero(attempt.expiry_credential) &&
+                             CredentialEqual(attempt.expiry_credential, new_credential);
+                       })) return {ArbitrationStatus::kInvalid, {}};
   auto it = std::find_if(members_.begin(), members_.end(), [](const auto& member) { return !member.occupied; });
   if (it == members_.end()) return {ArbitrationStatus::kExhausted, {}};
   it->occupied = true; it->xuid = claim.xuid; it->machine_id = claim.machine_id;
@@ -177,6 +181,24 @@ std::optional<ArbitrationToken> SessionArbitrationAuthority::CredentialForVerifi
       return member.credential;
   return std::nullopt;
 }
+std::optional<ArbitrationToken> SessionArbitrationAuthority::ExpiredJoinCredentialForVerification(
+    const ArbitrationIdentity& identity, const ArbitrationJoinClaim& claim) const {
+  std::lock_guard lock(mutex_);
+  if (!alive_ || identity != identity_ || !claim.xuid || !claim.machine_id ||
+      !ValidEndpoint(claim.endpoint) || !Nonzero(claim.challenge)) return std::nullopt;
+  // A current admission for this XUID takes precedence over retired receipts.
+  if (std::any_of(members_.begin(), members_.end(), [&](const auto& member) {
+        return member.occupied && member.xuid == claim.xuid;
+      })) return std::nullopt;
+  for (size_t index = 0; index < retired_count_; ++index) {
+    const auto& attempt = retired_[index];
+    if (attempt.reason == RetirementReason::kUnconfirmedExpired &&
+        attempt.xuid == claim.xuid && attempt.machine_id == claim.machine_id &&
+        attempt.endpoint == claim.endpoint && attempt.challenge == claim.challenge &&
+        Nonzero(attempt.expiry_credential)) return attempt.expiry_credential;
+  }
+  return std::nullopt;
+}
 ArbitrationStatus SessionArbitrationAuthority::RegisterLocal(
     uint64_t xuid, uint64_t machine_id, uint64_t nonce, const ArbitrationToken& attempt) {
   std::lock_guard lock(mutex_);
@@ -187,13 +209,24 @@ ArbitrationStatus SessionArbitrationAuthority::RegisterLocal(
 }
 bool SessionArbitrationAuthority::Remove(uint64_t xuid) {
   std::lock_guard lock(mutex_);
+  if (!alive_) return false;
+  // Explicit cancellation also revokes older expiry receipts for this XUID.
+  for (size_t index = 0; index < retired_count_; ++index) {
+    auto& attempt = retired_[index];
+    if (attempt.xuid == xuid) {
+      attempt.expiry_credential = {};
+      attempt.reason = RetirementReason::kLeft;
+    }
+  }
   auto it = std::find_if(members_.begin(), members_.end(), [&](const auto& member) {
     return member.occupied && member.xuid == xuid;
   });
   if (!alive_ || it == members_.end() || it->local) return false;
   // Once the bounded tombstone budget is exhausted, no further admission is
   // permitted. Never evict a still-live session's old challenge.
-  if (retired_count_ < retired_.size()) retired_[retired_count_++] = it->join_challenge;
+  if (retired_count_ < retired_.size())
+    retired_[retired_count_++] = {it->join_challenge, it->xuid, it->machine_id, it->endpoint, {},
+                                RetirementReason::kLeft};
   else alive_ = false;
   *it = Member{}; ++revision_; return true;
 }
@@ -205,14 +238,17 @@ std::vector<uint64_t> SessionArbitrationAuthority::ExpireUnconfirmed(Clock::time
     if (!member.occupied || member.local || member.registered || member.confirmed ||
         now < member.initial_retry_deadline) continue;
     expired.push_back(member.xuid);
-    if (retired_count_ < retired_.size()) retired_[retired_count_++] = member.join_challenge;
+    if (retired_count_ < retired_.size())
+      retired_[retired_count_++] = {member.join_challenge, member.xuid, member.machine_id,
+                                  member.endpoint, member.credential,
+                                  RetirementReason::kUnconfirmedExpired};
     else alive_ = false;
     member = Member{}; ++revision_;
   }
   return expired;
 }
 void SessionArbitrationAuthority::Invalidate() {
-  std::lock_guard lock(mutex_); alive_ = false; members_ = {}; ++revision_;
+  std::lock_guard lock(mutex_); alive_ = false; members_ = {}; retired_ = {}; ++revision_;
 }
 std::optional<ArbitrationSnapshot> SessionArbitrationAuthority::Snapshot() const {
   std::lock_guard lock(mutex_);

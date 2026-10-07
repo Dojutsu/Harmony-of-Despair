@@ -21,6 +21,8 @@
 #include <winsock2.h>
 #else
 #include <arpa/inet.h>
+#include <cerrno>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -1361,6 +1363,87 @@ TEST_CASE("public Search cannot replace an invite lifecycle",
   CHECK(state.lifecycle_token() == kToken);
   CHECK(ClientAdmissionMayReplaceLifecycle(true, &state));
 }
+
+#if REX_PLATFORM_GNU_LINUX
+TEST_CASE("cancelled admission owns its native socket until the last receive lease",
+          "[session][directory][client-admission][socket-lifetime]") {
+  const int native_socket = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+  REQUIRE(native_socket > 0);
+  sockaddr_in local{}; local.sin_family = AF_INET; local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  REQUIRE(::bind(native_socket, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0);
+  auto exact = ExactDiscovery();
+  auto attempt = InviteAttempt();
+  std::optional<ClientAdmissionSocketLease> lease;
+  {
+    SessionDirectoryClient directory(
+        [](uint32_t user) { return ResolveRexGlueLocalUserXuid(user, kLocalXuid); },
+        [](const ClientAdmissionTransportRequest& request) {
+          return ClientAdmissionTransportResponse{204, {}, request.request_started_at};
+        }, false);
+    directory.SetClientAdmissionTitle(kTitle);
+    REQUIRE(directory.PrepareClientAdmission(0, kTitle, attempt, *exact, uint64_t(native_socket)) ==
+            ClientAdmissionPrepareResult::kPrepared);
+    auto wrong = ExactDiscovery(); wrong->info.key[0] ^= 1;
+    CHECK_FALSE(directory.AcquireClientAdmissionSocket(0, *wrong));
+    lease = directory.AcquireClientAdmissionSocket(0, *exact);
+    REQUIRE(lease); CHECK(lease->active()); CHECK(lease->socket() == uint64_t(native_socket));
+    CHECK_FALSE(directory.AcquireClientAdmissionSocket(0, *exact));
+    SECTION("explicit stop") { directory.StopClientAdmission(0); }
+    SECTION("title change") { directory.SetClientAdmissionTitle(kTitle + 1); }
+    SECTION("user sign out") { directory.SetClientAdmissionUserIdentity(0, std::nullopt); }
+    SECTION("all admissions stop") { directory.StopAllClientAdmissions(); }
+    CHECK_FALSE(lease->active()); CHECK_FALSE(directory.HasClientAdmission(0));
+    directory.PollClientAdmissions();
+    CHECK(::fcntl(native_socket, F_GETFD) >= 0);
+    const int competing = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+    REQUIRE(competing > 0); CHECK(competing != native_socket); ::close(competing);
+    CHECK_FALSE(directory.AcquireClientAdmissionSocket(0, *exact));
+  }
+  // Directory teardown cannot close an in-flight numeric descriptor either.
+  CHECK(::fcntl(native_socket, F_GETFD) >= 0);
+  CHECK_FALSE(lease->active());
+  auto moved = std::move(*lease);
+  CHECK(lease->socket() == 0); CHECK_FALSE(lease->active());
+  lease.reset(); CHECK(::fcntl(native_socket, F_GETFD) >= 0);
+  moved = ClientAdmissionSocketLease{};
+  errno = 0; CHECK(::fcntl(native_socket, F_GETFD) == -1); CHECK(errno == EBADF);
+  const int replacement = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+  REQUIRE(replacement > 0);
+  moved = ClientAdmissionSocketLease{};
+  CHECK(::fcntl(replacement, F_GETFD) >= 0); ::close(replacement);
+}
+
+TEST_CASE("an old cancelled receive lease cannot release a newer admission exchange",
+          "[session][directory][client-admission][socket-lifetime]") {
+  const int first_socket = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+  const int second_socket = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+  REQUIRE(first_socket > 0); REQUIRE(second_socket > 0);
+  auto first = ExactDiscovery(); auto first_attempt = InviteAttempt();
+  auto second_attempt = InviteAttempt(); second_attempt.attempt_id[0] = '1';
+  auto second = ExactDiscoveryFor(second_attempt, 2, first->discovery_address);
+  SessionDirectoryClient directory(
+      [](uint32_t user) { return ResolveRexGlueLocalUserXuid(user, kLocalXuid); },
+      [](const ClientAdmissionTransportRequest& request) {
+        return ClientAdmissionTransportResponse{204, {}, request.request_started_at};
+      }, false);
+  directory.SetClientAdmissionTitle(kTitle);
+  REQUIRE(directory.PrepareClientAdmission(0, kTitle, first_attempt, *first, uint64_t(first_socket)) ==
+          ClientAdmissionPrepareResult::kPrepared);
+  auto old_lease = directory.AcquireClientAdmissionSocket(0, *first); REQUIRE(old_lease);
+  REQUIRE(directory.PrepareClientAdmission(0, kTitle, second_attempt, *second, uint64_t(second_socket)) ==
+          ClientAdmissionPrepareResult::kPrepared);
+  CHECK_FALSE(old_lease->active());
+  auto current_lease = directory.AcquireClientAdmissionSocket(0, *second); REQUIRE(current_lease);
+  old_lease.reset(); CHECK(current_lease->active());
+  CHECK_FALSE(directory.AcquireClientAdmissionSocket(0, *second));
+  current_lease.reset();
+  current_lease = directory.AcquireClientAdmissionSocket(0, *second); REQUIRE(current_lease);
+  directory.StopAllClientAdmissions(); directory.PollClientAdmissions();
+  CHECK_FALSE(current_lease->active());
+  CHECK(::fcntl(first_socket, F_GETFD) == -1); CHECK(::fcntl(second_socket, F_GETFD) >= 0);
+  current_lease.reset(); CHECK(::fcntl(second_socket, F_GETFD) == -1);
+}
+#endif
 
 TEST_CASE("production driver completes the client admission lease lifecycle",
           "[session][directory][client-admission][production]") {

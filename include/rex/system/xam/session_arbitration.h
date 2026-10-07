@@ -85,6 +85,11 @@ class SessionArbitrationAuthority final {
   // observed endpoint and cannot redirect either endpoint.
   std::optional<ArbitrationToken> CredentialForVerification(
       const ArbitrationIdentity& identity, uint64_t xuid, uint64_t machine_id) const;
+  // Expiry receipts prove only that this exact unconfirmed admission ended.
+  // Wire callers must verify the complete join request MAC before replying;
+  // this capability never admits, registers, or renews a member.
+  std::optional<ArbitrationToken> ExpiredJoinCredentialForVerification(
+      const ArbitrationIdentity& identity, const ArbitrationJoinClaim& claim) const;
   ArbitrationStatus RegisterFromVerifiedEndpoint(const ArbitrationRegistration& request);
   ArbitrationStatus RegisterLocal(uint64_t xuid, uint64_t machine_id, uint64_t nonce,
                                   const ArbitrationToken& attempt);
@@ -110,6 +115,15 @@ class SessionArbitrationAuthority final {
     ArbitrationToken registration_attempt{};
     Clock::time_point initial_retry_deadline{};
   };
+  enum class RetirementReason { kLeft, kUnconfirmedExpired };
+  struct RetiredAttempt {
+    ArbitrationToken challenge{};
+    uint64_t xuid = 0;
+    uint64_t machine_id = 0;
+    ArbitrationEndpoint endpoint{};
+    ArbitrationToken expiry_credential{};
+    RetirementReason reason = RetirementReason::kLeft;
+  };
   ArbitrationJoinResult CheckAdmissionLocked(const ArbitrationJoinClaim& claim,
                                               Clock::time_point now) const;
   ArbitrationStatus RegisterLocked(Member& member, const ArbitrationToken& attempt);
@@ -120,7 +134,7 @@ class SessionArbitrationAuthority final {
   bool alive_ = false;
   uint64_t revision_ = 1;
   std::array<Member, kMaxMembers> members_{};
-  std::array<ArbitrationToken, kMaxRetiredAttempts> retired_{};
+  std::array<RetiredAttempt, kMaxRetiredAttempts> retired_{};
   size_t retired_count_ = 0;
 };
 

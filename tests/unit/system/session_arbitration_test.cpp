@@ -168,3 +168,101 @@ TEST_CASE("unconfirmed admission expires without expiring confirmed lobby peers"
   REQUIRE(authority.MachineId(8)==9);
   CHECK(authority.Snapshot()->registrants.empty());
 }
+
+TEST_CASE("expired admission retains only exact private receipt capability", "[session][arbitration][expiry]") {
+  Fixture fixture; fixture.Admit();
+  CHECK_FALSE(fixture.authority.ExpiredJoinCredentialForVerification(fixture.identity,fixture.claim));
+  REQUIRE(fixture.authority.ExpireUnconfirmed(SessionArbitrationAuthority::Clock::time_point{}+
+      std::chrono::seconds(30))==std::vector<uint64_t>{fixture.claim.xuid});
+  const auto before=fixture.authority.Snapshot(); REQUIRE(before); CHECK(before->registrants.empty());
+  const auto receipt=fixture.authority.ExpiredJoinCredentialForVerification(fixture.identity,fixture.claim);
+  REQUIRE(receipt); CHECK(*receipt==fixture.remote_credential);
+  CHECK_FALSE(fixture.authority.CredentialForVerification(fixture.identity,fixture.claim.xuid,fixture.claim.machine_id));
+  CHECK_FALSE(fixture.authority.MachineId(fixture.claim.xuid));
+  CHECK(fixture.authority.RegisterFromVerifiedEndpoint(fixture.Request())==ArbitrationStatus::kUnknownMember);
+  CHECK(fixture.authority.CheckAdmission(fixture.claim,{}).status==ArbitrationStatus::kRetiredAttempt);
+  CHECK(fixture.authority.ExpiredJoinCredentialForVerification(fixture.identity,fixture.claim)==receipt);
+  CHECK(fixture.authority.Snapshot()->revision==before->revision);
+}
+
+TEST_CASE("expiry receipt lookup requires all original identity and admission fields", "[session][arbitration][expiry]") {
+  Fixture fixture; fixture.Admit();
+  REQUIRE(fixture.authority.ExpireUnconfirmed(SessionArbitrationAuthority::Clock::time_point{}+
+      std::chrono::seconds(30)).size()==1);
+  auto identity=fixture.identity; identity.session_id[0]^=1;
+  CHECK_FALSE(fixture.authority.ExpiredJoinCredentialForVerification(identity,fixture.claim));
+  identity=fixture.identity; identity.exchange_key[0]^=1;
+  CHECK_FALSE(fixture.authority.ExpiredJoinCredentialForVerification(identity,fixture.claim));
+  identity=fixture.identity; identity.incarnation[0]^=1;
+  CHECK_FALSE(fixture.authority.ExpiredJoinCredentialForVerification(identity,fixture.claim));
+  identity=fixture.identity; ++identity.nonce;
+  CHECK_FALSE(fixture.authority.ExpiredJoinCredentialForVerification(identity,fixture.claim));
+  identity=fixture.identity; ++identity.host_xuid;
+  CHECK_FALSE(fixture.authority.ExpiredJoinCredentialForVerification(identity,fixture.claim));
+  identity=fixture.identity; ++identity.host_machine_id;
+  CHECK_FALSE(fixture.authority.ExpiredJoinCredentialForVerification(identity,fixture.claim));
+  for(unsigned field=0;field<5;++field) {
+    auto claim=fixture.claim;
+    if(field==0)++claim.xuid; else if(field==1)++claim.machine_id;
+    else if(field==2)++claim.endpoint.ipv4; else if(field==3)++claim.endpoint.port;
+    else claim.challenge[0]^=1;
+    CHECK_FALSE(fixture.authority.ExpiredJoinCredentialForVerification(fixture.identity,claim));
+  }
+}
+
+TEST_CASE("explicit leave closed and confirmed records never provide expiry recovery", "[session][arbitration][expiry]") {
+  Fixture left; left.Admit(); REQUIRE(left.authority.Remove(left.claim.xuid));
+  CHECK_FALSE(left.authority.ExpiredJoinCredentialForVerification(left.identity,left.claim));
+  Fixture cancelled; cancelled.Admit();
+  REQUIRE(cancelled.authority.ExpireUnconfirmed(SessionArbitrationAuthority::Clock::time_point{}+
+      std::chrono::seconds(30)).size()==1);
+  REQUIRE(cancelled.authority.ExpiredJoinCredentialForVerification(cancelled.identity,cancelled.claim));
+  CHECK_FALSE(cancelled.authority.Remove(cancelled.claim.xuid));
+  CHECK_FALSE(cancelled.authority.ExpiredJoinCredentialForVerification(cancelled.identity,cancelled.claim));
+  Fixture closed; closed.Admit();
+  REQUIRE(closed.authority.ExpireUnconfirmed(SessionArbitrationAuthority::Clock::time_point{}+
+      std::chrono::seconds(30)).size()==1);
+  closed.authority.Invalidate();
+  CHECK_FALSE(closed.authority.ExpiredJoinCredentialForVerification(closed.identity,closed.claim));
+  Fixture confirmed; confirmed.Admit(); auto claim=confirmed.claim; claim.credential=confirmed.remote_credential;
+  REQUIRE(confirmed.authority.Admit(claim,Token(9),{}).status==ArbitrationStatus::kReplay);
+  CHECK(confirmed.authority.ExpireUnconfirmed(SessionArbitrationAuthority::Clock::time_point{}+
+      std::chrono::hours(1)).empty());
+  CHECK_FALSE(confirmed.authority.ExpiredJoinCredentialForVerification(confirmed.identity,confirmed.claim));
+  Fixture registered; registered.Admit();
+  REQUIRE(registered.authority.RegisterFromVerifiedEndpoint(registered.Request())==ArbitrationStatus::kAccepted);
+  CHECK(registered.authority.ExpireUnconfirmed(SessionArbitrationAuthority::Clock::time_point{}+
+      std::chrono::hours(1)).empty());
+  CHECK_FALSE(registered.authority.ExpiredJoinCredentialForVerification(registered.identity,registered.claim));
+}
+
+TEST_CASE("fresh admission supersedes expiry capability without reviving retired challenge", "[session][arbitration][expiry]") {
+  Fixture fixture; fixture.Admit();
+  REQUIRE(fixture.authority.ExpireUnconfirmed(SessionArbitrationAuthority::Clock::time_point{}+
+      std::chrono::seconds(30)).size()==1);
+  auto fresh=fixture.claim; fresh.challenge=Token(12);
+  CHECK(fixture.authority.Admit(fresh,fixture.remote_credential,{}).status==ArbitrationStatus::kInvalid);
+  REQUIRE(fixture.authority.Admit(fresh,Token(13),{}).status==ArbitrationStatus::kAccepted);
+  CHECK_FALSE(fixture.authority.ExpiredJoinCredentialForVerification(fixture.identity,fixture.claim));
+  CHECK(fixture.authority.CheckAdmission(fixture.claim,{}).status==ArbitrationStatus::kRetiredAttempt);
+  CHECK(fixture.authority.CredentialForVerification(fixture.identity,fresh.xuid,fresh.machine_id)==Token(13));
+  REQUIRE(fixture.authority.Remove(fresh.xuid));
+  CHECK_FALSE(fixture.authority.ExpiredJoinCredentialForVerification(fixture.identity,fixture.claim));
+}
+
+TEST_CASE("expiry receipt storage never evicts its bounded retired challenges", "[session][arbitration][expiry]") {
+  Fixture fixture;
+  for(unsigned index=0;index<SessionArbitrationAuthority::kMaxRetiredAttempts;++index) {
+    auto claim=fixture.claim; claim.challenge=Token(static_cast<uint8_t>(index+64));
+    const auto credential=Token(static_cast<uint8_t>(index+128));
+    REQUIRE(fixture.authority.Admit(claim,credential,{}).status==ArbitrationStatus::kAccepted);
+    REQUIRE(fixture.authority.ExpireUnconfirmed(SessionArbitrationAuthority::Clock::time_point{}+
+        std::chrono::seconds(30)).size()==1);
+    CHECK(fixture.authority.ExpiredJoinCredentialForVerification(fixture.identity,claim)==credential);
+  }
+  auto fresh=fixture.claim; fresh.challenge=Token(63);
+  CHECK(fixture.authority.Admit(fresh,Token(62),{}).status==ArbitrationStatus::kExhausted);
+  auto original=fixture.claim; original.challenge=Token(64);
+  CHECK(fixture.authority.CheckAdmission(original,{}).status==ArbitrationStatus::kRetiredAttempt);
+  CHECK(fixture.authority.ExpiredJoinCredentialForVerification(fixture.identity,original)==Token(128));
+}

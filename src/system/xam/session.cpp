@@ -131,6 +131,7 @@ constexpr uint8_t kJoin = 3;
 constexpr uint8_t kLeave = 4;
 constexpr uint8_t kRegister = 5;
 constexpr uint8_t kRegisterReply = 6;
+constexpr uint8_t kJoinExpired = 7;
 constexpr size_t kMaxWireMembers = 8;
 
 enum class MemberUpdateSource {
@@ -471,6 +472,37 @@ bool VerifyPacket(const DiscoveryPacket& packet, const ArbitrationToken& credent
   return SignPacket(expected, credential, domain) &&
       InviteLanEqual(packet.authentication, expected.authentication, 16);
 }
+// A receipt contains correlation fields only: no advertised roster, envelope,
+// credential bytes, or success state. Compare the entire canonical packet on
+// receipt so future public packet fields cannot accidentally enter this path.
+DiscoveryPacket ExpiredJoinReply(const DiscoveryPacket& request) {
+  DiscoveryPacket reply{};
+  reply.magic = request.magic;
+  reply.version = request.version;
+  reply.type = kJoinExpired;
+  reply.title_id = request.title_id;
+  std::copy_n(request.session_id, 8, reply.session_id);
+  std::copy_n(request.session_key, 16, reply.session_key);
+  reply.host_xuid = request.host_xuid;
+  reply.nonce = request.nonce;
+  reply.host_machine_id = request.host_machine_id;
+  std::copy_n(request.incarnation, 16, reply.incarnation);
+  // With member_count zero these fields identify the requester, not a roster.
+  reply.members[0].xuid = request.members[0].xuid;
+  reply.members[0].machine_id = request.members[0].machine_id;
+  std::copy_n(request.attempt, 16, reply.attempt);
+  std::copy_n(request.client_public_key, 32, reply.client_public_key);
+  std::copy_n(request.request_id, 16, reply.request_id);
+  return reply;
+}
+bool VerifyExpiredJoinReply(const DiscoveryPacket& response,
+                            const DiscoveryPacket& request,
+                            const ArbitrationToken& credential) {
+  auto expected = ExpiredJoinReply(request);
+  if (!SignPacket(expected, credential, "session-join-expired-v2")) return false;
+  return InviteLanEqual(reinterpret_cast<const uint8_t*>(&response),
+                        reinterpret_cast<const uint8_t*>(&expected), sizeof(expected));
+}
 void CloseSocket(SOCKET value) {
   if (value == kInvalidSocket)
     return;
@@ -614,8 +646,10 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
                                       uint8_t type, uint32_t title_id, uint16_t discovery_port,
                                       uint32_t timeout_ms,
                                       SOCKET retained_socket = kInvalidSocket,
-                                      std::shared_ptr<ArbitrationClientBinding> binding = {}) {
-  if (!EnsureSocketRuntime())
+                                      std::shared_ptr<ArbitrationClientBinding> binding = {},
+                                      const ClientAdmissionSocketLease* admission_lease = nullptr,
+                                      bool* expired_join = nullptr) {
+  if ((admission_lease && !admission_lease->active()) || !EnsureSocketRuntime())
     return std::nullopt;
   const bool owns_socket = retained_socket == kInvalidSocket;
   SOCKET socket = owns_socket ? ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) : retained_socket;
@@ -679,6 +713,7 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
   std::optional<SessionRecord> result;
   auto next_send = std::chrono::steady_clock::now() + std::chrono::milliseconds(125);
   while (std::chrono::steady_clock::now() < deadline) {
+    if (admission_lease && !admission_lease->active()) break;
     if (std::chrono::steady_clock::now() >= next_send) {
       sendto(socket, reinterpret_cast<const char*>(&packet), sizeof(packet), 0,
              reinterpret_cast<sockaddr*>(&target), sizeof(target));
@@ -696,7 +731,16 @@ std::optional<SessionRecord> Exchange(const SessionRecord& session, const Sessio
     }
     if (count == sizeof(response) && source.sin_addr.s_addr == target.sin_addr.s_addr &&
         source.sin_port == target.sin_port) {
-      if (WireIdentity(response) != RecordIdentity(session) || WireToken(response.request_id) != *request_id) continue;
+      if ((admission_lease && !admission_lease->active()) ||
+          WireIdentity(response) != RecordIdentity(session) || WireToken(response.request_id) != *request_id) continue;
+      if (binding && type == kJoin && response.type == kJoinExpired) {
+        if (!binding->confirmed && NonzeroToken(binding->credential) &&
+            VerifyExpiredJoinReply(response, packet, binding->credential)) {
+          if (expired_join) *expired_join = true;
+          break;
+        }
+        continue;
+      }
       if (binding) {
         auto credential = binding->credential;
         if (type == kJoin) {
@@ -1379,6 +1423,7 @@ class LanDiscoveryService::Impl {
                       query.session_id[6], query.session_id[7],
                       (flags & 2) != 0, flags);
         bool existing = false;
+        std::optional<DiscoveryPacket> expired_reply;
         {
           std::lock_guard lock(*advertised->mutex);
           // Routing validation is not an admission credential. The only
@@ -1403,10 +1448,30 @@ class LanDiscoveryService::Impl {
                   WireIdentity(query), xuid, Swap64(wire.machine_id));
               valid = token && VerifyPacket(query, *token, "session-join-v2");
               if (valid) reply_credential = *token;
+              else if (!token) {
+                const auto challenge = BoundJoinChallenge(query);
+                const ArbitrationJoinClaim claim{xuid, Swap64(wire.machine_id),
+                    {source.sin_addr.s_addr, ntohs(source.sin_port)},
+                    challenge.value_or(ArbitrationToken{}), {}};
+                const auto expired_token = advertised->arbitration->ExpiredJoinCredentialForVerification(
+                    WireIdentity(query), claim);
+                if (expired_token && VerifyPacket(query, *expired_token, "session-join-v2")) {
+                  auto reply = ExpiredJoinReply(query);
+                  if (SignPacket(reply, *expired_token, "session-join-expired-v2"))
+                    expired_reply = reply;
+                }
+              }
             }
           }
           existing = valid && std::any_of(advertised->members.begin(), advertised->members.end(),
                                           [&](const auto& member) { return member.xuid == xuid; });
+        }
+        if (expired_reply) {
+          // The fixed, retired receipt proves only expiry. No member is
+          // revived and sending happens outside the hosted record mutex.
+          sendto(socket, reinterpret_cast<const char*>(&*expired_reply), sizeof(*expired_reply), 0,
+                 reinterpret_cast<sockaddr*>(&source), length);
+          continue;
         }
         if (valid && query.type == kJoin) {
           SessionMember member{xuid,
@@ -2291,16 +2356,12 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
 std::optional<SessionRecord> LanDiscoveryService::Join(const SessionRecord& session,
                                                        const SessionMember& member,
                                                        uint32_t timeout_ms) {
-  const auto admission_socket =
-      directory_.ClientAdmissionSocketForSession(member.user_index, session);
-  if (admission_socket)
-    directory_.SetClientAdmissionExchange(member.user_index, true);
-  else
-    impl_->client_exchange = true;
+  auto admission_lease = directory_.AcquireClientAdmissionSocket(member.user_index, session);
+  if (!admission_lease && directory_.HasClientAdmission(member.user_index)) return std::nullopt;
+  if (!admission_lease) impl_->client_exchange = true;
   struct ExchangeScope { std::function<void()> release; ~ExchangeScope() { release(); } };
   const ExchangeScope exchange_scope{[&] {
-    if (admission_socket) directory_.SetClientAdmissionExchange(member.user_index,false);
-    else impl_->client_exchange = false;
+    if (!admission_lease) impl_->client_exchange = false;
   }};
   std::shared_ptr<ArbitrationClientBinding> binding;
   {
@@ -2336,16 +2397,28 @@ std::optional<SessionRecord> LanDiscoveryService::Join(const SessionRecord& sess
     else session.arbitration_client = binding;
   }
   std::optional<SessionRecord> result;
+  bool expired_join = false;
   if (binding && binding->xuid == member.xuid && binding->identity == RecordIdentity(session)) {
     std::lock_guard binding_lock(binding->mutex);
-    const auto join_socket = admission_socket ? SOCKET(*admission_socket) :
+    const auto join_socket = admission_lease ? SOCKET(admission_lease->socket()) :
         (impl_->client_socket != kInvalidSocket ? impl_->client_socket : binding->socket);
     const bool already_has_credential = NonzeroToken(binding->credential);
-    result = Exchange(session, &member, kJoin, impl_->title_id, impl_->port, timeout_ms,join_socket,binding);
+    result = Exchange(session, &member, kJoin, impl_->title_id, impl_->port, timeout_ms,join_socket,binding,
+                      admission_lease ? &*admission_lease : nullptr, &expired_join);
     if (result && !already_has_credential)
       result = Exchange(*result,&member,kJoin,impl_->title_id,impl_->port,
-                        std::min(timeout_ms,250u),join_socket,binding);
+                        std::min(timeout_ms,250u),join_socket,binding,
+                        admission_lease ? &*admission_lease : nullptr, &expired_join);
     if (result) binding->confirmed = true;
+  }
+  if (expired_join) {
+    // Drop only this exact unconfirmed pending binding after releasing its
+    // mutex. Silence or an unauthenticated packet never rotates credentials.
+    std::lock_guard record_lock(*session.mutex);
+    if (session.state != SessionState::kDeleted && session.arbitration_client == binding &&
+        binding->identity == RecordIdentity(session) && !binding->confirmed) {
+      session.arbitration_client.reset();
+    }
   }
   return result;
 }

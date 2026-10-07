@@ -1,6 +1,7 @@
 #include <rex/system/xam/session_directory.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
@@ -42,6 +43,41 @@
 #endif
 
 namespace rex::system::xam {
+
+class ClientAdmissionSocketOwner final {
+ public:
+  explicit ClientAdmissionSocketOwner(uint64_t native_socket) : socket(native_socket) {}
+  ~ClientAdmissionSocketOwner() {
+    if (!socket) return;
+    NatProbeDetach(socket);
+#if REX_PLATFORM_WIN32
+    closesocket(SOCKET(socket));
+#else
+    close(int(socket));
+#endif
+  }
+  const uint64_t socket;
+  std::atomic<bool> cancelled{false};
+  std::atomic<uint32_t> exchanges{0};
+};
+ClientAdmissionSocketLease::ClientAdmissionSocketLease(
+    std::shared_ptr<ClientAdmissionSocketOwner> owner) : owner_(std::move(owner)) {
+  owner_->exchanges.fetch_add(1, std::memory_order_acq_rel);
+}
+ClientAdmissionSocketLease::ClientAdmissionSocketLease(ClientAdmissionSocketLease&& other) noexcept
+    : owner_(std::move(other.owner_)) {}
+ClientAdmissionSocketLease& ClientAdmissionSocketLease::operator=(ClientAdmissionSocketLease&& other) noexcept {
+  if (this != &other) { Release(); owner_ = std::move(other.owner_); }
+  return *this;
+}
+void ClientAdmissionSocketLease::Release() {
+  if (owner_) { owner_->exchanges.fetch_sub(1, std::memory_order_acq_rel); owner_.reset(); }
+}
+ClientAdmissionSocketLease::~ClientAdmissionSocketLease() { Release(); }
+uint64_t ClientAdmissionSocketLease::socket() const { return owner_ ? owner_->socket : 0; }
+bool ClientAdmissionSocketLease::active() const {
+  return owner_ && !owner_->cancelled.load(std::memory_order_acquire);
+}
 
 namespace {
 bool IsLowerHex128(std::string_view value) {
@@ -1694,6 +1730,7 @@ class SessionDirectoryClient::Impl {
                                           value_title_id, *current_user, attempt, std::move(exact),
                                           false))
       return ClientAdmissionPrepareResult::kInvalid;
+    context.socket_owner = std::make_shared<ClientAdmissionSocketOwner>(discovery_socket);
     client_admissions.emplace(local_user_index, std::move(context));
     client_admission_wake.notify_all();
     return ClientAdmissionPrepareResult::kPrepared;
@@ -1984,22 +2021,14 @@ class SessionDirectoryClient::Impl {
     return found != client_admissions.end() && found->second.state.has_ever_been_ready();
   }
 
-  std::optional<uint64_t> ClientAdmissionSocketForSession(uint32_t local_user_index,
-                                                          const SessionRecord& session) const {
+  std::optional<ClientAdmissionSocketLease> AcquireClientAdmissionSocket(
+      uint32_t local_user_index, const SessionRecord& session) {
     std::lock_guard lock(client_admission_mutex);
     auto found = client_admissions.find(local_user_index);
-    if (found == client_admissions.end() ||
-        session.traversal_session_id != found->second.state.directory_session_id() ||
-        session.traversal_attempt_id != found->second.state.attempt_id())
-      return std::nullopt;
-    return found->second.socket;
-  }
-
-  void SetClientAdmissionExchange(uint32_t local_user_index, bool active) {
-    std::lock_guard lock(client_admission_mutex);
-    auto found = client_admissions.find(local_user_index);
-    if (found != client_admissions.end())
-      found->second.exchange_active = active;
+    if (found == client_admissions.end() || !found->second.socket_owner ||
+        found->second.socket_owner->cancelled || found->second.socket_owner->exchanges ||
+        !found->second.state.MatchesExactSession(session)) return std::nullopt;
+    return ClientAdmissionSocketLease(found->second.socket_owner);
   }
 
   std::optional<ReadyAcceptedSessionCandidate> ReadyClientAdmission(
@@ -2007,6 +2036,7 @@ class SessionDirectoryClient::Impl {
     struct Snapshot {
       uint64_t lifecycle_token = 0;
       uint64_t discovery_socket = 0;
+      std::shared_ptr<ClientAdmissionSocketOwner> socket_owner;
       LanAddress peer{};
       std::string directory_session_id;
       std::string attempt_id;
@@ -2031,6 +2061,7 @@ class SessionDirectoryClient::Impl {
         return std::nullopt;
       snapshot.lifecycle_token = found->second.state.lifecycle_token();
       snapshot.discovery_socket = found->second.socket;
+      snapshot.socket_owner = found->second.socket_owner;
       snapshot.peer = found->second.peer;
       snapshot.directory_session_id = found->second.state.directory_session_id();
       snapshot.attempt_id = found->second.state.attempt_id();
@@ -2089,17 +2120,18 @@ class SessionDirectoryClient::Impl {
     ClientAdmissionLeaseState state;
     uint64_t socket = 0;
     LanAddress peer{};
-    bool exchange_active = false;
+    std::shared_ptr<ClientAdmissionSocketOwner> socket_owner;
   };
 
   void QueueCancellationLocked(const ClientAdmissionContext& context) {
+    if (context.socket_owner) context.socket_owner->cancelled = true;
     if (!context.state.bound())
       return;
     client_admission_cancellations.push_back(
         {context.state.local_user_index(), context.state.lifecycle_token(),
          context.state.directory_session_id(), context.state.attempt_id(),
          context.state.capability(), context.state.admission_generation(),
-         context.state.lease_revision(), context.state.leased(), context.socket});
+         context.state.lease_revision(), context.state.leased(), context.socket, context.socket_owner});
   }
 
   void HarvestListLocked() const {
@@ -2413,8 +2445,10 @@ class SessionDirectoryClient::Impl {
           continue;
         }
         if (auto operation = context.state.BeginOperation(context.socket, context.peer.ipv4,
-                                                          context.peer.port, now))
+                                                          context.peer.port, now)) {
+          operation->socket_owner = context.socket_owner;
           operations.push_back(std::move(*operation));
+        }
         ++iterator;
       }
       cancellations.insert(cancellations.end(), client_admission_cancellations.begin(),
@@ -2436,17 +2470,13 @@ class SessionDirectoryClient::Impl {
       request.request_started_at = now;
       PerformClientAdmissionTransport(request);
       NatProbeRetireIdentity(cancellation.attempt_id);
-      if (cancellation.discovery_socket) {
-        NatProbeDetach(cancellation.discovery_socket);
-#if REX_PLATFORM_WIN32
-        closesocket(SOCKET(cancellation.discovery_socket));
-#else
-        close(int(cancellation.discovery_socket));
-#endif
-      }
+      // Socket owner closes only when cancellation, operation and receive
+      // leases have all retired. Never close a borrowed numeric descriptor.
+      if (cancellation.socket_owner) cancellation.socket_owner->cancelled = true;
     }
 
     for (auto& operation : operations) {
+        if (!operation.socket_owner || operation.socket_owner->cancelled) continue;
         NatProbeTickAt(operation.discovery_socket, now);
         if (operation.action == ClientAdmissionAction::kArm &&
             !NatProbeRendezvousAttemptActive(operation.discovery_socket, operation.attempt_id)) {
@@ -2463,7 +2493,8 @@ class SessionDirectoryClient::Impl {
                 found->second.state.admission_generation(),
                 found->second.state.lease_revision(),
                 found->second.state.leased(),
-                found->second.socket};
+                found->second.socket, found->second.socket_owner};
+            if (found->second.socket_owner) found->second.socket_owner->cancelled = true;
             found->second.state.EndAttemptAuthority(operation);
             client_admission_cancellations.push_back(cancellation);
             client_admissions.erase(found);
@@ -2472,25 +2503,27 @@ class SessionDirectoryClient::Impl {
           continue;
         }
 
-        bool exchange_active = false;
+#if REX_PLATFORM_WIN32
         {
+          // Reader ownership transfers under the same mutex as lease
+          // acquisition. Keep it only across this nonblocking receive, never
+          // across directory HTTP or the caller's transport deadline.
           std::lock_guard lock(client_admission_mutex);
           auto found = client_admissions.find(operation.local_user_index);
-          exchange_active = found != client_admissions.end() &&
-                            found->second.state.lifecycle_token() == operation.lifecycle_token &&
-                            found->second.exchange_active;
-        }
-#if REX_PLATFORM_WIN32
-        if (!exchange_active) {
-          sockaddr_in source{};
-          int source_length = sizeof(source);
-          std::array<uint8_t, 512> packet{};
-          int count =
-              recvfrom(SOCKET(operation.discovery_socket), reinterpret_cast<char*>(packet.data()),
-                       int(packet.size()), 0, reinterpret_cast<sockaddr*>(&source), &source_length);
-          if (count > 0)
-            NatProbeConsume(operation.discovery_socket, packet.data(), size_t(count),
-                            source.sin_addr.s_addr, ntohs(source.sin_port));
+          if (found != client_admissions.end() &&
+              found->second.state.lifecycle_token() == operation.lifecycle_token &&
+              found->second.socket_owner == operation.socket_owner &&
+              !operation.socket_owner->cancelled && !operation.socket_owner->exchanges) {
+            sockaddr_in source{};
+            int source_length = sizeof(source);
+            std::array<uint8_t, 1200> packet{};
+            const int count = recvfrom(SOCKET(operation.discovery_socket),
+                reinterpret_cast<char*>(packet.data()), int(packet.size()), 0,
+                reinterpret_cast<sockaddr*>(&source), &source_length);
+            if (count > 0)
+              NatProbeConsume(operation.discovery_socket, packet.data(), size_t(count),
+                              source.sin_addr.s_addr, ntohs(source.sin_port));
+          }
         }
 #endif
 
@@ -2558,11 +2591,12 @@ class SessionDirectoryClient::Impl {
             found->second.state.admission_generation(),
             found->second.state.lease_revision(),
             found->second.state.leased(),
-            found->second.socket};
+            found->second.socket, found->second.socket_owner};
         if (!response_nat_current ||
             !found->second.state.ValidateLiveness(client_admission_title_id, response_user) ||
             (found->second.state.leased() &&
              response_received_at >= found->second.state.lease_deadline())) {
+          if (found->second.socket_owner) found->second.socket_owner->cancelled = true;
           client_admission_cancellations.push_back(cancellation_before_apply);
           client_admissions.erase(found);
           REXSYS_WARN(
@@ -2609,6 +2643,7 @@ class SessionDirectoryClient::Impl {
           applied = ClientAdmissionApplyResult::kInvalidated;
         }
         if (applied == ClientAdmissionApplyResult::kInvalidated) {
+          if (found->second.socket_owner) found->second.socket_owner->cancelled = true;
           client_admission_cancellations.push_back(cancellation_before_apply);
           client_admissions.erase(found);
           REXSYS_WARN("Session directory: authoritative client admission state invalidated");
@@ -2748,12 +2783,9 @@ std::optional<uint64_t> SessionDirectoryClient::ClientAdmissionLifecycleToken(
 bool SessionDirectoryClient::HasProtectedClientAdmission(uint32_t local_user_index) const {
   return impl_->HasProtectedClientAdmission(local_user_index);
 }
-std::optional<uint64_t> SessionDirectoryClient::ClientAdmissionSocketForSession(
-    uint32_t local_user_index, const SessionRecord& session) const {
-  return impl_->ClientAdmissionSocketForSession(local_user_index, session);
-}
-void SessionDirectoryClient::SetClientAdmissionExchange(uint32_t local_user_index, bool active) {
-  impl_->SetClientAdmissionExchange(local_user_index, active);
+std::optional<ClientAdmissionSocketLease> SessionDirectoryClient::AcquireClientAdmissionSocket(
+    uint32_t local_user_index, const SessionRecord& session) {
+  return impl_->AcquireClientAdmissionSocket(local_user_index, session);
 }
 std::optional<ReadyAcceptedSessionCandidate> SessionDirectoryClient::ReadyClientAdmission(
     uint32_t local_user_index) {

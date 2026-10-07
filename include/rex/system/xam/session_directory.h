@@ -20,6 +20,27 @@
 namespace rex::system::xam {
 
 struct SessionRecord;
+class ClientAdmissionSocketOwner;
+
+// Move-only receive ownership, acquired with an exact admission lifecycle.
+// Cancellation invalidates the lease immediately, but cannot close or reuse
+// its native socket until every in-flight operation has released ownership.
+class ClientAdmissionSocketLease final {
+ public:
+  ClientAdmissionSocketLease() = default;
+  ClientAdmissionSocketLease(const ClientAdmissionSocketLease&) = delete;
+  ClientAdmissionSocketLease& operator=(const ClientAdmissionSocketLease&) = delete;
+  ClientAdmissionSocketLease(ClientAdmissionSocketLease&&) noexcept;
+  ClientAdmissionSocketLease& operator=(ClientAdmissionSocketLease&&) noexcept;
+  ~ClientAdmissionSocketLease();
+  uint64_t socket() const;
+  bool active() const;
+ private:
+  friend class SessionDirectoryClient;
+  explicit ClientAdmissionSocketLease(std::shared_ptr<ClientAdmissionSocketOwner> owner);
+  void Release();
+  std::shared_ptr<ClientAdmissionSocketOwner> owner_;
+};
 
 REXCVAR_DECLARE(std::string, session_directory_url);
 REXCVAR_DECLARE(std::string, session_directory_build_id);
@@ -114,6 +135,7 @@ struct ClientAdmissionOperation {
   uint32_t peer_ipv4 = 0;
   uint16_t peer_port = 0;
   std::chrono::steady_clock::time_point request_started_at{};
+  std::shared_ptr<ClientAdmissionSocketOwner> socket_owner;
 };
 
 struct ClientAdmissionCancellation {
@@ -126,6 +148,7 @@ struct ClientAdmissionCancellation {
   uint64_t lease_revision = 0;
   bool admission_armed = false;
   uint64_t discovery_socket = 0;
+  std::shared_ptr<ClientAdmissionSocketOwner> socket_owner;
 };
 
 enum class ClientAdmissionTransportAction { kArm, kStatus, kRenew, kRevoke, kDelete };
@@ -160,6 +183,7 @@ class ClientAdmissionLeaseState {
                           std::shared_ptr<const SessionRecord> session,
                           bool session_confirmed = true);
   bool ConfirmExactSession(std::shared_ptr<const SessionRecord> session);
+  bool MatchesExactSession(const SessionRecord& session) const { return ExactSessionMatches(session); }
   std::optional<ClientAdmissionOperation> BeginOperation(
       uint64_t discovery_socket, uint32_t peer_ipv4, uint16_t peer_port,
       Clock::time_point request_started_at = Clock::now());
@@ -433,9 +457,8 @@ class SessionDirectoryClient {
   std::optional<uint64_t> ClientAdmissionLifecycleToken(
       uint32_t local_user_index) const;
   bool HasProtectedClientAdmission(uint32_t local_user_index) const;
-  std::optional<uint64_t> ClientAdmissionSocketForSession(uint32_t local_user_index,
-                                                          const SessionRecord& session) const;
-  void SetClientAdmissionExchange(uint32_t local_user_index, bool active);
+  std::optional<ClientAdmissionSocketLease> AcquireClientAdmissionSocket(
+      uint32_t local_user_index, const SessionRecord& session);
   std::optional<ReadyAcceptedSessionCandidate> ReadyClientAdmission(
       uint32_t local_user_index);
   // Production normally drives this lifecycle from its worker. Embedders and
