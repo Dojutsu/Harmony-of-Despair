@@ -35,6 +35,7 @@
 #include <rex/system/flags.h>
 #include <rex/system/gpu_plugin.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/xam/session.h>
 #include <rex/system/xthread.h>
 #include <rex/platform.h>
 #include <rex/ui/graphics_provider.h>
@@ -222,6 +223,9 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
   cache_root_ = paths.cache_root;
   metadata_root_ = paths.metadata_root;
 
+  // A resume may replace an existing runtime. Retire and join every native
+  // invitation submission before invalidating its SessionManager callback.
+  settings_overlay_.reset();
   runtime_ =
       std::make_unique<rex::Runtime>(paths.game_data_root, paths.user_data_root,
                                      paths.update_data_root, paths.cache_root, paths.metadata_root);
@@ -436,7 +440,37 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
     if (settings_overlay_) {
       settings_overlay_.reset();
     } else {
-      settings_overlay_ = std::make_unique<ui::SettingsDialog>(imgui_drawer_.get(), config_path_);
+      ui::InvitationUpdateTask::SubmitCallback invitation_submit;
+      std::string initial_invitation_code;
+      if (runtime_ && runtime_->kernel_state()) {
+        auto* sessions = runtime_->kernel_state()->session_manager();
+        if (sessions) {
+          initial_invitation_code = sessions->runtime_invite_code();
+          // Dialog teardown joins this task before runtime teardown. The
+          // submission never retains or writes dialog state from its worker.
+          invitation_submit = [sessions](std::string code, std::stop_token stop) {
+            using Result = system::xam::RuntimeInviteUpdateResult;
+            switch (sessions->UpdateRuntimeInviteCode(code, stop)) {
+              case Result::kStarted:
+                return std::string("Invitation submitted.");
+              case Result::kCleared:
+                return std::string("Invitation cleared.");
+              case Result::kInvalidCode:
+                return std::string("Enter a valid six-character invitation code.");
+              case Result::kLiveSession:
+                return std::string("Leave your current team before joining this invitation.");
+              case Result::kUnavailable:
+                return std::string("Invitation unavailable.");
+              case Result::kCancelled:
+                return std::string("Invitation cancelled.");
+            }
+            return std::string("Invitation unavailable.");
+          };
+        }
+      }
+      settings_overlay_ = std::make_unique<ui::SettingsDialog>(
+          imgui_drawer_.get(), config_path_, std::move(invitation_submit),
+          std::move(initial_invitation_code));
     }
   });
   rex::ui::RegisterBind("bind_achievements", "F7", "Toggle achievements overlay", [this] {
@@ -531,6 +565,7 @@ void ReXApp::OnClosing(ui::UIEvent& e) {
   (void)e;
   REXLOG_INFO("Window closing, shutting down...");
   shutting_down_.store(true, std::memory_order_release);
+  settings_overlay_.reset();
   if (runtime_ && runtime_->kernel_state()) {
     runtime_->kernel_state()->TerminateTitle();
   }

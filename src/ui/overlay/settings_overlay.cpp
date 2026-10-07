@@ -17,6 +17,8 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <cctype>
+#include <string_view>
 #include <map>
 #include <set>
 #include <string>
@@ -24,10 +26,20 @@
 
 namespace rex::ui {
 
-SettingsDialog::SettingsDialog(ImGuiDrawer* imgui_drawer, std::filesystem::path config_path)
-    : ImGuiDialog(imgui_drawer), config_path_(std::move(config_path)) {}
+SettingsDialog::SettingsDialog(ImGuiDrawer* imgui_drawer, std::filesystem::path config_path,
+                               InvitationUpdateTask::SubmitCallback invitation_submit,
+                               std::string initial_invitation_code)
+    : ImGuiDialog(imgui_drawer), config_path_(std::move(config_path)),
+      invitation_task_(invitation_submit),
+      invitation_available_(bool(invitation_submit)) {
+  if (initial_invitation_code.size() == 6) {
+    std::copy(initial_invitation_code.begin(), initial_invitation_code.end(), invitation_code_);
+  }
+}
 
-SettingsDialog::~SettingsDialog() {}
+SettingsDialog::~SettingsDialog() {
+  invitation_task_.Close();
+}
 
 static const char* LifecycleBadge(rex::cvar::Lifecycle lc) {
   switch (lc) {
@@ -198,6 +210,9 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
 
   const std::string search(search_buf_);
   const bool searching = !search.empty();
+  std::string invitation_search = search;
+  std::transform(invitation_search.begin(), invitation_search.end(), invitation_search.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
   ImGui::SetNextWindowSize(ImVec2(620, 480), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowBgAlpha(0.85f);
@@ -290,6 +305,42 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
   };
 
   ImGui::BeginChild("##cvars", ImVec2(0, -30.0f), false);
+  if (invitation_available_ &&
+      ((!searching && category_matches("Network")) ||
+       (searching && std::string_view("invitation code").find(invitation_search) !=
+                         std::string_view::npos))) {
+    if (auto result = invitation_task_.Poll())
+      invitation_status_ = std::move(*result);
+    ImGui::TextUnformatted("Join by invitation");
+    ImGui::TextWrapped("Leave your current team before joining a different invitation.");
+    ImGui::BeginDisabled(invitation_task_.busy());
+    ImGui::SetNextItemWidth(110.0f);
+    bool submit = ImGui::InputText("Invitation code", invitation_code_, sizeof(invitation_code_),
+                                   ImGuiInputTextFlags_CharsUppercase |
+                                   ImGuiInputTextFlags_CharsNoBlank |
+                                   ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    submit |= ImGui::Button("Join##invitation");
+    ImGui::SameLine();
+    const bool clear = ImGui::Button("Clear##invitation");
+    ImGui::EndDisabled();
+    if (clear && !invitation_task_.busy()) {
+      invitation_status_ = invitation_task_.Submit({})
+                               ? "Clearing invitation..."
+                               : "Invitation unavailable.";
+    } else if (submit && !invitation_task_.busy()) {
+      if (std::string_view(invitation_code_).size() != 6) {
+        invitation_status_ = "Enter a six-character invitation code.";
+      } else if (invitation_task_.Submit(invitation_code_)) {
+        invitation_status_ = "Submitting invitation...";
+      } else {
+        invitation_status_ = "Invitation unavailable.";
+      }
+    }
+    if (!invitation_status_.empty())
+      ImGui::TextWrapped("%s", invitation_status_.c_str());
+    ImGui::Separator();
+  }
   for (auto& entry : registry) {
     // Filter by category (unless searching).
     if (!searching) {

@@ -34,6 +34,7 @@ add_executable(unit_tests
     system/online_status_test.cpp
     system/socket_test.cpp
     input/input_assignment_test.cpp
+    ui/invitation_update_task_test.cpp
     codegen/codegen_writer_test.cpp
     codegen/output_partition_test.cpp
     codegen/output_stamp_test.cpp
