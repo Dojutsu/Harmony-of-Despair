@@ -34,6 +34,7 @@ set(REXSYSTEM_SOURCES
     xam/accepted_invite.cpp
     xam/nat_probe.cpp
     xam/gameplay_traversal.cpp
+    xam/gameplay_datagram.cpp
     xam/online_status.cpp
     xam/session.cpp
     xam/session_arbitration.cpp
