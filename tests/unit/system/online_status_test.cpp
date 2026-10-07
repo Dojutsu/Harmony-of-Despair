@@ -4,10 +4,14 @@
 #include <inja/third_party/include/nlohmann/json.hpp>
 #include <chrono>
 #include <fstream>
+#include <sstream>
 #include <thread>
 #if REX_PLATFORM_WIN32
 #include <winsock2.h>
 #include <windows.h>
+#elif REX_PLATFORM_GNU_LINUX
+#include <arpa/inet.h>
+#include <unistd.h>
 #endif
 
 namespace rex::system::xam {
@@ -101,20 +105,23 @@ TEST_CASE("online status ignores discovery replacements until XSession reattache
   CHECK(json::parse(status.Capture())["mode"] == "offline");
 }
 
-#if REX_PLATFORM_WIN32
+#if REX_PLATFORM_WIN32 || REX_PLATFORM_GNU_LINUX
 TEST_CASE("discovery join and leave notify the attached online projection", "[online-status][network]") {
   auto old_bind = REXCVAR_GET(lan_bind_address);
+  auto old_listen = REXCVAR_GET(lan_discovery_listen_address);
   auto old_direct = REXCVAR_GET(direct_connect_address);
   auto old_directory = REXCVAR_GET(session_directory_url);
   struct Restore {
-    std::string bind, direct, directory;
+    std::string bind, listen, direct, directory;
     ~Restore() {
       REXCVAR_SET(lan_bind_address, bind);
+      REXCVAR_SET(lan_discovery_listen_address, listen);
       REXCVAR_SET(direct_connect_address, direct);
       REXCVAR_SET(session_directory_url, directory);
     }
-  } restore{old_bind, old_direct, old_directory};
+  } restore{old_bind, old_listen, old_direct, old_directory};
   REXCVAR_SET(lan_bind_address, "127.0.0.1");
+  REXCVAR_SET(lan_discovery_listen_address, "127.0.0.1");
   REXCVAR_SET(direct_connect_address, "127.0.0.1");
   REXCVAR_SET(session_directory_url, "");
   SessionRegistry registry;
@@ -146,6 +153,7 @@ TEST_CASE("discovery join and leave notify the attached online projection", "[on
 
 namespace {
 json ReadStatus(const std::filesystem::path& path) {
+#if REX_PLATFORM_WIN32
   auto file = CreateFileW(path.c_str(), GENERIC_READ,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
       FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -158,6 +166,16 @@ json ReadStatus(const std::filesystem::path& path) {
   CloseHandle(file);
   if (!ok || read != bytes.size()) return {};
   return json::parse(bytes, nullptr, false);
+#else
+  std::ifstream file(path, std::ios::binary | std::ios::ate);
+  if (!file) return {};
+  const auto size = file.tellg();
+  if (size < 0 || size > 65536) return {};
+  std::string bytes(static_cast<size_t>(size), '\0');
+  file.seekg(0);
+  if (!file.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) return {};
+  return json::parse(bytes, nullptr, false);
+#endif
 }
 template<class F> bool Eventually(F test) {
   for (int i = 0; i < 200; ++i) {
@@ -183,6 +201,18 @@ TEST_CASE("online writer coalesces mutations atomically and removes only its own
     status.Attach(&status, record);
     REQUIRE(Eventually([&] { return ReadStatus(owned).value("mode", "") == "hosting"; }));
     auto first = ReadStatus(owned);
+#if REX_PLATFORM_GNU_LINUX
+    CHECK(first["process_id"] == static_cast<uint32_t>(::getpid()));
+    std::ifstream stat("/proc/self/stat");
+    std::string line;
+    REQUIRE(std::getline(stat, line));
+    const auto close = line.rfind(')');
+    REQUIRE(close != std::string::npos);
+    std::istringstream fields(line.substr(close + 1));
+    std::string start;
+    for (unsigned field = 3; field <= 22; ++field) REQUIRE(fields >> start);
+    CHECK(first["process_start_time"] == start);
+#endif
     auto modified = std::filesystem::last_write_time(owned);
     auto signal = record->status_signal.lock();
     REQUIRE(signal);
@@ -206,6 +236,10 @@ TEST_CASE("online writer coalesces mutations atomically and removes only its own
       record->NotifyStatus();
     }
     REQUIRE(Eventually([&] { return ReadStatus(owned).value("player_count", 0) == 2; }));
+    REQUIRE(registry.Start(record->info.id));
+    REQUIRE(Eventually([&] { return ReadStatus(owned).value("session_state", "") == "in_game"; }));
+    REQUIRE(registry.End(record->info.id));
+    REQUIRE(Eventually([&] { return ReadStatus(owned).value("session_state", "") == "reporting"; }));
     status.Detach(&status);
     REQUIRE(Eventually([&] { return ReadStatus(owned).value("mode", "") == "offline"; }));
   }

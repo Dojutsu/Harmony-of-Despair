@@ -9,6 +9,8 @@
 #include <inja/third_party/include/nlohmann/json.hpp>
 #if REX_PLATFORM_WIN32
 #include <windows.h>
+#elif REX_PLATFORM_GNU_LINUX
+#include <unistd.h>
 #endif
 
 namespace rex::system::xam {
@@ -82,6 +84,31 @@ OnlineStatus::OnlineStatus(uint64_t xuid, std::string name, std::filesystem::pat
                                        created.dwLowDateTime);
     path_ = directory / ("online-status-" + std::to_string(process_id_) + ".json");
     worker_ = std::thread([this] { Run(); });
+  }
+#elif REX_PLATFORM_GNU_LINUX
+  if (!directory.empty()) {
+    // Linux field 22 is the process start time in boot-relative clock ticks.
+    // Parse after the final ')' because the process name may contain spaces
+    // or parentheses. Keep the integer as text, with no JSON precision loss.
+    std::ifstream stat("/proc/self/stat");
+    std::string line;
+    if (std::getline(stat, line)) {
+      const auto close = line.rfind(')');
+      if (close != std::string::npos) {
+        std::istringstream fields(line.substr(close + 1));
+        std::string value;
+        for (unsigned field = 3; field <= 22 && fields >> value; ++field) {
+          if (field == 22 && !value.empty() &&
+              value.find_first_not_of("0123456789") == std::string::npos)
+            process_start_time_ = value;
+        }
+      }
+    }
+    if (!process_start_time_.empty()) {
+      process_id_ = static_cast<uint32_t>(::getpid());
+      path_ = directory / ("online-status-" + std::to_string(process_id_) + ".json");
+      worker_ = std::thread([this] { Run(); });
+    }
   }
 #endif
 }

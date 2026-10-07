@@ -821,6 +821,57 @@ TEST_CASE("direct connect discovers and joins a host without LAN broadcast", "[s
   CHECK(joined->members[1].xuid == client_member.xuid);
 }
 
+#if REX_PLATFORM_GNU_LINUX
+TEST_CASE("explicit loopback discovery listener stays on its selected interface",
+          "[session][network][linux][private-loopback]") {
+  struct Restore {
+    std::string bind = REXCVAR_GET(lan_bind_address);
+    std::string listen = REXCVAR_GET(lan_discovery_listen_address);
+    std::string direct = REXCVAR_GET(direct_connect_address);
+    std::string url = REXCVAR_GET(session_directory_url);
+    ~Restore() {
+      REXCVAR_SET(lan_bind_address, bind);
+      REXCVAR_SET(lan_discovery_listen_address, listen);
+      REXCVAR_SET(direct_connect_address, direct);
+      REXCVAR_SET(session_directory_url, url);
+    }
+  } restore;
+  REXCVAR_SET(lan_bind_address, "127.0.0.1");
+  REXCVAR_SET(lan_discovery_listen_address, "127.0.0.1");
+  REXCVAR_SET(direct_connect_address, "127.0.0.1");
+  REXCVAR_SET(session_directory_url, "");
+
+  const int other = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  REQUIRE(other >= 0);
+  struct SocketCleanup { int fd; ~SocketCleanup() { ::close(fd); } } cleanup{other};
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  REQUIRE(::inet_pton(AF_INET, "127.0.0.2", &address.sin_addr) == 1);
+  REQUIRE(::bind(other, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+  socklen_t size = sizeof(address);
+  REQUIRE(::getsockname(other, reinterpret_cast<sockaddr*>(&address), &size) == 0);
+  const uint16_t port = ntohs(address.sin_port);
+  constexpr uint32_t title_id = 0x58410A7A;
+  SessionRegistry registry;
+  auto hosted = registry.Create(1001, "LoopbackHost", {htonl(INADDR_LOOPBACK), 30742}, 1, 6, 0);
+  LanDiscoveryService host(title_id, port);
+  // The existing socket on 127.0.0.2 has no SO_REUSEADDR. A wildcard listener
+  // would conflict with it, so successful binding proves address isolation.
+  REQUIRE(host.Advertise(hosted));
+  REXCVAR_SET(lan_bind_address, "127.0.0.2");
+  LanDiscoveryService client(title_id, port);
+  auto results = client.Search(500, 4);
+  REQUIRE(results.size() == 1);
+  CHECK(results[0].discovery_address.ipv4 == htonl(INADDR_LOOPBACK));
+  CHECK(results[0].discovery_address.port == port);
+  const SessionMember member{1002, "LoopbackClient", 0, true, false, false};
+  auto joined = client.Join(results[0], member, 500);
+  REQUIRE(joined);
+  CHECK(joined->members.size() == 2);
+  CHECK(registry.Find(hosted->info.id)->members.size() == 2);
+}
+#endif
+
 TEST_CASE("unreachable session directory preserves LAN discovery", "[session][network]") {
   constexpr uint32_t title_id = 0x58410A7A;
   constexpr uint16_t discovery_port = 39044;

@@ -34,6 +34,7 @@ std::optional<std::array<uint8_t, 16>> InviteLanAuthenticationTag(
     std::span<const uint8_t> payload = {});
 
 REXCVAR_DECLARE(std::string, lan_bind_address);
+REXCVAR_DECLARE(std::string, lan_discovery_listen_address);
 REXCVAR_DECLARE(uint32_t, lan_gameplay_port);
 REXCVAR_DECLARE(std::string, direct_connect_address);
 

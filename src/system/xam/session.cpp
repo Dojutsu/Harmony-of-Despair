@@ -62,6 +62,18 @@ REXCVAR_DEFINE_STRING(lan_bind_address, "", "Network",
     })
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_STRING(lan_discovery_listen_address, "", "Network",
+                      "Explicit IPv4 discovery listener address (empty preserves LAN broadcast)")
+    .validator([](std::string_view value) {
+      if (value.empty())
+        return true;
+      in_addr address{};
+      std::string text(value);
+      return inet_pton(AF_INET, text.c_str(), &address) == 1 &&
+             address.s_addr != htonl(INADDR_ANY) && address.s_addr != htonl(INADDR_BROADCAST);
+    })
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 REXCVAR_DEFINE_UINT32(
     lan_gameplay_port, 0, "Network",
     "Optional native UDP port for LAN gameplay (0 preserves the guest-requested port)")
@@ -849,6 +861,14 @@ class LanDiscoveryService::Impl {
     sockaddr_in listen_address{};
     listen_address.sin_family = AF_INET;
     listen_address.sin_addr.s_addr = htonl(INADDR_ANY);
+    const auto& explicit_listener = REXCVAR_GET(lan_discovery_listen_address);
+    if (!explicit_listener.empty() &&
+        inet_pton(AF_INET, explicit_listener.c_str(), &listen_address.sin_addr) != 1) {
+      REXSYS_ERROR("LAN discovery: invalid explicit listener address");
+      CloseSocket(socket);
+      socket = kInvalidSocket;
+      return false;
+    }
     listen_address.sin_port = htons(port);
     if (bind(socket, reinterpret_cast<sockaddr*>(&listen_address), sizeof(listen_address)) != 0) {
       REXSYS_ERROR("LAN discovery: failed to bind listener on UDP {} (error={})", port,
@@ -1218,6 +1238,15 @@ LanDiscoveryService::DiscoverConfiguredInvite(
   if (!endpoint || !endpoint->discovery_port || !endpoint->gameplay_port ||
       inet_pton(AF_INET, endpoint->address.c_str(), &authoritative_ipv4) != 1)
     return std::nullopt;
+  // An explicit Direct Connect endpoint is also authoritative for the signed
+  // invite LAN fallback. Private loopback tests must not emit LAN broadcasts.
+  // An explicit caller target remains stronger, preserving fixture behavior.
+  if (!lan_probe_target.ipv4 && !REXCVAR_GET(direct_connect_address).empty()) {
+    in_addr direct{};
+    if (inet_pton(AF_INET, REXCVAR_GET(direct_connect_address).c_str(), &direct) != 1)
+      return std::nullopt;
+    lan_probe_target = {direct.s_addr, endpoint->discovery_port};
+  }
   if (!observe(ConfiguredInviteStage::kBeforeSocketSetup) ||
       !EnsureSocketRuntime())
     return std::nullopt;
