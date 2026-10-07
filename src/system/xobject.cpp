@@ -18,6 +18,7 @@
 #include <rex/logging.h>
 #include <rex/stream.h>
 #include <rex/system/object_wait_trace.h>
+#include <rex/system/thread_state.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/util/string_utils.h>  // For TranslateAnsiStringAddress
 #include <rex/system/xobject.h>
@@ -70,10 +71,11 @@ void TraceObjectWait(uint32_t handle, std::string_view operation, int64_t value1
     }
     return;
   }
+  const auto* thread_state = rex::runtime::ThreadState::Get();
   REXSYS_INFO("Guest wait trace seq={} ms={} handle={:08X} native_tid={} guest_tid={} "
               "op={} value1={} value2={} status={:08X}",
               ++observation_count, elapsed_ms, handle, rex::thread::current_thread_system_id(),
-              XThread::GetCurrentThread() ? XThread::GetCurrentThread()->thread_id() : 0,
+              thread_state ? thread_state->thread_id() : 0,
               operation, value1, value2, status);
 }
 
@@ -261,28 +263,21 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
                                 : std::chrono::milliseconds::max();
 
   XThread::CheckTitleTermination();
-  TraceObjectWait(handle(), "wait_begin", opt_timeout ? static_cast<int64_t>(*opt_timeout) : 0,
-                  alertable, 0);
   auto result = rex::thread::Wait(wait_handle, alertable ? true : false, timeout_ms);
-  TraceObjectWait(handle(), "wait_native_result", static_cast<int64_t>(result), 0, 0);
   XThread::CheckTitleTermination();
   switch (result) {
     case rex::thread::WaitResult::kSuccess:
       WaitCallback();
-      TraceObjectWait(handle(), "wait_callback_success", 0, 0, X_STATUS_SUCCESS);
       return X_STATUS_SUCCESS;
     case rex::thread::WaitResult::kUserCallback:
       // Or X_STATUS_ALERTED?
-      TraceObjectWait(handle(), "wait_return", 0, 0, X_STATUS_USER_APC);
       return X_STATUS_USER_APC;
     case rex::thread::WaitResult::kTimeout:
       rex::thread::MaybeYield();
-      TraceObjectWait(handle(), "wait_return", 0, 0, X_STATUS_TIMEOUT);
       return X_STATUS_TIMEOUT;
     default:
     case rex::thread::WaitResult::kAbandoned:
     case rex::thread::WaitResult::kFailed:
-      TraceObjectWait(handle(), "wait_return", 0, 0, X_STATUS_ABANDONED_WAIT_0);
       return X_STATUS_ABANDONED_WAIT_0;
   }
 }

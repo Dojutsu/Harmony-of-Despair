@@ -26,6 +26,7 @@
 #include <rex/hook.h>
 #include <rex/types.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/object_wait_trace.h>
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/thread_state.h>
 #include <rex/system/user_module.h>
@@ -634,21 +635,26 @@ u32 NtCreateSemaphore_entry(mapped_u32 handle_ptr, mapped_void obj_attributes_pt
   }
 
   auto sem = object_ref<XSemaphore>(new XSemaphore(REX_KERNEL_STATE()));
+  // Snapshot the newly created, unpublished handle once. Never inspect a live
+  // wait object's mutable handle vector after a concurrent close.
+  const uint32_t new_handle = sem->handle();
   if (!sem->Initialize((int32_t)count, (int32_t)limit)) {
     if (handle_ptr) {
       *handle_ptr = 0;
     }
+    TraceObjectWait(new_handle, "semaphore_create", count, limit, X_STATUS_INVALID_PARAMETER, true);
     sem->ReleaseHandle();
     return X_STATUS_INVALID_PARAMETER;
   }
 
+  TraceObjectWait(new_handle, "semaphore_create", count, limit, X_STATUS_SUCCESS, true);
   // obj_attributes may have a name inside of it, if != NULL.
   if (obj_attributes_ptr) {
     sem->SetAttributes(obj_attributes_ptr.guest_address());
   }
 
   if (handle_ptr) {
-    *handle_ptr = sem->handle();
+    *handle_ptr = new_handle;
   }
 
   return X_STATUS_SUCCESS;
@@ -667,6 +673,8 @@ u32 NtReleaseSemaphore_entry(u32 sem_handle, u32 release_count, mapped_u32 previ
   } else {
     result = X_STATUS_INVALID_HANDLE;
   }
+  TraceObjectWait(sem_handle, "semaphore_release", result == X_STATUS_SUCCESS ? previous_count : -1,
+                  release_count, result);
   if (previous_count_ptr) {
     *previous_count_ptr = (uint32_t)previous_count;
   }
@@ -857,7 +865,10 @@ u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertabl
   auto object = REX_KERNEL_OBJECTS()->LookupObject<XObject>(object_handle);
   if (object) {
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+    TraceObjectWait(object_handle, "wait_begin", static_cast<int64_t>(timeout),
+                    static_cast<uint32_t>(object->type()), alertable);
     result = object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
+    TraceObjectWait(object_handle, "wait_return", 0, 0, result);
     if (alertable && result == X_STATUS_USER_APC) {
       XThread::GetCurrentThread()->DeliverAPCs();
     }

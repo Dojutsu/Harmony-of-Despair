@@ -209,3 +209,19 @@ endif()
 
 # Local opt-in scripted controller regression for unattended title validation.
 target_sources(unit_tests PRIVATE input/scripted_input_test.cpp)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(object_wait_trace_test kernel/object_wait_trace_test.cpp)
+    target_link_libraries(object_wait_trace_test PRIVATE rexruntime)
+    target_compile_options(object_wait_trace_test PRIVATE -UREXGLUE_ENABLE_PROFILING)
+    set_target_properties(object_wait_trace_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>
+        INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/object-wait-trace/artifacts")
+    foreach(trace_mode alias-on alias-off last-on last-off release-failure)
+        add_test(NAME object_wait_trace_${trace_mode} COMMAND object_wait_trace_test ${trace_mode})
+        set_tests_properties(object_wait_trace_${trace_mode} PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/object-wait-trace"
+            LABELS "kernel;threading" TIMEOUT 15)
+    endforeach()
+endif()
