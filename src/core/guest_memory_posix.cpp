@@ -1,4 +1,5 @@
 #include <rex/platform/guest_memory.h>
+#include "guest_access_compact.h"
 #include <rex/exception_handler.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
@@ -229,17 +230,28 @@ AccessResult<bool> TryReadBytes(const void* address,void* output,size_t width,bo
   MMIO::DeferredTransaction transaction;
   if(CompleteMappedRead(address,output,width,vector||reservation,transaction))return AccessResult<bool>::Success(true);
   for(unsigned attempt=0;attempt<kRetryLimit;++attempt){
-    auto captured=vector?CaptureVectorRead(address,output):CaptureRead(address,output,width);
-    if(captured.success){if(!transaction.CompleteNative())FaultContractFailure("duplicate-native-completion");return AccessResult<bool>::Success(true);}
+    ScalarCaptureFailure failure;
+    bool success;
+    if (vector || reservation) {
+      const auto captured = vector ? CaptureVectorRead(address, output)
+                                   : CaptureRead(address, output, width);
+      success = captured.success;
+      if (!success) failure = captured.fault;
+    } else {
+      success = CaptureReadCompact(address, output, width, failure);
+    }
+    if(success){if(!transaction.CompleteNative())FaultContractFailure("duplicate-native-completion");return AccessResult<bool>::Success(true);}
+    if (!failure) FaultContractFailure("missing-compact-capture-fault");
+    const auto& fault = *failure;
     auto kind=reservation?MMIO::DeferredAccessKind::kAtomic:vector?MMIO::DeferredAccessKind::kVector128:
         width==4?MMIO::DeferredAccessKind::kScalar32:MMIO::DeferredAccessKind::kScalarRam;
-    auto resolved=Resolve(captured.fault,kind,transaction);
+    auto resolved=Resolve(fault,kind,transaction);
     if(resolved.outcome==MMIO::DeferredRecovery::kCompleted){
       if(width!=4||vector)FaultContractFailure("unsupported-synthetic-result-width");
       std::memcpy(output,&resolved.value,4);return AccessResult<bool>::Success(true);
     }
-    if(resolved.outcome==MMIO::DeferredRecovery::kGuestFault)return Terminal<bool>(captured.fault);
-    PrepareRetry(captured.fault,transaction);
+    if(resolved.outcome==MMIO::DeferredRecovery::kGuestFault)return Terminal<bool>(fault);
+    PrepareRetry(fault,transaction);
   }
   FaultContractFailure("read-retry-budget-exhausted");
 }
@@ -254,14 +266,24 @@ AccessResult<bool> TryWriteBytes(void* address,const void* value,size_t width,bo
   ValidateRange(address,width,false,vector,true);MMIO::DeferredTransaction transaction;
   if(CompleteMappedWrite(address,value,width,vector,transaction))return AccessResult<bool>::Success(true);
   for(unsigned attempt=0;attempt<kRetryLimit;++attempt){
-    auto captured=vector?CaptureVectorWrite(address,value):CaptureWrite(address,value,width);
-    if(captured.success){if(!transaction.CompleteNative())FaultContractFailure("duplicate-native-completion");return AccessResult<bool>::Success(true);}
+    ScalarCaptureFailure failure;
+    bool success;
+    if (vector) {
+      const auto captured = CaptureVectorWrite(address, value);
+      success = captured.success;
+      if (!success) failure = captured.fault;
+    } else {
+      success = CaptureWriteCompact(address, value, width, failure);
+    }
+    if(success){if(!transaction.CompleteNative())FaultContractFailure("duplicate-native-completion");return AccessResult<bool>::Success(true);}
+    if (!failure) FaultContractFailure("missing-compact-capture-fault");
+    const auto& fault = *failure;
     auto kind=vector?MMIO::DeferredAccessKind::kVector128:
         width==4?MMIO::DeferredAccessKind::kScalar32:MMIO::DeferredAccessKind::kScalarRam;
-    auto resolved=Resolve(captured.fault,kind,transaction);
+    auto resolved=Resolve(fault,kind,transaction);
     if(resolved.outcome==MMIO::DeferredRecovery::kCompleted)return AccessResult<bool>::Success(true);
-    if(resolved.outcome==MMIO::DeferredRecovery::kGuestFault)return Terminal<bool>(captured.fault);
-    PrepareRetry(captured.fault,transaction);
+    if(resolved.outcome==MMIO::DeferredRecovery::kGuestFault)return Terminal<bool>(fault);
+    PrepareRetry(fault,transaction);
   }
   FaultContractFailure("write-retry-budget-exhausted");
 }

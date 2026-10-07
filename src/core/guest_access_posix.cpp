@@ -1,4 +1,5 @@
 #include <rex/platform/guest_access.h>
+#include "guest_access_compact.h"
 #include <rex/platform/seh.h>
 
 #include <signal.h>
@@ -102,7 +103,9 @@ AccessAttempt Finish(const AccessFrame& frame, int status, size_t completed) noe
   return result;
 }
 using Leaf = int (*)(const void*, void*);
-AccessAttempt Scalar(const void* address, void* value, size_t width, bool write) noexcept {
+template<class FinishCapture>
+auto ScalarCapture(const void* address, void* value, size_t width, bool write,
+                   FinishCapture finish) noexcept {
   AdmitCapture();
   platform::seh_initialize();
   Leaf leaf = nullptr; char *site = nullptr, *failure = nullptr;
@@ -112,9 +115,37 @@ AccessAttempt Scalar(const void* address, void* value, size_t width, bool write)
   auto frame = MakeFrame(site, failure, address, width, write ? 1 : 0);
   int status;
   { FrameScope scope(frame); status = leaf(address, value); }
-  return Finish(frame, status, status ? 0 : width);
+  return finish(frame, status, width);
+}
+AccessAttempt Scalar(const void* address, void* value, size_t width, bool write) noexcept {
+  return ScalarCapture(address, value, width, write,
+      [](const AccessFrame& frame, int status, size_t size) noexcept {
+        return Finish(frame, status, status ? 0 : size);
+      });
+}
+bool ScalarCompact(const void* address, void* value, size_t width, bool write,
+                   detail::ScalarCaptureFailure& failure) noexcept {
+  return ScalarCapture(address, value, width, write,
+      [&failure](const AccessFrame& frame, int status, size_t) noexcept {
+        if (status) {
+          failure.emplace();
+          std::memcpy(&*failure, &frame.fault, sizeof(frame.fault));
+        }
+        return status == 0;
+      });
 }
 }  // namespace
+
+namespace detail {
+bool CaptureReadCompact(const void* address, void* output, size_t width,
+                        ScalarCaptureFailure& failure) noexcept {
+  return ScalarCompact(address, output, width, false, failure);
+}
+bool CaptureWriteCompact(void* address, const void* value, size_t width,
+                         ScalarCaptureFailure& failure) noexcept {
+  return ScalarCompact(address, const_cast<void*>(value), width, true, failure);
+}
+} // namespace detail
 
 bool HasArmedAccessFrame() noexcept { return current_frame && current_frame->phase == 1; }
 bool InSignalContext() noexcept { return signal_depth != 0; }
