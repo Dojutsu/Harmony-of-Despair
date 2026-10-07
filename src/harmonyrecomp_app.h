@@ -17,12 +17,31 @@
 #include "game_data.h"
 #if defined(__linux__)
 #include "linux_user_paths.h"
+#include "linux_title_capture.h"
 REXCVAR_DECLARE(std::string, harmony_config_root);
 #endif
 
 class HarmonyrecompApp : public rex::ReXApp {
+#if defined(__linux__)
+  std::jthread title_capture_;
+#endif
  public:
   using rex::ReXApp::ReXApp;
+
+#if defined(__linux__)
+  void OnPostLaunchModule(rex::system::XThread*) override {
+    if (runtime() && runtime()->graphics_system()) {
+      title_capture_ = harmony::StartLinuxTitleCapture(runtime()->graphics_system()->presenter());
+    }
+  }
+
+  void OnShutdown() override {
+    if (title_capture_.joinable()) {
+      title_capture_.request_stop();
+      title_capture_.join();
+    }
+  }
+#endif
 
   static std::unique_ptr<rex::ui::WindowedApp> Create(
       rex::ui::WindowedAppContext& ctx) {

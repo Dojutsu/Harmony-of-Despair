@@ -37,7 +37,7 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     rexglue_setup_target(harmonyrecomp GPU_PLUGINS xenos
         ENTRYPOINT "${CMAKE_CURRENT_SOURCE_DIR}/src/linux_main.cpp")
-    target_sources(harmonyrecomp PRIVATE src/linux_startup.cpp src/linux_graphics.cpp)
+    target_sources(harmonyrecomp PRIVATE src/linux_startup.cpp src/linux_graphics.cpp src/linux_title_capture.cpp)
     # The opt-in Vulkan diagnostic includes the SDK's RenderDoc API header.
     target_link_libraries(harmonyrecomp PRIVATE renderdoc)
 else()

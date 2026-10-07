@@ -1,10 +1,11 @@
 {
   "schema": 1,
-  "repository": "ssh://git@git.example.invalid:2222/harmony/rexglue-sdk.git",
-  "branch": "port/linux-steamos",
-  "commit": "779b6f948eaf143cde3418c6eba0517f8a43ba07",
+  "repository": "../rexglue-sdk",
+  "branch": "full-send-comp",
+  "commit": "ab1b665866642c90866d6ecdfa08b667d105c9bb",
   "integration_base": "7ea08238e41474b4d46f2ed1e4f6177172b86574",
   "windows_lock": "rexglue-sdk.lock.json",
   "environment_lock": "../tools/linux-steamos/steamrt4.lock.json",
-  "policy": "Clone the private SDK at this exact Linux commit and initialize its pinned submodules. The Windows lock and durable overlay remain independent; do not apply the overlay to this commit."
+  "policy": "Use the independent sibling Full-Send-Comp SDK repository at this exact commit and its locally initialized pinned dependencies. Production SDK/Windows lock are read-only source authority, not a writable build dependency.",
+  "linux_upstream_base": "779b6f948eaf143cde3418c6eba0517f8a43ba07"
 }
