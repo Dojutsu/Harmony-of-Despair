@@ -5,6 +5,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <array>
+#include <sstream>
+#include <spdlog/sinks/ostream_sink.h>
 #include <future>
 #if REX_PLATFORM_GNU_LINUX
 #include <fcntl.h>
@@ -697,6 +699,101 @@ static void RunLinuxSelectRetirement(KernelState* kernel) {
 
 #endif
 
+static void RunBootstrapDiagnostics(KernelState* kernel) {
+  using namespace rex::system::xam;
+  std::ostringstream captured;
+  auto logger = rex::GetLogger(rex::log::krnl());
+  Check(logger != nullptr, "bootstrap logger exists");
+  const auto saved_level = logger->level();
+  auto saved_sinks = logger->sinks();
+  struct RestoreLogger {
+    std::shared_ptr<spdlog::logger> logger;
+    std::vector<spdlog::sink_ptr> sinks;
+    spdlog::level::level_enum level;
+    ~RestoreLogger() { logger->sinks() = std::move(sinks); logger->set_level(level); }
+  } restore{logger, saved_sinks, saved_level};
+  auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(captured);
+  sink->set_pattern("%v"); logger->sinks() = {sink}; logger->set_level(spdlog::level::trace);
+  auto* context = XThread::GetCurrentThread()->thread_state()->context();
+  const auto saved_lr = context->lr;
+  struct RestoreLink { PPCContext* context; uint64_t value; ~RestoreLink() { context->lr = value; } } link{context, saved_lr};
+  auto* memory = kernel->memory();
+  const auto guest = memory->SystemHeapAlloc(4096); Check(guest != 0, "bootstrap guest allocation");
+  auto ptr = [&]<typename T>(uint32_t offset) { return ppc_ptr_t<T>(memory->TranslateVirtual<T*>(guest + offset), guest + offset); };
+  auto buffer = ptr.operator()<XWSABUF>(0);
+  auto bytes = ptr.operator()<be_u32>(32);
+  auto flags = ptr.operator()<be_u32>(36);
+  auto overlapped = ptr.operator()<XWSAOVERLAPPED>(64);
+  auto destination = ptr.operator()<XSOCKADDR_IN>(128);
+  auto xnaddr = ptr.operator()<XNADDR>(160);
+  auto address_out = ptr.operator()<be_u32>(224);
+  buffer->len = 39; buffer->buf_ptr = guest + 256;
+  const std::string private_payload = "SECRET-HANDSHAKE-MARKER-DO-NOT-LOG-THIS";
+  Check(private_payload.size() == 39, "bootstrap exact private payload length");
+  std::memcpy(memory->TranslateVirtual(guest + 256), private_payload.data(), private_payload.size());
+  *bytes = 0x7a7b7c7d; *flags = 0;
+  std::memset(overlapped.host_address(), 0, sizeof(XWSAOVERLAPPED));
+  const auto sender_handle = uint32_t(NetDll_socket_entry(1, 2, 2, 17));
+  auto sender = kernel->object_table()->LookupObject<XSocket>(sender_handle);
+  Check(sender != nullptr, "bootstrap owned socket");
+  N_XSOCKADDR_IN bind_address{}; bind_address.sin_family=AF_INET; bind_address.sin_addr=INADDR_LOOPBACK;
+  Check(sender->Bind(&bind_address, sizeof(bind_address)) == X_STATUS_SUCCESS, "bootstrap loopback bind");
+  auto receiver = make_object<XSocket>(kernel);
+  Check(receiver->Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM, XSocket::X_IPPROTO_UDP) == X_STATUS_SUCCESS, "bootstrap peer init");
+  Check(receiver->Bind(&bind_address, sizeof(bind_address)) == X_STATUS_SUCCESS, "bootstrap peer bind");
+  Check(receiver->SetNonBlocking(true) == X_STATUS_SUCCESS, "bootstrap peer nonblocking");
+  destination->sin_family=AF_INET; destination->sin_addr=INADDR_LOOPBACK; destination->sin_port=ntohs(receiver->bound_port());
+  // The actual receive adapter retains its normal -1/997 pending contract.
+  pending_recv_pump_running = true; context->lr = 0x8275353c;
+  for (int i=0;i<3;++i) {
+    Check(NetDll_WSARecvFrom_entry(1,sender_handle,buffer,1,bytes,flags,nullptr,nullptr,overlapped,nullptr)==uint32_t(-1), "bootstrap pending return");
+    Check(XThread::GetLastError()==997 && uint32_t(overlapped->internal)==0x103 && uint32_t(*bytes)==0, "bootstrap pending output/error unchanged");
+  }
+  context->lr = 0x82753540;
+  for (int i=0;i<3;++i) {
+    Check(NetDll_WSARecvFrom_entry(1,sender_handle,buffer,0,bytes,flags,nullptr,nullptr,nullptr,nullptr)==uint32_t(-1), "bootstrap receive failure return");
+    Check(XThread::GetLastError()==10022, "bootstrap receive failure error unchanged");
+  }
+  // Reproduce the admitted client's actual first-send failure before any
+  // gameplay authorization/ACK exists. No plaintext may reach the native peer.
+  const auto xuid = kernel->user_profile()->xuid();
+  SessionRegistry registry; auto session = registry.Create(xuid+1,"Host",{htonl(INADDR_LOOPBACK),ntohs(receiver->bound_port())},1,6,0);
+  Check(session != nullptr, "bootstrap session"); session->members.front().local=false;
+  SessionMember local{}; local.xuid=xuid; local.local=true;
+  local.gameplay_admission = std::make_shared<const GameplayAdmissionBinding>(
+      GameplayAdmissionBinding{"bootstrap-fixture",std::string(32,'a'),std::string(32,'b')});
+  Check(registry.JoinBatch(session,std::span(&local,1)), "bootstrap client membership");
+  Check(TrackGameplayAdmission(session,xuid), "bootstrap pending admission");
+  Check(BindGameplaySocket(session,xuid,sender->native_handle(),1000), "bootstrap pending socket binding");
+  Check(IsAuthorizedGameplaySocket(sender->native_handle()), "bootstrap socket remains fail closed while pending");
+  context->lr=0x82753594; *bytes=0x7a7b7c7d;
+  for (int i=0;i<3;++i) {
+    Check(NetDll_WSASendTo_entry(1,sender_handle,buffer,1,bytes,0,destination,16,nullptr,nullptr)==uint32_t(-1), "bootstrap pending send return");
+    Check(XThread::GetLastError()==10035 && uint32_t(*bytes)==0x7a7b7c7d, "bootstrap pending send error/output unchanged");
+    Check(!receiver->WaitReadable(0), "bootstrap no raw pending handshake");
+  }
+  // XNet returns the address error directly and preserves prior LastError and
+  // output. Its first invoking-thread failure is logged once, without XNADDR.
+  std::memset(xnaddr.host_address(),0,sizeof(XNADDR)); *address_out=0x7b7c7d7e; context->lr=0x82752c10;
+  for(int i=0;i<3;++i) {
+    Check(NetDll_XNetXnAddrToInAddr_entry(1,xnaddr,nullptr,mapped_void(address_out.host_address(),address_out.guest_address()))==0x2741, "bootstrap direct XNet error");
+    Check(XThread::GetLastError()==10035 && uint32_t(*address_out)==0x7b7c7d7e, "bootstrap XNet error/output preserved");
+  }
+  logger->flush(); const auto output=captured.str();
+  auto occurrences=[&](std::string_view text) { size_t count=0,pos=0;while((pos=output.find(text,pos))!=std::string::npos){++count;pos+=text.size();}return count; };
+  Check(occurrences("api=WSASendTo")==1 && occurrences("api=WSARecvFrom")==2 && occurrences("api=XNetXnAddrToInAddr")==1, "bootstrap repeated failure reports bounded");
+  Check(output.find("guest_lr=82753594 result=-1 last_error=10035 stage=native_send")!=std::string::npos, "bootstrap exact send return/LR/error witness");
+  Check(output.find("guest_lr=8275353C result=-1 last_error=997 stage=overlapped_pending")!=std::string::npos, "bootstrap exact pending receive witness");
+  Check(output.find("guest_lr=82753540 result=-1 last_error=10022 stage=receive_arguments")!=std::string::npos, "bootstrap exact receive failure witness");
+  Check(output.find("guest_lr=82752C10 result=10049 last_error=10035 stage=address_conversion")!=std::string::npos, "bootstrap exact XNet return witness");
+  Check(output.find(private_payload)==std::string::npos && output.find("invitation")==std::string::npos && output.find("capability")==std::string::npos && output.find("traffic_key")==std::string::npos, "bootstrap no payload/invitation/key logs");
+  Check(NetDll_closesocket_entry(1,sender_handle)==0, "bootstrap owned close");
+  { std::lock_guard lock(bootstrap_result_mutex);
+    Check(std::none_of(bootstrap_socket_results.begin(),bootstrap_socket_results.end(),[&](const auto& entry){return entry.handle==sender_handle;}), "bootstrap owned diagnostics retired on close"); }
+  pending_recvs.clear(); sender.reset(); receiver.reset(); registry.Delete(session->info.id); memory->SystemHeapFree(guest);
+  std::cout << "{\"fixture\":\"bootstrap_diagnostics\",\"cases\":6,\"failures\":0,\"pending_send_error\":10035,\"no_raw_fallback\":true,\"returns_outputs_preserved\":true,\"reports_bounded\":true,\"guest_lr_verified\":true,\"private_data_absent\":true}\n";
+}
+
 int main(int argc, char** argv) {
 #if REX_PLATFORM_WIN32
   WSADATA wsa{};
@@ -720,6 +817,7 @@ int main(int argc, char** argv) {
         Run(runtime.kernel_state(), false, false, true);
 #if REX_PLATFORM_GNU_LINUX
       if (!stale) {
+        RunBootstrapDiagnostics(runtime.kernel_state());
         RunLinuxSocketAbi(runtime.kernel_state());
         RunLinuxSendBounds(runtime.kernel_state());
         RunLinuxFatalReceive(runtime.kernel_state());

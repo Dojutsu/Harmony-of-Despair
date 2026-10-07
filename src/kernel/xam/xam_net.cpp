@@ -68,6 +68,70 @@ namespace xam {
 using namespace rex::system;
 using namespace rex::system::xam;
 
+namespace {
+// Bounded diagnostics for one owned guest socket incarnation. These retain no
+// object, native descriptor, guest buffer, payload or credentials.
+enum BootstrapResultBit : uint8_t {
+  kBootstrapSendFailure = 1,
+  kBootstrapReceiveFailure = 2,
+  kBootstrapReceivePending = 4,
+};
+struct BootstrapSocketResults { uint32_t handle = 0; uint8_t reported = 0; };
+std::mutex bootstrap_result_mutex;
+std::array<BootstrapSocketResults, 128> bootstrap_socket_results{};
+
+uint32_t BootstrapGuestLinkRegister() {
+  auto* thread = XThread::GetCurrentThread();
+  auto* state = thread ? thread->thread_state() : nullptr;
+  const auto* context = state ? state->context() : nullptr;
+  return context ? static_cast<uint32_t>(context->lr) : 0;
+}
+
+void ReportBootstrapSocketResult(const char* api, uint32_t caller, uint32_t handle,
+                                uint32_t error, const char* stage, uint8_t bit) {
+  bool report = false;
+  {
+    std::lock_guard lock(bootstrap_result_mutex);
+    auto found = std::find_if(bootstrap_socket_results.begin(), bootstrap_socket_results.end(),
+                              [handle](const auto& value) { return value.handle == handle; });
+    if (found == bootstrap_socket_results.end()) {
+      found = std::find_if(bootstrap_socket_results.begin(), bootstrap_socket_results.end(),
+                           [](const auto& value) { return value.handle == 0; });
+      if (found == bootstrap_socket_results.end()) return;
+      found->handle = handle;
+    }
+    report = !(found->reported & bit);
+    found->reported |= bit;
+  }
+  if (report)
+    REXKRNL_INFO("GAMEPLAY_BOOTSTRAP_RESULT api={} caller={:08X} guest_socket={:08X} "
+                 "guest_lr={:08X} result=-1 last_error={} stage={}",
+                 api, caller, handle, BootstrapGuestLinkRegister(), error, stage);
+}
+
+void RetireBootstrapSocketResults(uint32_t handle) {
+  std::lock_guard lock(bootstrap_result_mutex);
+  for (auto& value : bootstrap_socket_results)
+    if (value.handle == handle) value = {};
+}
+
+void ReportBootstrapAddressFailure(uint32_t caller, uint32_t result) {
+  // XNet conversion has no socket identity. Report only its first failure on
+  // each invoking native thread, with an additional fixed process-wide bound.
+  static std::atomic<uint32_t> reports{0};
+  static thread_local bool reported = false;
+  if (reported) return;
+  reported = true;
+  if (reports.fetch_add(1, std::memory_order_relaxed) >= 32) return;
+  const auto error = XThread::GetLastError();
+  REXKRNL_INFO("GAMEPLAY_BOOTSTRAP_RESULT api=XNetXnAddrToInAddr caller={:08X} "
+               "guest_lr={:08X} result={} last_error={} stage=address_conversion",
+               caller, BootstrapGuestLinkRegister(), result, error);
+  // Direct-return XNet APIs do not change Winsock's last-error contract.
+  XThread::SetLastError(error);
+}
+}  // namespace
+
 // https://github.com/G91/TitanOffLine/blob/1e692d9bb9dfac386d08045ccdadf4ae3227bb5e/xkelib/xam/xamNet.h
 enum {
   XNCALLER_INVALID = 0x0,
@@ -556,13 +620,17 @@ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_
   constexpr uint32_t kStatusPending = 0x00000103;
 
   auto socket_object = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket);
+  auto failed = [&](uint32_t error, const char* stage, uint8_t bit = kBootstrapReceiveFailure) {
+    if (socket_object)
+      ReportBootstrapSocketResult("WSARecvFrom", caller, socket, error, stage, bit);
+    XThread::SetLastError(error);
+    return uint32_t(-1);
+  };
   if (!socket_object) {
-    XThread::SetLastError(kWsaNotSocket);
-    return -1;
+    return failed(kWsaNotSocket, "socket_lookup");
   }
   if (!buffers_ptr || buffer_count != 1 || !buffers_ptr[0].buf_ptr || !buffers_ptr[0].len) {
-    XThread::SetLastError(kWsaInvalidArgument);
-    return -1;
+    return failed(kWsaInvalidArgument, "receive_arguments");
   }
 
   // Harmony posts a completion-routine receive before any peer has connected.
@@ -571,8 +639,7 @@ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_
   // pending I/O as a hard network failure.
   if (overlapped_ptr) {
     if (XFAILED(socket_object->SetNonBlocking(true))) {
-      XThread::SetLastError(kWsaInvalidArgument);
-      return -1;
+      return failed(kWsaInvalidArgument, "nonblocking_mode");
     }
     overlapped_ptr->internal = kStatusPending;
     overlapped_ptr->internal_high = 0;
@@ -601,8 +668,7 @@ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_
         socket, pending.overlapped_ptr, pending.buffer_ptr, pending.buffer_length,
         flags_ptr.guest_address(), pending.flags, pending.from_ptr, pending.from_length_ptr,
         uint32_t(overlapped_ptr->event_handle), pending.completion_routine);
-    XThread::SetLastError(kWsaIoPending);
-    return -1;
+    return failed(kWsaIoPending, "overlapped_pending", kBootstrapReceivePending);
   }
 
   uint32_t flags = flags_ptr ? uint32_t(*flags_ptr) : 0;
@@ -612,8 +678,7 @@ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_
       REX_KERNEL_MEMORY()->TranslateVirtual(buffers_ptr[0].buf_ptr), buffers_ptr[0].len, flags,
       from_addr ? &native_from : nullptr, from_addr ? &native_from_length : nullptr);
   if (result < 0) {
-    XThread::SetLastError(LastSocketError());
-    return -1;
+    return failed(LastSocketError(), "native_receive");
   }
   if (num_bytes_recv)
     *num_bytes_recv = uint32_t(result);
@@ -803,13 +868,18 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
     XThread::SetLastError(10038);
     return -1;
   }
+  auto failed = [&](uint32_t error, const char* stage) {
+    ReportBootstrapSocketResult("WSASendTo", caller, socket_handle, error, stage,
+                                kBootstrapSendFailure);
+    XThread::SetLastError(error);
+    return uint32_t(-1);
+  };
   const auto operation = socket->AcquireNativeLease();
-  if (!operation) { XThread::SetLastError(10038); return -1; }
+  if (!operation) return failed(10038, "native_lease");
   uint32_t maximum = 0;
-  if (!SendLimit(operation, &maximum)) return -1;
+  if (!SendLimit(operation, &maximum)) return failed(XThread::GetLastError(), "native_limit");
   if (!buffers || !num_buffers || num_buffers > kMaximumSendBuffers) {
-    XThread::SetLastError(kWsaInvalidArgument);
-    return -1;
+    return failed(kWsaInvalidArgument, "send_arguments");
   }
 
   std::array<XWSABUF, kMaximumSendBuffers> descriptors{};
@@ -822,7 +892,8 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
     memory::MappingAccessLease lease;
 #endif
     auto* memory = REX_KERNEL_MEMORY();
-    if (!StageSendDestination(memory, to_ptr, to_len, &native_to)) return -1;
+    if (!StageSendDestination(memory, to_ptr, to_len, &native_to))
+      return failed(XThread::GetLastError(), "send_destination");
     if (!ReadSendGuest(memory, buffers.guest_address(), buffers.host_address(),
                        descriptors.data(), num_buffers * sizeof(XWSABUF)) ||
         (num_bytes_sent && !SendGuestRange(memory, num_bytes_sent.guest_address(),
@@ -832,12 +903,11 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
                          &staged_overlapped, sizeof(staged_overlapped)) ||
           !SendGuestRange(memory, overlapped.guest_address(), 2 * sizeof(be_u32),
                           overlapped.host_address(), true)))) {
-      XThread::SetLastError(kWsaFault);
-      return -1;
+      return failed(kWsaFault, "send_guest_range");
     }
     for (uint32_t i = 0; i < num_buffers; ++i) {
       size += uint32_t(descriptors[i].len);
-      if (size > maximum) { XThread::SetLastError(kWsaMessageSize); return -1; }
+      if (size > maximum) return failed(kWsaMessageSize, "send_size");
     }
     combined.resize(size_t(size));
     size_t offset = 0;
@@ -846,21 +916,19 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
       const auto address = uint32_t(descriptors[i].buf_ptr);
       if (length && !ReadSendGuest(memory, address, memory->TranslateVirtual(address),
                                     combined.data() + offset, length)) {
-        XThread::SetLastError(kWsaFault);
-        return -1;
+        return failed(kWsaFault, "send_guest_buffer");
       }
       offset += length;
     }
   } catch (const std::bad_alloc&) {
-    XThread::SetLastError(kWsaNoBuffers);
-    return -1;
+    return failed(kWsaNoBuffers, "send_allocation");
   }
 
   const int result = socket->SendTo(combined.data(), uint32_t(size), flags,
                                     to_ptr ? &native_to : nullptr, to_len);
   const uint32_t send_error = result < 0 ? LastSocketError() : 0;
   PumpPendingRecvFrom();
-  if (result < 0) { XThread::SetLastError(send_error); return -1; }
+  if (result < 0) return failed(send_error, "native_send");
   // Recheck mapping ownership after the network call, then publish only the
   // result fields. Never copy the descriptor's event/offset bytes back over a
   // concurrent title update and never hold a mapping lease across native I/O.
@@ -873,8 +941,7 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
                                            sizeof(be_u32), num_bytes_sent.host_address(), true)) ||
         (overlapped && !SendGuestRange(memory, overlapped.guest_address(), 2 * sizeof(be_u32),
                                        overlapped.host_address(), true))) {
-      XThread::SetLastError(kWsaFault);
-      return -1;
+      return failed(kWsaFault, "send_guest_range");
     }
     const be_u32 sent{uint32_t(result)};
     const std::array<be_u32, 2> status{be_u32(0), sent};
@@ -882,8 +949,7 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
                                           num_bytes_sent.host_address(), &sent, sizeof(sent))) ||
         (overlapped && !WriteSendGuest(memory, overlapped.guest_address(),
                                        overlapped.host_address(), status.data(), sizeof(status)))) {
-      XThread::SetLastError(kWsaFault);
-      return -1;
+      return failed(kWsaFault, "send_guest_range");
     }
   }
   REXKRNL_INFO(
@@ -1090,8 +1156,12 @@ void NetDll_XNetInAddrToString_entry(u32 caller, u32 address, mapped_string stri
 // subsequent socket calls (like a handle to a XNet address)
 u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mapped_void xid,
                                     mapped_void in_addr) {
+  auto failed = [&](uint32_t result) {
+    ReportBootstrapAddressFailure(caller, result);
+    return result;
+  };
   if (!xn_addr || !in_addr)
-    return 0x2726;
+    return failed(0x2726);
   if (xid) {
     std::array<uint8_t, 8> session_id{};
     std::memcpy(session_id.data(), xid.host_address(), session_id.size());
@@ -1104,9 +1174,9 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
     }
   }
   uint32_t address = xn_addr->ina.s_addr ? xn_addr->ina.s_addr : xn_addr->inaOnline.s_addr;
-  if (IsGameplayLogicalAddress(address)) return 0x2741;
+  if (IsGameplayLogicalAddress(address)) return failed(0x2741);
   if (!address)
-    return 0x2741;
+    return failed(0x2741);
   std::memcpy(in_addr.host_address(), &address, sizeof(address));
   const uint32_t guest_address = ntohl(address);
   std::lock_guard lock(xnet_registry_mutex);
@@ -1317,6 +1387,7 @@ u32 NetDll_socket_entry(u32 caller, u32 af, u32 type, u32 protocol) {
     XThread::SetLastError(error);
     return -1;
   }
+  RetireBootstrapSocketResults(socket->handle());
   return socket->handle();
 }
 
@@ -1336,6 +1407,8 @@ u32 NetDll_closesocket_entry(u32 caller, u32 socket_handle) {
   REXKRNL_INFO(
       "GAMEPLAY_SOCKET_CLOSE_REQUEST caller={:08X} guest_socket={} native={} found=1",
       caller, socket_handle, socket->native_handle());
+
+  RetireBootstrapSocketResults(socket_handle);
 
   // TODO: Absolutely delete this object. It is no longer valid after calling
   // closesocket.
@@ -1500,6 +1573,7 @@ u32 NetDll_accept_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR> addr
     std::memcpy(addr_ptr->sa_data, native_addr.sa_data, *addrlen_ptr - 2);
     *addrlen_ptr = native_len;
 
+    RetireBootstrapSocketResults(new_socket->handle());
     return new_socket->handle();
   } else {
     return -1;
