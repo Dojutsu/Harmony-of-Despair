@@ -8,6 +8,8 @@
 #include <sys/socket.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/syscall.h>
+#include <future>
 #endif
 #include <rex/system/xam/gameplay_traversal.h>
 #include <rex/cvar.h>
@@ -123,6 +125,24 @@ struct Udp {
 #endif
   }
   void Attach(NatProbeRole role=NatProbeRole::kGameplay) { NatProbeAttach(uint64_t(socket),role,address); }
+};
+// Real runtime socket wrapper for the independent admission/server fixture.
+struct RuntimeUdp {
+  XSocket endpoint{nullptr};
+  uint64_t socket=uint64_t(-1);
+  LanAddress address{};
+  RuntimeUdp() {
+    REQUIRE(endpoint.Initialize(XSocket::X_AF_INET,XSocket::X_SOCK_DGRAM,
+                                XSocket::X_IPPROTO_UDP)==X_STATUS_SUCCESS);
+    N_XSOCKADDR_IN bind{};bind.sin_family=AF_INET;bind.sin_addr=INADDR_LOOPBACK;
+    REQUIRE(endpoint.Bind(&bind,sizeof(bind))==X_STATUS_SUCCESS);
+    REQUIRE(endpoint.SetNonBlocking(true)==X_STATUS_SUCCESS);
+    socket=endpoint.native_handle();
+    sockaddr_in native{};SockLen length=sizeof(native);
+    REQUIRE(getsockname(socket,reinterpret_cast<sockaddr*>(&native),&length)==0);
+    address={native.sin_addr.s_addr,ntohs(native.sin_port)};
+  }
+  void Attach() { NatProbeAttach(socket,NatProbeRole::kGameplay,address); }
 };
 GameplayAuthorization Ticket(const std::shared_ptr<SessionRecord>& session) {
   GameplayAuthorization result;
@@ -262,10 +282,10 @@ TEST_CASE("production admission to independent gameplay sockets fixture", "[.gam
   discovery.SetTitleId(0x58410A7A);
   discovery.SetLocalUserIdentity(0,local);
   std::shared_ptr<SessionRecord> session;
-  std::unique_ptr<Udp> gameplay;
+  std::unique_ptr<RuntimeUdp> gameplay;
   uint16_t discovery_source_port=0;
   if(local==1) {
-    gameplay=std::make_unique<Udp>();gameplay->Attach();
+    gameplay=std::make_unique<RuntimeUdp>();gameplay->Attach();
     session=registry.Create(1,"FixtureHost",gameplay->address,1,3,3);
     REQUIRE(BindGameplaySocket(session,1,gameplay->socket,1000));
     REQUIRE(discovery.Advertise(session));
@@ -311,7 +331,7 @@ TEST_CASE("production admission to independent gameplay sockets fixture", "[.gam
     discovery.QueueGameplayAdmission(session,0,local,issued->attempt,ready->admission_generation);
     // Create A2 only after the host has had time to complete/retire A1.
     std::this_thread::sleep_for(std::chrono::seconds(2));
-    gameplay=std::make_unique<Udp>();REQUIRE(gameplay->address.port!=discovery_source_port);
+    gameplay=std::make_unique<RuntimeUdp>();REQUIRE(gameplay->address.port!=discovery_source_port);
     gameplay->Attach();REQUIRE(BindGameplaySocket(session,local,gameplay->socket,1000));
   }
   std::vector<uint64_t> received;
@@ -319,21 +339,15 @@ TEST_CASE("production admission to independent gameplay sockets fixture", "[.gam
   auto next_send=Clock::now();
   bool reported=false;
   while(Clock::now()<deadline && !std::filesystem::exists(root/"stop")) {
-    std::array<uint8_t,2048> buffer{};sockaddr_in source{};SockLen length=sizeof(source);
-    int count=recvfrom(gameplay->socket,reinterpret_cast<char*>(buffer.data()),int(buffer.size()),0,
-        reinterpret_cast<sockaddr*>(&source),&length);
-    if(count>0) {
-      if(!NatProbeConsume(gameplay->socket,buffer.data(),count,source.sin_addr.s_addr,ntohs(source.sin_port))) {
-        if(NatProbeIsPendingGameplaySource(gameplay->socket,
-            {source.sin_addr.s_addr,ntohs(source.sin_port)})) continue;
-        REQUIRE(count==39);
-        auto normalized=NatProbeNormalizeGameplaySource(gameplay->socket,{source.sin_addr.s_addr,ntohs(source.sin_port)});
-        REQUIRE(normalized);
-        auto identity=GameplayLogicalToXnAddr(normalized->ipv4);REQUIRE(identity);
-        REQUIRE(buffer[0]==identity->xuid);
-        for(size_t i=1;i<39;++i) REQUIRE(buffer[i]==uint8_t(identity->xuid+i));
-        if(std::find(received.begin(),received.end(),identity->xuid)==received.end())received.push_back(identity->xuid);
-      }
+    std::array<uint8_t,2048> buffer{};N_XSOCKADDR_IN source{};uint32_t length=sizeof(source);
+    int count=gameplay->endpoint.RecvFrom(buffer.data(),buffer.size(),0,&source,&length);
+    if(count>=0) {
+      REQUIRE(count==39);
+      auto identity=GameplayLogicalToXnAddr(htonl(uint32_t(source.sin_addr)));REQUIRE(identity);
+      REQUIRE(uint16_t(source.sin_port)==1000);
+      REQUIRE(buffer[0]==identity->xuid);
+      for(size_t i=1;i<39;++i) REQUIRE(buffer[i]==uint8_t(identity->xuid+i));
+      if(std::find(received.begin(),received.end(),identity->xuid)==received.end())received.push_back(identity->xuid);
     }
     if(Clock::now()>=next_send) {
       for(uint64_t peer:{1,2,3}) {
@@ -343,9 +357,12 @@ TEST_CASE("production admission to independent gameplay sockets fixture", "[.gam
         auto native=NatProbeGameplayDestination(gameplay->socket,logical->logical);
         if(!native)continue;
         std::array<uint8_t,39> payload{};for(size_t i=0;i<payload.size();++i)payload[i]=uint8_t(local+i);
-        sockaddr_in target{};target.sin_family=AF_INET;target.sin_addr.s_addr=native->ipv4;target.sin_port=htons(native->port);
-        REQUIRE(sendto(gameplay->socket,reinterpret_cast<char*>(payload.data()),int(payload.size()),0,
-            reinterpret_cast<sockaddr*>(&target),sizeof(target))==39);
+        N_XSOCKADDR_IN target{};target.sin_family=AF_INET;
+        target.sin_addr=ntohl(logical->logical.ipv4);target.sin_port=logical->logical.port;
+        const int sent=gameplay->endpoint.SendTo(payload.data(),payload.size(),0,&target,sizeof(target));
+        if(sent<0) {
+          REQUIRE((errno==EWOULDBLOCK||errno==EAGAIN));
+        } else REQUIRE(sent==39);
       }
       next_send=Clock::now()+std::chrono::milliseconds(80);
     }
@@ -432,6 +449,13 @@ TEST_CASE("XSocket protects admitted peer payloads and refuses scoped raw fallba
   std::array<uint8_t,128> raw_wire{};CHECK(recvfrom(lan.socket,reinterpret_cast<char*>(raw_wire.data()),int(raw_wire.size()),0,nullptr,nullptr)==-1);
   N_XSOCKADDR_IN admitted{};admitted.sin_family=AF_INET;admitted.sin_addr=ntohl(auth.peers[0].logical.ipv4);admitted.sin_port=1000;
   CHECK(sender.SendTo(body.data(),3,0,&admitted,1)==-1);CHECK(errno==EINVAL);
+  CHECK(sender.SendTo(body.data(),3,0,&admitted,sizeof(admitted)+1)==-1);CHECK(errno==EINVAL);
+  CHECK(sender.SendTo(body.data(),3,0,nullptr,1)==-1);CHECK(errno==EINVAL);
+  CHECK(sender.SendTo(body.data(),3,0,reinterpret_cast<N_XSOCKADDR_IN*>(1),sizeof(admitted))==-1);CHECK(errno==EFAULT);
+  auto invalid_family=admitted;invalid_family.sin_family=AF_INET6;
+  CHECK(sender.SendTo(body.data(),3,0,&invalid_family,sizeof(invalid_family))==-1);CHECK(errno==EAFNOSUPPORT);
+  CHECK(recvfrom(a.socket,reinterpret_cast<char*>(raw_wire.data()),int(raw_wire.size()),0,nullptr,nullptr)==-1);
+
   CHECK(sender.SendTo(reinterpret_cast<uint8_t*>(1),3,0,&admitted,sizeof(admitted))==-1);CHECK(errno==EFAULT);
   CHECK(sender.SendTo(reinterpret_cast<uint8_t*>(1),uint32_t(kGameplayMaximumPlaintextBytes+1),0,&admitted,sizeof(admitted))==-1);CHECK(errno==EMSGSIZE);
   sockaddr_in connected{};connected.sin_family=AF_INET;connected.sin_addr.s_addr=a.address.ipv4;connected.sin_port=htons(a.address.port);
@@ -761,4 +785,123 @@ TEST_CASE("retiring gameplay descriptor stays fail closed while a native operati
   CHECK_FALSE(IsAuthorizedGameplaySocket(receiver.native_handle()));
 }
 }
+#endif
+
+#if REX_PLATFORM_GNU_LINUX
+namespace rex::system::xam {
+TEST_CASE("gameplay renewals preserve nonce replay state and retired link identities",
+          "[gameplay][security][crypto-renewal]") {
+  SessionRegistry registry;
+  auto session=registry.Create(1,"Host",{htonl(INADDR_LOOPBACK),30742},1,3,3);
+  auto auth=Ticket(session);Udp socket;socket.Attach();
+  REQUIRE(InstallGameplayAuthorization(session,auth));
+  REQUIRE(BindGameplaySocket(session,1,socket.socket,1000));
+  auto peer=PeerCipher(auth.peers[0]);
+  const std::array<uint8_t,3> message{11,23,37};
+  std::vector<uint8_t> plain;
+  auto inbound=peer->Seal(message);REQUIRE(inbound);
+  REQUIRE(OpenGameplayDatagram(socket.socket,auth.peers[0].logical,*inbound,plain,true));
+  CHECK(plain==std::vector<uint8_t>(message.begin(),message.end()));
+  auto first=SealGameplayDatagram(socket.socket,auth.peers[0].logical,message);REQUIRE(first);
+  REQUIRE(peer->Open(*first,plain));CHECK((*first)[31]==1);
+  auto renewed=auth;renewed.expires_at+=std::chrono::seconds(20);
+  REQUIRE(InstallGameplayAuthorization(session,renewed));
+  plain={91,92};const auto sentinel=plain;
+  CHECK_FALSE(OpenGameplayDatagram(socket.socket,auth.peers[0].logical,*inbound,plain,true));
+  CHECK(plain==sentinel);
+  auto second=SealGameplayDatagram(socket.socket,auth.peers[0].logical,message);REQUIRE(second);
+  REQUIRE(peer->Open(*second,plain));CHECK((*second)[31]==2);
+  // A rejected replacement must leave the original authority and cipher intact.
+  for (int variant=0;variant<5;++variant) {
+    auto changed=renewed;
+    if(variant==0)changed.peers[0].traffic_key[0]^=1;
+    if(variant==1)changed.peers[0].traversal.participant^=1;
+    if(variant==2)changed.peers[0].member_nonce[0]='e';
+    if(variant==3)changed.peers[0].admission_generation[0]^=1;
+    if(variant==4)changed.peers[0].logical.ipv4=htonl(0xf0000064);
+    CAPTURE(variant);CHECK_FALSE(InstallGameplayAuthorization(session,changed));
+  }
+  auto third=SealGameplayDatagram(socket.socket,auth.peers[0].logical,message);REQUIRE(third);
+  REQUIRE(peer->Open(*third,plain));CHECK((*third)[31]==3);
+  // Omitted links become tombstones; an old ticket cannot restart their nonce.
+  auto removed=renewed;removed.peers.erase(removed.peers.begin());
+  REQUIRE(InstallGameplayAuthorization(session,removed));
+  CHECK_FALSE(SealGameplayDatagram(socket.socket,auth.peers[0].logical,message));
+  CHECK_FALSE(InstallGameplayAuthorization(session,renewed));
+  auto fresh=renewed;fresh.peers[0].traversal.attempt_id=std::string(32,'9');
+  fresh.peers[0].traffic_key.fill(17);
+  REQUIRE(InstallGameplayAuthorization(session,fresh));
+  plain=sentinel;
+  CHECK_FALSE(OpenGameplayDatagram(socket.socket,fresh.peers[0].logical,*inbound,plain,true));
+  CHECK(plain==sentinel);
+  auto fresh_peer=PeerCipher(fresh.peers[0]);auto fresh_in=fresh_peer->Seal(message);REQUIRE(fresh_in);
+  REQUIRE(OpenGameplayDatagram(socket.socket,fresh.peers[0].logical,*fresh_in,plain,true));
+  auto fresh_out=SealGameplayDatagram(socket.socket,fresh.peers[0].logical,message);REQUIRE(fresh_out);
+  REQUIRE(fresh_peer->Open(*fresh_out,plain));CHECK((*fresh_out)[31]==1);
+  // Expiry removes routes, while subsequent valid renewal retains crypto state.
+  auto short_lived=fresh;short_lived.expires_at=Clock::now()+std::chrono::milliseconds(20);
+  REQUIRE(InstallGameplayAuthorization(session,short_lived));
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  CHECK_FALSE(SealGameplayDatagram(socket.socket,fresh.peers[0].logical,message));
+  REQUIRE(InstallGameplayAuthorization(session,fresh));
+  auto after_expiry=SealGameplayDatagram(socket.socket,fresh.peers[0].logical,message);REQUIRE(after_expiry);
+  REQUIRE(fresh_peer->Open(*after_expiry,plain));CHECK((*after_expiry)[31]==2);
+}
+
+TEST_CASE("blocked ordinary UDP receives a complete encrypted packet after admission",
+          "[gameplay][socket][security][admission-race]") {
+  Udp peer,rendezvous;
+  XSocket receiver(nullptr);
+  REQUIRE(receiver.Initialize(XSocket::X_AF_INET,XSocket::X_SOCK_DGRAM,
+                             XSocket::X_IPPROTO_UDP)==X_STATUS_SUCCESS);
+  N_XSOCKADDR_IN bind{};bind.sin_family=AF_INET;bind.sin_addr=INADDR_LOOPBACK;
+  REQUIRE(receiver.Bind(&bind,sizeof(bind))==X_STATUS_SUCCESS);
+  sockaddr_in target{};socklen_t target_length=sizeof(target);
+  REQUIRE(getsockname(receiver.native_handle(),reinterpret_cast<sockaddr*>(&target),&target_length)==0);
+  NatProbeAttach(receiver.native_handle(),NatProbeRole::kGameplay,
+                 {target.sin_addr.s_addr,ntohs(target.sin_port)});
+  SessionRegistry registry;auto session=registry.Create(1,"Host",{htonl(INADDR_LOOPBACK),30742},1,3,3);
+  auto auth=Ticket(session);
+  for(auto& entry:auth.peers)entry.traversal.port=rendezvous.address.port;
+  std::array<uint8_t,3> bytes{91,92,93};N_XSOCKADDR_IN source{};uint32_t source_length=sizeof(source);
+  auto cipher=PeerCipher(auth.peers[0]);const std::array<uint8_t,3> expected{1,2,3};
+  auto packet=cipher->Seal(expected);REQUIRE(packet);
+  timeval timeout{3,0};
+  REQUIRE(setsockopt(receiver.native_handle(),SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout))==0);
+  std::promise<pid_t> started;int received=-999;
+  std::thread waiter([&]{started.set_value(pid_t(syscall(SYS_gettid)));
+    received=receiver.RecvFrom(bytes.data(),bytes.size(),0,&source,&source_length);});
+  const auto path="/proc/self/task/"+std::to_string(started.get_future().get())+"/syscall";
+  bool blocked=false;const auto deadline=Clock::now()+std::chrono::seconds(2);
+  while(Clock::now()<deadline) {
+    if(auto* input=std::fopen(path.c_str(),"r")) {
+      long number=-1;blocked=std::fscanf(input,"%ld",&number)==1&&number==SYS_recvfrom;
+      std::fclose(input);if(blocked)break;
+    }
+    std::this_thread::yield();
+  }
+  // Always wake and join the owned waiter before assertions can unwind.
+  bool installed=false,bound=false,registered=false,acknowledged=false;
+  if(blocked) {
+    installed=InstallGameplayAuthorization(session,auth);
+    bound=installed&&BindGameplaySocket(session,1,receiver.native_handle(),1000);
+    auto control=Registered(auth.peers[0],peer.address);
+    registered=bound&&NatProbeConsume(receiver.native_handle(),control.data(),control.size(),
+                                    htonl(INADDR_LOOPBACK),rendezvous.address.port);
+    control=Registered(auth.peers[0],peer.address,4);
+    acknowledged=registered&&NatProbeConsume(receiver.native_handle(),control.data(),control.size(),
+                                              peer.address.ipv4,peer.address.port);
+  }
+  bool sent=packet&&sendto(peer.socket,packet->data(),packet->size(),0,
+                         reinterpret_cast<sockaddr*>(&target),sizeof(target))==ssize_t(packet->size());
+  // A finite timeout and original-descriptor shutdown prevent a failed fixture
+  // from stranding a blocked receive, without weakening runtime policy.
+  if(!acknowledged||!sent)receiver.Close();
+  waiter.join();
+  REQUIRE(blocked);REQUIRE(installed);REQUIRE(bound);REQUIRE(registered);REQUIRE(acknowledged);REQUIRE(sent);
+  CHECK(received==3);CHECK(bytes==expected);
+  CHECK(uint32_t(source.sin_addr)==ntohl(auth.peers[0].logical.ipv4));
+  CHECK(uint16_t(source.sin_port)==1000);CHECK(source_length==sizeof(source));
+}
+} // namespace rex::system::xam
 #endif

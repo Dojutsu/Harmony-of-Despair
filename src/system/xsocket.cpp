@@ -949,16 +949,27 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
   const auto handle = operation.handle();
   std::shared_lock connect_window(native_connect_window_mutex_);
   if (operation.retired()) return ClosedNativeSocket();
-  // Send 2 copies of the packet: One to XNet (for network security) and an
-  // unencrypted copy for other Xenia hosts.
-  // TODO(DrChat): Enable when I commit XNet.
-  /*
-  auto xam = kernel_state()->GetKernelModule<xam::XamModule>("xam.xex");
-  auto xnet = xam->xnet();
-  if (xnet) {
-    xnet->SendPacket(this, to, buf, buf_len);
+#if REX_PLATFORM_GNU_LINUX
+  // Validate the complete IPv4 destination before routing or burning a nonce.
+  // Never pass an untrusted length for our fixed-size native stack object.
+  N_XSOCKADDR_IN staged_to{};
+  if ((!to && to_len != 0) || (to && to_len != sizeof(staged_to))) {
+    errno = EINVAL;
+    return -1;
   }
-  */
+  if (to) {
+    iovec local{&staged_to, sizeof(staged_to)}, remote{to, sizeof(staged_to)};
+    if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) != ssize_t(sizeof(staged_to))) {
+      errno = EFAULT;
+      return -1;
+    }
+    if (uint16_t(staged_to.sin_family) != AF_INET) {
+      errno = EAFNOSUPPORT;
+      return -1;
+    }
+    to = &staged_to;
+  }
+#endif
 
   xam::NatProbeTick(handle);
   sockaddr_in nto{};
@@ -1013,7 +1024,6 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
 
 #if REX_PLATFORM_GNU_LINUX
   if (type_ == X_SOCK_DGRAM && xam::IsAuthorizedGameplaySocket(handle)) {
-    if (to && to_len < sizeof(nto)) { errno = EINVAL; return -1; }
     if (!to) {
       socklen_t length = sizeof(nto);
       if (getpeername(handle, reinterpret_cast<sockaddr*>(&nto), &length) < 0) { errno = EDESTADDRREQ; return -1; }
@@ -1038,7 +1048,12 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
 #if REX_PLATFORM_GNU_LINUX
                 | MSG_NOSIGNAL
 #endif
-                , to ? (sockaddr*)&nto : nullptr, to_len);
+                , to ? (sockaddr*)&nto : nullptr,
+#if REX_PLATFORM_GNU_LINUX
+                  to ? sizeof(nto) : 0);
+#else
+                  to_len);
+#endif
   if (result > 0 && to)
     xam::NatProbeRecordGameplayTraffic(handle,
         {nto.sin_addr.s_addr, ntohs(nto.sin_port)}, size_t(result), true);
