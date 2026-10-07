@@ -2,6 +2,8 @@
 """Local production directory plus three isolated native runtime processes.
 No title launch, private inputs, live deployment, or player profile writes.
 """
+import argparse
+import json
 import os
 from pathlib import Path
 import socket
@@ -13,8 +15,17 @@ from tools.master_server.server import DirectoryServer, SessionRegistry, Rendezv
 
 ROOT = Path(__file__).resolve().parents[2]
 def main():
-    output = ROOT / 'out' / ('gameplay-integration-' + time.strftime('%Y%m%d-%H%M%S'))
-    output.mkdir()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--unit-tests', type=Path,
+                        default=ROOT / 'out/reconcile-sdk/out/win-amd64/unit_tests.exe',
+                        help='native unit_tests executable; defaults to the Windows build')
+    parser.add_argument('--output-directory', type=Path,
+                        help='new isolated fixture output directory')
+    args = parser.parse_args()
+    binary = args.unit_tests.resolve(strict=True)
+    output = (args.output_directory.resolve() if args.output_directory else
+              ROOT / 'out' / ('gameplay-integration-' + time.strftime('%Y%m%d-%H%M%S')))
+    output.mkdir(mode=0o700)
     traversal = RendezvousRegistry(rendezvous_host='127.0.0.1', rendezvous_port=0)
     udp = RendezvousServer(('127.0.0.1', 0), traversal)
     traversal.rendezvous_port = udp.address[1]
@@ -43,7 +54,7 @@ def main():
                    HARMONY_GAMEPLAY_URL=f'http://127.0.0.1:{http.server_address[1]}',
                    HARMONY_GAMEPLAY_DISCOVERY_PORT=str(discovery_port), LOCALAPPDATA=str(output / f'profile-{role}'))
         log=(output/f'{role}.log').open('w');logs.append(log)
-        processes.append(subprocess.Popen([str(ROOT/'out/reconcile-sdk/out/win-amd64/unit_tests.exe'),
+        processes.append(subprocess.Popen([str(binary),
             '[.gameplay-integration]', '--reporter', 'compact'],env=env,stdout=log,stderr=subprocess.STDOUT,
             cwd=output))
     def wait_for(predicate, seconds):
@@ -71,6 +82,12 @@ def main():
             assert len({endpoint[0] for endpoint in endpoints})==1
         (output/'stop').touch()
         for p in processes: assert p.wait(timeout=12)==0
+        receipt = {'scope': 'synthetic payloads through production session/admission/gameplay transport',
+                   'actual_title_gameplay_tested': False, 'native_binary': str(binary),
+                   'process_returncodes': [p.returncode for p in processes],
+                   'participants': 3, 'independent_endpoints': 3, 'pair_links': 3,
+                   'discovery_attempts_retired': True, 'payload_bytes': 39}
+        (output/'validation.json').write_text(json.dumps(receipt, indent=2) + '\n')
         print('PASS: production discovery/admission/completion -> three distinct gameplay sockets, all peer pairs, unchanged 39-byte bidirectional payloads')
         for i in (1,2,3): print(i,(output/f'{i}.ready').read_text())
         print(output)
