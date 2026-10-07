@@ -1,3 +1,4 @@
+#include "guest_access_state.h"
 #include <rex/platform/guest_memory.h>
 #include "guest_access_compact.h"
 #include "guest_mmio_classifier.h"
@@ -236,7 +237,7 @@ void RequireFillRange(void* destination,size_t length) noexcept {
     FaultContractFailure("unadmitted-mapped-bulk-access");
 }
 AccessResult<bool> TryReadBytes(const void* address,void* output,size_t width,bool vector,bool reservation) noexcept {
-  RequireAccess();
+  RequireAccessState();
   const auto boundary = HostBoundaryFor(address,width);
   if((width==2 || width==4 || width==8) && !vector && !reservation &&
      width<=boundary.page && boundary.offset>boundary.page-width) {
@@ -276,7 +277,7 @@ AccessResult<bool> TryReadBytes(const void* address,void* output,size_t width,bo
   FaultContractFailure("read-retry-budget-exhausted");
 }
 AccessResult<bool> TryWriteBytes(void* address,const void* value,size_t width,bool vector) noexcept {
-  RequireAccess();
+  RequireAccessState();
   const auto boundary = HostBoundaryFor(address,width);
   if((width==2 || width==4 || width==8) && !vector &&
      width<=boundary.page && boundary.offset>boundary.page-width) {

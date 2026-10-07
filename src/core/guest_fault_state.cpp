@@ -3,6 +3,7 @@
  * @brief Normal-context guest fault ownership. No signal-handler entrypoints.
  */
 #include <rex/platform/guest_fault_state.h>
+#include "guest_access_state.h"
 
 #include <atomic>
 #include <cstdio>
@@ -14,6 +15,12 @@
 #include <rex/platform/seh.h>
 
 namespace rex::guest {
+#if REX_PLATFORM_GNU_LINUX
+namespace detail {
+thread_local constinit ExecutionActivation* current_activation
+    __attribute__((visibility("hidden"), tls_model("initial-exec"))) = nullptr;
+}  // namespace detail
+#endif
 namespace {
 // This TLS owner is normal-context state. The signal layer has its own minimal
 // preinitialized TLS frame and never calls Current() or touches this object.
@@ -21,8 +28,7 @@ namespace {
 // the signal layer's initial-exec TLS. Preserve all normal-context ownership
 // checks while avoiding a dynamic TLS lookup at every guest memory boundary.
 #if REX_PLATFORM_GNU_LINUX
-thread_local ExecutionActivation* current_activation
-    __attribute__((tls_model("initial-exec"))) = nullptr;
+using detail::current_activation;
 #else
 thread_local ExecutionActivation* current_activation = nullptr;
 #endif
@@ -69,8 +75,12 @@ ExecutionActivation::~ExecutionActivation() noexcept {
 }
 
 ExecutionActivation* ExecutionActivation::Current() noexcept {
+#if REX_PLATFORM_GNU_LINUX
+  return detail::CurrentAccessState();
+#else
   if (InSignalContext()) std::_Exit(139);
   return current_activation;
+#endif
 }
 
 void ExecutionActivation::RequireCurrent() const noexcept {
@@ -78,6 +88,7 @@ void ExecutionActivation::RequireCurrent() const noexcept {
   if (current_activation != this) FaultContractFailure("wrong-activation-or-thread");
 }
 
+#if !REX_PLATFORM_GNU_LINUX
 namespace {
 // One normal-context admission implementation for strict and nullable callers.
 ExecutionActivation* CheckedAccessOwner(bool required) noexcept {
@@ -96,6 +107,10 @@ ExecutionActivation* CheckedAccessOwner(bool required) noexcept {
 
 ExecutionActivation* CurrentForAccessOrNull() noexcept { return CheckedAccessOwner(false); }
 void RequireAccess() noexcept { (void)CheckedAccessOwner(true); }
+#else
+ExecutionActivation* CurrentForAccessOrNull() noexcept { return detail::CheckedAccessState(false); }
+void RequireAccess() noexcept { detail::RequireAccessState(); }
+#endif
 
 FaultToken ExecutionActivation::Publish(const CapturedFault& fault) noexcept {
   RequireCurrent();

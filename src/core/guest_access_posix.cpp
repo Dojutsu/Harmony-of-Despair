@@ -1,5 +1,6 @@
 #include <rex/platform/guest_access.h>
 #include "guest_access_compact.h"
+#include "guest_access_state.h"
 #include <rex/platform/seh.h>
 
 #include <signal.h>
@@ -11,6 +12,12 @@
 #include <type_traits>
 
 namespace rex::guest {
+#if REX_PLATFORM_GNU_LINUX
+namespace detail {
+thread_local constinit volatile sig_atomic_t signal_depth
+    __attribute__((visibility("hidden"), tls_model("initial-exec"))) = 0;
+}  // namespace detail
+#endif
 namespace {
 extern "C" {
 #define LEAF(name) int name(const void*, void*); extern char name##_site, name##_fail
@@ -67,7 +74,11 @@ struct AccessFrame {
 // Constant-initialized shared runtime TLS. Initial-exec/direct FS is reviewed
 // for the admitted startup-loaded Linux DSOs; late loader use is not admitted.
 thread_local AccessFrame* current_frame __attribute__((tls_model("initial-exec"))) = nullptr;
+#if REX_PLATFORM_GNU_LINUX
+using detail::signal_depth;
+#else
 thread_local volatile sig_atomic_t signal_depth __attribute__((tls_model("initial-exec"))) = 0;
+#endif
 thread_local volatile sig_atomic_t capture_suppressed __attribute__((tls_model("initial-exec"))) = 0;
 struct FrameScope {
   AccessFrame& frame;

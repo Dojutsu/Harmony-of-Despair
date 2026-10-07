@@ -1,4 +1,7 @@
 #include <rex/system/mmio_handler.h>
+#include "../../../src/core/guest_access_state.h"
+#include <thread>
+#include <atomic>
 #include <rex/platform/function_memory_consumer.h>
 #include "../../../src/system/guest_deferred_transaction.h"
 #include <rex/system/xmemory.h>
@@ -41,6 +44,25 @@ void CachedSignalRead(int signal) {
   signal_scope->Read<uint32_t>(signal_address);
   std::_Exit(97);
 }
+volatile sig_atomic_t signal_state_operation=0;
+std::atomic<rex::runtime::MMIOHandler::DeferredTransaction*> signal_transaction{nullptr};
+static_assert(decltype(signal_transaction)::is_always_lock_free);
+void CanonicalSignalCheck(int signal) {
+  static constexpr char marker[]="canonical-access-state-signal-enter\n";
+  if(signal!=SIGUSR1||!signal_state_operation)std::_Exit(96);
+  (void)::write(STDERR_FILENO,marker,sizeof(marker)-1);
+  rex::guest::EnterSignalContext();
+  if(signal_state_operation==1)
+    (void)rex::guest::detail::CurrentAccessState();
+  else if(signal_state_operation==2)
+    rex::guest::detail::RequireAccessState();
+  else if(signal_state_operation==4) {
+    auto* transaction=signal_transaction.load(std::memory_order_relaxed);
+    if(!transaction)std::_Exit(96);
+    (void)transaction->CompleteNative();
+  } else rex::guest::RequireAccess();
+  std::_Exit(97);
+}
 bool Child(const char* executable,const char* mode,int expected,const char* marker) {
   int descriptors[2];if(pipe(descriptors))return false;
   std::fflush(nullptr);const auto child=fork();
@@ -62,7 +84,8 @@ bool Child(const char* executable,const char* mode,int expected,const char* mark
   close(descriptors[0]);int status=0;pid_t waited;
   do{waited=waitpid(child,&status,0);}while(waited<0&&errno==EINTR);
   const bool okay=waited==child&&WIFEXITED(status)&&WEXITSTATUS(status)==expected&&error.find(marker)!=std::string::npos;
-  const char* kind=std::strncmp(mode,"classifier-",11)?"function_consumer_child":"classifier_refusal_child";
+  const char* kind=!std::strncmp(mode,"state-",6)?"canonical_state_refusal_child":
+    std::strncmp(mode,"classifier-",11)?"function_consumer_child":"classifier_refusal_child";
   std::printf("{\"kind\":\"%s\",\"mode\":\"%s\",\"exit\":%d,\"signal\":%d,\"marker_present\":%s}\n",kind,mode,WIFEXITED(status)?WEXITSTATUS(status):-1,WIFSIGNALED(status)?WTERMSIG(status):0,error.find(marker)!=std::string::npos?"true":"false");
   return okay;
 }
@@ -70,6 +93,10 @@ bool Child(const char* executable,const char* mode,int expected,const char* mark
 int main(int argc,char** argv) {
  const rlimit no_core{0,0};if(setrlimit(RLIMIT_CORE,&no_core))return 94;
  rex::InitLogging();
+ if(argc>1&&!std::strcmp(argv[1],"state-without-owner")) {
+  rex::guest::detail::RequireAccessState();return 92;
+ }
+
  if(argc>1 && !std::strncmp(argv[1],"classifier-",11))
   return RunMappedClassifierEquivalence(argv[1]+11);
  if(argc==1 && RunMappedClassifierEquivalence(nullptr))return 100;
@@ -100,10 +127,78 @@ int main(int argc,char** argv) {
    if(raise(SIGUSR1))return 96;return 97;
   }
 
+  if(!std::strncmp(argv[1],"state-signal-",13)) {
+   signal_state_operation=!std::strcmp(argv[1],"state-signal-current")?1:
+      !std::strcmp(argv[1],"state-signal-private")?2:
+      !std::strcmp(argv[1],"state-signal-transaction")?4:3;
+   rex::runtime::MMIOHandler::DeferredTransaction transaction;
+   signal_transaction.store(&transaction,std::memory_order_relaxed);
+   struct sigaction action{};action.sa_handler=CanonicalSignalCheck;sigemptyset(&action.sa_mask);
+   if(sigaction(SIGUSR1,&action,nullptr))return 95;
+   std::fflush(stdout);if(raise(SIGUSR1))return 96;return 97;
+  }
+  if(!std::strncmp(argv[1],"state-transaction-",18)) {
+   rex::runtime::MMIOHandler::DeferredTransaction transaction;
+   if(!std::strcmp(argv[1],"state-transaction-owner")) {
+    rex::guest::ExecutionActivation nested;
+    (void)transaction.CompleteNative();return 92;
+   }
+   if(!std::strcmp(argv[1],"state-transaction-pending")) {
+    activation.Publish(fault);(void)transaction.CompleteNative();return 92;
+   }
+   rex::guest::AdjudicationScope adjudication(fault);
+   (void)transaction.CompleteNative();return 92;
+  }
+  if(!std::strcmp(argv[1],"state-pending")) {
+   activation.Publish(fault);(void)rex::guest::detail::CheckedAccessState(false);return 92;
+  }
+  if(!std::strcmp(argv[1],"state-adjudicating")) {
+   rex::guest::AdjudicationScope adjudication(fault);
+   rex::guest::detail::RequireAccessState();return 92;
+  }
   if(std::strcmp(argv[1],"cached-pending")==0){activation.Publish(fault);scope.Read<uint32_t>(p);std::_Exit(90);}
   if(std::strcmp(argv[1],"cached-adjudicating")==0){rex::guest::AdjudicationScope adjudication(fault);scope.Write<uint32_t>(p,0);std::_Exit(90);}
   return 91;
  }
+ unsigned state_assertions=0;
+ if(rex::guest::detail::CurrentAccessState()||rex::guest::detail::CheckedAccessState(false))return 101;
+ state_assertions+=2;
+ {
+  rex::guest::ExecutionActivation parent;
+  auto* expected=&parent;
+  rex::runtime::MMIOHandler::DeferredTransaction transaction;
+  if(!transaction.CompleteNative()||transaction.CompleteNative())return 105;
+  state_assertions+=2;
+  bool workers_ok[2]{false,false};unsigned worker_assertions[2]{};
+  auto run=[&](unsigned index) {
+   if(rex::guest::ExecutionActivation::Current()||rex::guest::detail::CurrentAccessState()||
+      rex::guest::detail::CheckedAccessState(false))return;
+   worker_assertions[index]+=3;
+   for(unsigned i=0;i<64;++i) {
+    rex::guest::ExecutionActivation owner;
+    if(rex::guest::ExecutionActivation::Current()!=&owner||
+       rex::guest::detail::CurrentAccessState()!=&owner||
+       rex::guest::detail::CheckedAccessState(false)!=&owner)return;
+    rex::guest::RequireAccess();rex::guest::detail::RequireAccessState();
+    worker_assertions[index]+=5;
+    {rex::guest::ExecutionActivation nested;
+     if(rex::guest::ExecutionActivation::Current()!=&nested||
+        rex::guest::detail::CurrentAccessState()!=&nested)return;
+     rex::guest::detail::RequireAccessState();worker_assertions[index]+=3;}
+    if(rex::guest::detail::CurrentAccessState()!=&owner)return;
+    ++worker_assertions[index];
+   }
+   if(rex::guest::detail::CurrentAccessState())return;
+   ++worker_assertions[index];workers_ok[index]=true;
+  };
+  std::thread first(run,0),second(run,1);first.join();second.join();
+  if(!workers_ok[0]||!workers_ok[1]||rex::guest::ExecutionActivation::Current()!=expected||
+     rex::guest::detail::CheckedAccessState(false)!=expected)return 102;
+  state_assertions+=worker_assertions[0]+worker_assertions[1]+4;
+ }
+ if(rex::guest::ExecutionActivation::Current()||rex::guest::detail::CurrentAccessState())return 103;
+ state_assertions+=2;
+ std::printf("{\"kind\":\"canonical_access_state\",\"assertions\":%u,\"single_public_private_owner\":true,\"thread_isolation\":true,\"nested_owner_restoration\":true}\n",state_assertions);
  unsigned assertions=0;
  for(unsigned repeat=0;repeat<64;++repeat) {
   if(rex::guest::ExecutionActivation::Current())return 4;++assertions;
@@ -179,6 +274,16 @@ int main(int argc,char** argv) {
  const auto* loader=std::getenv("HARMONY_TEST_ELF_LOADER");
  if(loader){if(argv[0][0]!='/'||std::strlen(argv[0])>=sizeof(executable))return 98;std::strcpy(executable,argv[0]);}
  else{auto length=readlink("/proc/self/exe",executable,sizeof(executable)-1);if(length<=0)return 98;executable[length]=0;}
+ if(!Child(executable,"state-without-owner",86,"guest-access-without-activation")||
+    !Child(executable,"state-pending",86,"guest-continuation-with-pending-fault")||
+    !Child(executable,"state-adjudicating",86,"guest-access-during-adjudication")||
+    !Child(executable,"state-signal-current",139,"canonical-access-state-signal-enter")||
+    !Child(executable,"state-signal-private",139,"canonical-access-state-signal-enter")||
+    !Child(executable,"state-signal-public",139,"canonical-access-state-signal-enter")||
+    !Child(executable,"state-signal-transaction",139,"canonical-access-state-signal-enter")||
+    !Child(executable,"state-transaction-owner",86,"mmio-transaction-wrong-owner")||
+    !Child(executable,"state-transaction-pending",86,"guest-continuation-with-pending-fault")||
+    !Child(executable,"state-transaction-adjudicating",86,"guest-access-during-adjudication"))return 104;
  if(!Child(executable,"cached-pending",86,"guest-continuation-with-pending-fault")||
     !Child(executable,"cached-adjudicating",86,"guest-access-during-adjudication")||
     !Child(executable,"cached-signal",139,"function-memory-consumer-cached-signal-enter")||
