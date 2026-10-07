@@ -10,7 +10,9 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <array>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include <rex/input/device_assignment.h>
@@ -44,10 +46,19 @@ class InputSystem : public system::IInputSystem {
 
   X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags, X_INPUT_CAPABILITIES* out_caps);
   X_RESULT GetState(uint32_t user_index, X_INPUT_STATE* out_state);
+  X_RESULT GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_state);
+  void SetUIControllerCapture(bool capture);
   X_RESULT SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration);
   X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags, X_INPUT_KEYSTROKE* out_keystroke);
 
  private:
+  X_RESULT SampleState(uint32_t user_index, X_INPUT_STATE* out_state, bool for_ui);
+  // Guest polling and per-frame host UI sampling share device assignments.
+  std::recursive_mutex state_mutex_;
+  bool ui_controller_capture_ = false;
+  std::array<bool, 4> await_controller_release_{};
+  uint32_t ui_packet_bias_ = 0;
+
   /// Re-enumerates every driver and notifies the assignment when the set
   /// changed.
   void RefreshDevices();

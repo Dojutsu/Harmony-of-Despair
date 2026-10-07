@@ -41,7 +41,11 @@ SDLInputDriver::SDLInputDriver(rex::ui::Window* window, size_t window_z_order)
       controllers_(),
       controllers_mutex_() {}
 
-SDLInputDriver::~SDLInputDriver() {}
+SDLInputDriver::~SDLInputDriver() {
+  if (controller_context_) {
+    controller_context_->CallInUIThreadSynchronous([this] { ShutdownControllerEvents(); });
+  }
+}
 
 X_STATUS SDLInputDriver::Setup() {
   if (!TestSDLVersion()) {
@@ -55,7 +59,21 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
   if (window && !attached_window_) {
     attached_window_ = window;
     window->AddListener(this);
-    window->app_context().CallInUIThreadSynchronous([this]() {
+    AttachUIContext(window->app_context());
+  }
+}
+
+bool SDLCALL SDLInputDriver::WatchEvent(void* userdata, SDL_Event* event) {
+  if (!userdata || !event) return false;
+  if (event->type >= SDL_EVENT_JOYSTICK_AXIS_MOTION && event->type < SDL_EVENT_FINGER_DOWN)
+    static_cast<SDLInputDriver*>(userdata)->HandleEvent(*event);
+  return false;
+}
+
+void SDLInputDriver::AttachUIContext(rex::ui::WindowedAppContext& context) {
+  if (controller_context_) return;
+  controller_context_ = &context;
+  context.CallInUIThreadSynchronous([this] {
       // Initialize SDL events subsystem
       if (!SDL_InitSubSystem(SDL_INIT_EVENTS)) {
         REXLOG_ERROR("SDL: Failed to init events subsystem: {}", SDL_GetError());
@@ -66,27 +84,11 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
 
       // With an event watch we will always get notified, even if the event queue
       // is full, which can happen if another subsystem does not clear its events.
-      SDL_AddEventWatch(
-          [](void* userdata, SDL_Event* event) -> bool {
-            if (!userdata || !event) {
-              assert_always();
-              return false;
-            }
-
-            const auto type = event->type;
-            if (type < SDL_EVENT_JOYSTICK_AXIS_MOTION || type >= SDL_EVENT_FINGER_DOWN) {
-              return false;
-            }
-
-            // If another part of rex uses another SDL subsystem that generates
-            // events, this may seem like a bad idea. They will however not
-            // subscribe to controller events so we get away with that.
-            const auto driver = static_cast<SDLInputDriver*>(userdata);
-            driver->HandleEvent(*event);
-
-            return false;
-          },
-          this);
+      if (!SDL_AddEventWatch(WatchEvent, this)) {
+        REXLOG_ERROR("SDL: Failed to register controller event watch: {}", SDL_GetError());
+        return;
+      }
+      event_watch_registered_ = true;
 
       // Initialize game controller subsystem
       if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
@@ -113,8 +115,19 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
         }
       }
       REXLOG_INFO("SDL input driver initialized successfully");
-    });
+  });
+}
+
+void SDLInputDriver::ShutdownControllerEvents() {
+  if (event_watch_registered_) {
+    SDL_RemoveEventWatch(WatchEvent, this);
+    event_watch_registered_ = false;
   }
+  for (auto& controller : controllers_) SDL_CloseGamepad(controller.sdl);
+  controllers_.clear();
+  if (SDL_Gamepad_initialized_) { SDL_QuitSubSystem(SDL_INIT_GAMEPAD); SDL_Gamepad_initialized_ = false; }
+  if (sdl_events_initialized_) { SDL_QuitSubSystem(SDL_INIT_EVENTS); sdl_events_initialized_ = false; }
+  controller_context_ = nullptr;
 }
 
 void SDLInputDriver::OnClosing(rex::ui::UIEvent&) {
@@ -124,18 +137,7 @@ void SDLInputDriver::OnClosing(rex::ui::UIEvent&) {
       attached_window_->app_context().CallInUIThreadSynchronous(
           [this]() { attached_window_->app_context().ExecutePendingFunctionsFromUIThread(); });
     }
-    for (auto& controller : controllers_) {
-      SDL_CloseGamepad(controller.sdl);
-    }
-    controllers_.clear();
-    if (SDL_Gamepad_initialized_) {
-      SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
-      SDL_Gamepad_initialized_ = false;
-    }
-    if (sdl_events_initialized_) {
-      SDL_QuitSubSystem(SDL_INIT_EVENTS);
-      sdl_events_initialized_ = false;
-    }
+    ShutdownControllerEvents();
     attached_window_ = nullptr;
   }
 }
@@ -221,6 +223,17 @@ X_RESULT SDLInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
     // pressed buttons aren't lost and will be visible again.
     std::memset(&out_state->gamepad, 0, sizeof(out_state->gamepad));
   }
+  return X_ERROR_SUCCESS;
+}
+
+X_RESULT SDLInputDriver::GetDeviceStateForUI(DeviceId id, X_INPUT_STATE* out_state) {
+  if (!out_state) return X_ERROR_BAD_ARGUMENTS;
+  if (!sdl_events_initialized_ || !SDL_Gamepad_initialized_) return X_ERROR_DEVICE_NOT_CONNECTED;
+  QueueControllerUpdate();
+  auto guard = DrainAndLock();
+  auto* controller = FindController(id);
+  if (!controller) return X_ERROR_DEVICE_NOT_CONNECTED;
+  *out_state = controller->state;
   return X_ERROR_SUCCESS;
 }
 
@@ -673,7 +686,7 @@ void SDLInputDriver::QueueControllerUpdate() {
   bool is_queued = false;
   sdl_pumpevents_queued_.compare_exchange_strong(is_queued, true);
   if (!is_queued) {
-    attached_window_->app_context().CallInUIThread([this]() {
+    controller_context_->CallInUIThread([this]() {
       SDL_PumpEvents();
       sdl_pumpevents_queued_ = false;
     });

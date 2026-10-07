@@ -41,6 +41,11 @@ namespace {
 // a real pad off guest user 0. SlotAssignment routes them by their synthetic
 // flag and never reads this value.
 constexpr uint32_t kSyntheticOrdinal = UINT32_MAX;
+bool ControllerNeutral(const X_INPUT_GAMEPAD& pad) {
+  return !pad.buttons && pad.left_trigger <= 30 && pad.right_trigger <= 30 &&
+      std::abs(int(int16_t(pad.thumb_lx))) < 8000 && std::abs(int(int16_t(pad.thumb_ly))) < 8000 &&
+      std::abs(int(int16_t(pad.thumb_rx))) < 8000 && std::abs(int(int16_t(pad.thumb_ry))) < 8000;
+}
 
 }  // namespace
 
@@ -53,6 +58,7 @@ X_STATUS InputSystem::Setup() {
 }
 
 void InputSystem::Shutdown() {
+  std::lock_guard lock(state_mutex_);
   // device_owners_ holds raw driver pointers.
   devices_.clear();
   device_owners_.clear();
@@ -60,10 +66,12 @@ void InputSystem::Shutdown() {
 }
 
 void InputSystem::AddDriver(std::unique_ptr<InputDriver> driver) {
+  std::lock_guard lock(state_mutex_);
   drivers_.push_back(std::move(driver));
 }
 
 void InputSystem::AttachWindow(rex::ui::Window* window) {
+  std::lock_guard lock(state_mutex_);
   window_ = window;
   for (auto& driver : drivers_) {
     driver->OnWindowAvailable(window);
@@ -71,12 +79,14 @@ void InputSystem::AttachWindow(rex::ui::Window* window) {
 }
 
 void InputSystem::SetActiveCallback(std::function<bool()> callback) {
+  std::lock_guard lock(state_mutex_);
   for (auto& driver : drivers_) {
     driver->set_is_active_callback(callback);
   }
 }
 
 void InputSystem::SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment) {
+  std::lock_guard lock(state_mutex_);
   assignment_ = std::move(assignment);
   if (assignment_) {
     assignment_->OnDevicesChanged(devices_);
@@ -191,6 +201,7 @@ const DeviceInfo* InputSystem::DeviceInfoFor(DeviceId id) const {
 
 X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
                                       X_INPUT_CAPABILITIES* out_caps) {
+  std::lock_guard lock(state_mutex_);
   SCOPE_profile_cpu_f("hid");
   if (!out_caps || !assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -217,7 +228,44 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
   return driver->GetDeviceCapabilities(chosen, flags, out_caps);
 }
 
+void InputSystem::SetUIControllerCapture(bool capture) {
+  std::lock_guard lock(state_mutex_);
+  if (ui_controller_capture_ == capture) return;
+  ui_controller_capture_ = capture;
+  ++ui_packet_bias_;
+  if (capture) await_controller_release_.fill(true);
+}
+
+X_RESULT InputSystem::GetStateForUI(uint32_t user_index, X_INPUT_STATE* out_state) {
+  std::lock_guard lock(state_mutex_);
+  return SampleState(user_index, out_state, true);
+}
+
 X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+  std::lock_guard lock(state_mutex_);
+  X_INPUT_STATE state{};
+  auto result = SampleState(user_index, &state, false);
+  if (result != X_ERROR_SUCCESS) return result;
+  if (user_index < await_controller_release_.size()) {
+    auto& awaiting = await_controller_release_[user_index];
+    if (!ui_controller_capture_ && ControllerNeutral(state.gamepad)) awaiting = false;
+    if (ui_controller_capture_ || awaiting) state.gamepad = {};
+    state.packet_number = uint32_t(state.packet_number) + ui_packet_bias_;
+  }
+  if (out_state) {
+    *out_state = state;
+    std::vector<DeviceId> ids;
+    assignment_->DevicesForUser(user_index, ids);
+    const bool consumed = ui_controller_capture_ ||
+        (user_index < await_controller_release_.size() && await_controller_release_[user_index]);
+    for (DeviceId id : ids) {
+      if (auto* driver = DriverForDevice(id)) driver->OnGuestStateDelivered(id, state, consumed);
+    }
+  }
+  return result;
+}
+
+X_RESULT InputSystem::SampleState(uint32_t user_index, X_INPUT_STATE* out_state, bool for_ui) {
   SCOPE_profile_cpu_f("hid");
   if (!assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -235,7 +283,8 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
       continue;
     }
     X_INPUT_STATE state = {};
-    if (driver->GetDeviceState(id, &state) != X_ERROR_SUCCESS) {
+    if ((for_ui ? driver->GetDeviceStateForUI(id, &state) :
+                  driver->GetDeviceState(id, &state)) != X_ERROR_SUCCESS) {
       continue;
     }
     active_devices_.Observe(user_index, id, state.gamepad);
@@ -257,6 +306,7 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
 }
 
 X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
+  std::lock_guard lock(state_mutex_);
   SCOPE_profile_cpu_f("hid");
   if (!assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -299,11 +349,22 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
 
 X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
                                    X_INPUT_KEYSTROKE* out_keystroke) {
+  std::lock_guard lock(state_mutex_);
   SCOPE_profile_cpu_f("hid");
   if (!assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
+  if (ui_controller_capture_) return X_ERROR_EMPTY;
+  if (user_index < await_controller_release_.size() && await_controller_release_[user_index]) {
+    X_INPUT_STATE raw{};
+    const auto status = SampleState(user_index, &raw, true);
+    if (status != X_ERROR_SUCCESS && status != X_ERROR_DEVICE_NOT_CONNECTED) return status;
+    if (status == X_ERROR_SUCCESS && !ControllerNeutral(raw.gamepad)) return X_ERROR_EMPTY;
+    // A driver without UI sampling cannot have supplied the closing UI press.
+    // Preserve its keystroke API instead of retaining an uncheckable latch.
+    await_controller_release_[user_index] = false;
+  }
   RefreshDevices();
   std::vector<DeviceId> ids;
   assignment_->DevicesForUser(user_index, ids);

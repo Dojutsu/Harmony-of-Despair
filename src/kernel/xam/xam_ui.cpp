@@ -26,6 +26,7 @@ REXCVAR_DEFINE_BOOL(headless, false, "Kernel",
 #include <rex/types.h>
 #include <rex/system/xtypes.h>
 #include <rex/thread.h>
+#include <rex/ui/dialog_completion.h>
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/imgui_drawer.h>
 #include <rex/ui/window.h>
@@ -88,6 +89,7 @@ void SetXamDialogSizeConstraints(const ImGuiIO& io, float minimum_width, float s
 
 class XamDialog : public rex::ui::ImGuiDialog {
  public:
+  bool CapturesControllerInput() const override { return true; }
   void set_close_callback(std::function<void()> close_callback) {
     close_callback_ = close_callback;
   }
@@ -113,21 +115,13 @@ X_RESULT xeXamDispatchDialog(T* dialog, std::function<X_RESULT(T*)> close_callba
     REX_KERNEL_STATE()->BroadcastNotification(0x9, true);
   };
   auto run = [dialog, close_callback]() -> X_RESULT {
-    X_RESULT result;
-    dialog->set_close_callback(
-        [&dialog, &result, &close_callback]() { result = close_callback(dialog); });
-    rex::thread::Fence fence;
-    rex::ui::WindowedAppContext* app_context = REX_KERNEL_STATE()->emulator()->app_context();
-    if (app_context &&
-        app_context->CallInUIThreadSynchronous([&dialog, &fence]() { dialog->Then(&fence); })) {
-      ++xam_dialogs_shown_;
-      fence.Wait();
-      --xam_dialogs_shown_;
-    } else {
-      delete dialog;
-    }
-    // dialog should be deleted at this point!
-    return result;
+    auto* app_context = REX_KERNEL_STATE()->emulator()->app_context();
+    const auto completion = ui::RunDialogAndWait(dialog,
+        [close_callback](T* value, uint32_t&, uint32_t&) { return close_callback(value); },
+        [app_context](auto attach) {
+          return app_context && app_context->CallInUIThreadSynchronous(attach);
+        }, xam_dialogs_shown_);
+    return completion.result;
   };
   auto post = []() {
     rex::thread::Sleep(std::chrono::milliseconds(100));
@@ -154,22 +148,14 @@ X_RESULT xeXamDispatchDialogEx(T* dialog,
     REX_KERNEL_STATE()->BroadcastNotification(0x9, true);
   };
   auto run = [dialog, close_callback](uint32_t& extended_error, uint32_t& length) -> X_RESULT {
-    rex::ui::WindowedAppContext* app_context = REX_KERNEL_STATE()->emulator()->app_context();
-    X_RESULT result;
-    dialog->set_close_callback([&dialog, &result, &extended_error, &length, &close_callback]() {
-      result = close_callback(dialog, extended_error, length);
-    });
-    rex::thread::Fence fence;
-    if (app_context &&
-        app_context->CallInUIThreadSynchronous([&dialog, &fence]() { dialog->Then(&fence); })) {
-      ++xam_dialogs_shown_;
-      fence.Wait();
-      --xam_dialogs_shown_;
-    } else {
-      delete dialog;
-    }
-    // dialog should be deleted at this point!
-    return result;
+    auto* app_context = REX_KERNEL_STATE()->emulator()->app_context();
+    const auto completion = ui::RunDialogAndWait(dialog, close_callback,
+        [app_context](auto attach) {
+          return app_context && app_context->CallInUIThreadSynchronous(attach);
+        }, xam_dialogs_shown_);
+    extended_error = completion.extended_error;
+    length = completion.length;
+    return completion.result;
   };
   auto post = []() {
     rex::thread::Sleep(std::chrono::milliseconds(100));
@@ -178,7 +164,7 @@ X_RESULT xeXamDispatchDialogEx(T* dialog,
   };
   if (!overlapped) {
     pre();
-    uint32_t extended_error, length;
+    uint32_t extended_error = 0, length = 0;
     auto result = run(extended_error, length);
     post();
     // TODO(gibbed): do something with extended_error/length?
@@ -256,6 +242,7 @@ class MessageBoxDialog : public XamDialog {
   }
 
   uint32_t chosen_button() const { return chosen_button_; }
+  bool cancelled() const { return cancelled_; }
 
   void OnDraw(ImGuiIO& io) override {
     bool first_draw = false;
@@ -272,11 +259,9 @@ class MessageBoxDialog : public XamDialog {
       if (description_.size()) {
         ImGui::TextWrapped("%s", description_.c_str());
       }
-      if (first_draw) {
-        ImGui::SetKeyboardFocusHere();
-      }
       for (size_t i = 0; i < buttons_.size(); ++i) {
-        if (ImGui::Button(buttons_[i].c_str(), ImVec2(96.0f * scale, 32.0f * scale))) {
+        if (ui::DrawDialogButton(buttons_[i].c_str(), ImVec2(96.0f * scale, 32.0f * scale),
+            first_draw && i == std::min<size_t>(default_button_, buttons_.size() - 1))) {
           chosen_button_ = static_cast<uint32_t>(i);
           ImGui::CloseCurrentPopup();
           Close();
@@ -284,6 +269,11 @@ class MessageBoxDialog : public XamDialog {
         if (i + 1 < buttons_.size()) {
           ImGui::SameLine();
         }
+      }
+      if (ui::DialogCancelPressed()) {
+        cancelled_ = true;
+        ImGui::CloseCurrentPopup();
+        Close();
       }
       ImGui::Spacing();
       ImGui::Spacing();
@@ -301,6 +291,7 @@ class MessageBoxDialog : public XamDialog {
   std::vector<std::string> buttons_;
   uint32_t default_button_ = 0;
   uint32_t chosen_button_ = 0;
+  bool cancelled_ = false;
 };
 
 // https://www.se7ensins.com/forums/threads/working-xshowmessageboxui.844116/
@@ -357,6 +348,7 @@ u32 XamShowMessageBoxUI_entry(u32 user_index, mapped_wstring title_ptr, mapped_w
         break;
     }
     auto close = [result_ptr](MessageBoxDialog* dialog) -> X_RESULT {
+      if (dialog->cancelled()) return X_ERROR_CANCELLED;
       *result_ptr = dialog->chosen_button();
       return X_ERROR_SUCCESS;
     };
@@ -436,7 +428,7 @@ class KeyboardInputDialog : public XamDialog {
         Close();
       }
       ImGui::SameLine();
-      if (ImGui::Button("Cancel", ImVec2(96.0f * scale, 32.0f * scale))) {
+      if (ImGui::Button("Cancel", ImVec2(96.0f * scale, 32.0f * scale)) || ui::DialogCancelPressed()) {
         text_ = "";
         cancelled_ = true;
         ImGui::CloseCurrentPopup();

@@ -10,6 +10,7 @@
  */
 
 #include <rex/assert.h>
+#include <rex/ui/imgui_controller.h>
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/imgui_drawer.h>
 
@@ -57,7 +58,10 @@ class MessageBoxDialog final : public ImGuiDialog {
   MessageBoxDialog(ImGuiDrawer* imgui_drawer, std::string title, std::string body)
       : ImGuiDialog(imgui_drawer), title_(std::move(title)), body_(std::move(body)) {}
 
+  bool CapturesControllerInput() const override { return true; }
+
   void OnDraw(ImGuiIO& io) override {
+    const bool first_draw = !has_opened_;
     if (!has_opened_) {
       ImGui::OpenPopup(title_.c_str());
       has_opened_ = true;
@@ -66,7 +70,7 @@ class MessageBoxDialog final : public ImGuiDialog {
       char* text = const_cast<char*>(body_.c_str());
       ImGui::InputTextMultiline("##body", text, body_.size(), ImVec2(600, 0),
                                 ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_ReadOnly);
-      if (ImGui::Button("OK")) {
+      if (DrawDialogButton("OK", ImVec2(0, 0), first_draw) || DialogCancelPressed()) {
         ImGui::CloseCurrentPopup();
         Close();
       }

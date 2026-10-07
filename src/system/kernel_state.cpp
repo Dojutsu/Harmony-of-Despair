@@ -27,6 +27,7 @@
 #include <rex/thread/atomic.h>
 #include <rex/string.h>
 #include <rex/kernel/xboxkrnl/threading.h>
+#include <rex/system/dispatch_wait.h>
 #include <rex/system/kernel_module.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/function_dispatcher.h>
@@ -673,12 +674,10 @@ void KernelState::SetExecutableModule(object_ref<UserModule> module) {
       auto global_lock = global_critical_region_.AcquireDeferred();
       while (dispatch_thread_running_) {
         global_lock.lock();
-        if (dispatch_queue_.empty()) {
-          dispatch_cond_.wait(global_lock);
-          if (!dispatch_thread_running_) {
-            global_lock.unlock();
-            break;
-          }
+        if (!WaitForDispatchWork(dispatch_cond_, global_lock,
+                                 dispatch_thread_running_, dispatch_queue_)) {
+          global_lock.unlock();
+          break;
         }
         auto fn = std::move(dispatch_queue_.front());
         dispatch_queue_.pop_front();

@@ -36,12 +36,15 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
 
   void EnumerateDevices(std::vector<DeviceInfo>& out) override;
   X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) override;
+  X_RESULT GetDeviceStateForUI(DeviceId id, X_INPUT_STATE* out_state) override;
   X_RESULT GetDeviceCapabilities(DeviceId id, uint32_t flags,
                                  X_INPUT_CAPABILITIES* out_caps) override;
   X_RESULT SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibration) override;
   X_RESULT GetDeviceKeystroke(DeviceId id, uint32_t flags,
                               X_INPUT_KEYSTROKE* out_keystroke) override;
   void OnWindowAvailable(rex::ui::Window* window) override;
+  // Native host UI and event-only fixtures may attach before a window exists.
+  void AttachUIContext(rex::ui::WindowedAppContext& context);
 
  private:
   enum class RepeatState {
@@ -74,6 +77,8 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
   void OnLostFocus(rex::ui::UISetupEvent& e) override;
   void OnGotFocus(rex::ui::UISetupEvent& e) override;
 
+  static bool SDLCALL WatchEvent(void* userdata, SDL_Event* event);
+  void ShutdownControllerEvents();
   void HandleEvent(const SDL_Event& event);
   std::unique_lock<std::mutex> DrainAndLock();
   void ProcessEventLocked(const SDL_Event& event);
@@ -91,6 +96,8 @@ class SDLInputDriver final : public InputDriver, public rex::ui::WindowListener 
   void QueueControllerUpdate();
 
   rex::ui::Window* attached_window_ = nullptr;
+  rex::ui::WindowedAppContext* controller_context_ = nullptr;
+  bool event_watch_registered_ = false;
   bool sdl_events_initialized_;
   bool SDL_Gamepad_initialized_;
   std::atomic<int> sdl_events_unflushed_;

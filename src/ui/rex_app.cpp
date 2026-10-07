@@ -253,6 +253,12 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
   if (imgui_drawer_) {
     auto* input_sys = static_cast<rex::input::InputSystem*>(runtime_->input_system());
     if (input_sys) {
+      imgui_drawer_->SetControllerInput([input_sys](input::X_INPUT_GAMEPAD& pad) {
+        input::X_INPUT_STATE state{};
+        if (input_sys->GetStateForUI(0, &state) != X_ERROR_SUCCESS) return false;
+        pad = state.gamepad;
+        return true;
+      }, [input_sys](bool captured) { input_sys->SetUIControllerCapture(captured); });
       input_sys->SetActiveCallback([this]() {
         if (!debug_overlay_ && !console_overlay_ && !settings_overlay_ && !achievements_overlay_)
           return true;

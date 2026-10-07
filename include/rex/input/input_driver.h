@@ -38,6 +38,12 @@ class InputDriver {
   virtual void EnumerateDevices(std::vector<DeviceInfo>& out) = 0;
 
   virtual X_RESULT GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) = 0;
+  // UI sampling must not consume guest keystrokes or start a test timeline.
+  virtual X_RESULT GetDeviceStateForUI(DeviceId, X_INPUT_STATE*) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+  // Observe the effective guest state after modal capture has been applied.
+  virtual void OnGuestStateDelivered(DeviceId, const X_INPUT_STATE&, bool /*ui_consumed*/) {}
   virtual X_RESULT GetDeviceCapabilities(DeviceId id, uint32_t flags,
                                          X_INPUT_CAPABILITIES* out_caps) = 0;
   virtual X_RESULT SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* vibration) = 0;

@@ -19,6 +19,8 @@
 #include <optional>
 #include <vector>
 
+#include <rex/input/input.h>
+#include <rex/ui/imgui_controller.h>
 #include <rex/ui/immediate_drawer.h>
 #include <rex/ui/presenter.h>
 #include <rex/ui/style.h>
@@ -62,6 +64,11 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
   }
 
   void Draw(UIDrawContext& ui_draw_context) override;
+  void SetControllerInput(std::function<bool(input::X_INPUT_GAMEPAD&)> sample,
+                          std::function<void(bool)> capture) {
+    controller_sample_ = std::move(sample);
+    controller_capture_ = std::move(capture);
+  }
 
  protected:
   void OnKeyDown(KeyEvent& e) override;
@@ -91,6 +98,11 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
 
   std::optional<ImGuiKey> VirtualKeyToImGuiKey(VirtualKey vkey);
 
+  bool CapturesControllerInput() const;
+  void UpdateControllerCapture();
+  std::function<bool(input::X_INPUT_GAMEPAD&)> controller_sample_;
+  std::function<void(bool)> controller_capture_;
+  ControllerNavigation controller_navigation_;
   Window* window_;
   size_t z_order_;
   FontSetupCallback font_setup_;

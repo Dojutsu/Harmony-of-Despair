@@ -130,6 +130,15 @@ add_test(NAME accepted_invite_kernel COMMAND accepted_invite_kernel_test)
 # Fatal native faults are isolated in bounded child processes. This fixture
 # targets the current Linux x86-64 startup ABI, not guest SEH unwind parity.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    add_executable(controller_ui_test ui/controller_ui_test.cpp)
+    target_link_libraries(controller_ui_test PRIVATE rexruntime imgui::imgui)
+    target_compile_options(controller_ui_test PRIVATE -UREXGLUE_ENABLE_PROFILING)
+    set_target_properties(controller_ui_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>
+        INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
+    add_test(NAME controller_ui COMMAND controller_ui_test)
+    set_tests_properties(controller_ui PROPERTIES LABELS "linux;ui;input" TIMEOUT 60)
+
     # Compile the actual pure-C++ dispatch template, so tests cannot silently
     # diverge from the macro emitted into every recompiled module.
     configure_file(${PROJECT_SOURCE_DIR}/resources/templates/codegen/_indirect_call.inja

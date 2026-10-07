@@ -148,6 +148,7 @@ void ImGuiDrawer::RemoveDialog(ImGuiDialog* dialog) {
     }
   }
   dialogs_.erase(it);
+  UpdateControllerCapture();
   DetachIfLastDialogRemoved();
 }
 
@@ -158,6 +159,7 @@ void ImGuiDrawer::Initialize() {
   ImGui::SetCurrentContext(internal_state_);
 
   auto& io = ImGui::GetIO();
+  ConfigureControllerNavigation(io);
 
   auto& platform_io = ImGui::GetPlatformIO();
   platform_io.Platform_SetImeDataFn = PlatformSetImeData;
@@ -376,6 +378,17 @@ void ImGuiDrawer::SetImmediateDrawer(ImmediateDrawer* new_immediate_drawer) {
   }
 }
 
+bool ImGuiDrawer::CapturesControllerInput() const {
+  return std::any_of(dialogs_.begin(), dialogs_.end(), [](const ImGuiDialog* dialog) {
+    return dialog->CapturesControllerInput();
+  });
+}
+void ImGuiDrawer::UpdateControllerCapture() {
+  const bool capture = CapturesControllerInput();
+  controller_navigation_.SetCaptured(capture);
+  if (controller_capture_) controller_capture_(capture);
+}
+
 void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
   // Drawing is initiated by the presenter (SDK mode), or by the app in detached
   // mode (config.graphics == nullptr), where there is no presenter.
@@ -412,6 +425,10 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
   io.DisplaySize.x = window_->GetActualPhysicalWidth() * physical_to_logical;
   io.DisplaySize.y = window_->GetActualPhysicalHeight() * physical_to_logical;
 
+  UpdateControllerCapture();
+  input::X_INPUT_GAMEPAD controller{};
+  const bool connected = window_->HasFocus() && controller_sample_ && controller_sample_(controller);
+  controller_navigation_.Update(io, controller, connected);
   ImGui::NewFrame();
 
   assert_true(!IsDrawingDialogs());
