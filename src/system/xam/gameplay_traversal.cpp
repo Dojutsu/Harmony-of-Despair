@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <mutex>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <rex/logging.h>
@@ -136,8 +137,12 @@ bool InstallRoutes(Scope& scope) {
     }
     auto logical = peer.logical;
     logical.port = scope.guest_port;
-    if (!NatProbeInstallGameplayIdentity(peer.traversal, *scope.socket, logical,
-                                         scope.authorization.expires_at)) return false;
+    const bool installed = peer.authenticated_lan_endpoint
+        ? NatProbeInstallAuthenticatedLanPeer(peer.traversal, *scope.socket, logical,
+            *peer.authenticated_lan_endpoint, scope.authorization.expires_at)
+        : NatProbeInstallGameplayIdentity(peer.traversal, *scope.socket, logical,
+            scope.authorization.expires_at);
+    if (!installed) return false;
   }
   return true;
 }
@@ -229,6 +234,7 @@ bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
   std::unordered_set<uint64_t> peers{authorization.xuid};
   std::unordered_set<uint32_t> addresses{authorization.logical.ipv4};
   std::unordered_set<std::string> links;
+  std::set<std::pair<uint32_t, uint16_t>> private_endpoints;
   for (const auto& peer : authorization.peers) {
     if (!peer.xuid) return reject("peer_missing_xuid");
     if (!peers.insert(peer.xuid).second) return reject("duplicate_peer_xuid");
@@ -241,6 +247,15 @@ bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
     if (!links.insert(peer.traversal.attempt_id).second) return reject("duplicate_peer_attempt");
     if (!ParseLink(peer.traversal.attempt_id)) return reject("invalid_crypto_link");
     if (SameTrafficKey(peer.traffic_key, {})) return reject("missing_peer_traffic_key");
+    if (peer.authenticated_lan_endpoint) {
+      const auto endpoint = *peer.authenticated_lan_endpoint;
+      const auto ip = ntohl(endpoint.ipv4);
+      const bool private_ip = (ip >> 24) == 127 || (ip >> 24) == 10 ||
+                              (ip >> 20) == 0xac1 || (ip >> 16) == 0xc0a8;
+      if (!endpoint.port || !private_ip ||
+          !private_endpoints.emplace(endpoint.ipv4, endpoint.port).second)
+        return reject("invalid_private_lan_endpoint");
+    }
   }
   Scope candidate;
   candidate.session = session;
@@ -273,6 +288,7 @@ bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
           previous->admission_generation != peer.admission_generation ||
           previous->logical.ipv4 != peer.logical.ipv4 ||
           previous->traversal.participant != peer.traversal.participant ||
+          previous->authenticated_lan_endpoint != peer.authenticated_lan_endpoint ||
           !SameTrafficKey(previous->traffic_key, peer.traffic_key)) return reject("crypto_link_changed");
       const auto state = found->ciphers.find(peer.traversal.attempt_id);
       if (state == found->ciphers.end()) return reject("missing_existing_crypto_state");

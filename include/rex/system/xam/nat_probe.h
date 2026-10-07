@@ -65,6 +65,11 @@ bool NatProbeInstallIdentityForSocket(const NatProbeIdentity& identity,
 bool NatProbeInstallGameplayIdentity(const NatProbeIdentity& identity, uint64_t socket,
                                       LanAddress logical,
                                       std::chrono::steady_clock::time_point expires_at);
+// Local platform authority installs one exact private endpoint from a verified
+// per-member ticket. Direct routes do not contact rendezvous or consume raw
+// HNAT controls, and retain the ordinary encrypted gameplay scope lifetime.
+bool NatProbeInstallAuthenticatedLanPeer(const NatProbeIdentity& identity, uint64_t socket,
+    LanAddress logical, LanAddress native, std::chrono::steady_clock::time_point expires_at);
 void NatProbeRemoveGameplayIdentity(uint64_t socket, std::string_view attempt_id);
 std::optional<LanAddress> NatProbeGameplayDestination(uint64_t socket, LanAddress logical);
 bool NatProbeIsPendingGameplaySource(uint64_t socket, LanAddress native);

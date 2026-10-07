@@ -82,6 +82,7 @@ struct Identity {
   bool automatic = false;
   uint64_t owner_socket = 0;
   bool gameplay_authorized = false;
+  bool direct_lan = false;
   std::chrono::steady_clock::time_point expires_at{};
   std::string key;
 };
@@ -450,6 +451,42 @@ bool NatProbeInstallGameplayIdentity(const NatProbeIdentity& value, uint64_t soc
   return true;
 }
 
+bool NatProbeInstallAuthenticatedLanPeer(const NatProbeIdentity& value, uint64_t socket,
+    LanAddress logical, LanAddress native, std::chrono::steady_clock::time_point expires_at) {
+  const auto ip = ntohl(native.ipv4);
+  const bool private_ip = (ip >> 24) == 127 || (ip >> 24) == 10 ||
+                          (ip >> 20) == 0xac1 || (ip >> 16) == 0xc0a8;
+  Identity identity{};
+  if (value.participant > 1 || !logical.ipv4 || !logical.port || !native.port || !private_ip ||
+      expires_at <= std::chrono::steady_clock::now() ||
+      !ParseHex(value.attempt_id, identity.attempt.data()) ||
+      !ParseHex(value.capability, identity.capability.data()) ||
+      !std::any_of(identity.attempt.begin(), identity.attempt.end(), [](uint8_t b) { return b != 0; }) ||
+      !std::any_of(identity.capability.begin(), identity.capability.end(), [](uint8_t b) { return b != 0; }))
+    return false;
+  identity.key = value.attempt_id; identity.participant = value.participant;
+  identity.owner_socket = socket; identity.gameplay_authorized = true;
+  identity.direct_lan = true; identity.expires_at = expires_at;
+  std::lock_guard lock(state_mutex);
+  auto found = states.find(socket);
+  if (found == states.end() || found->second.role != NatProbeRole::kGameplay) return false;
+  auto old = found->second.attempts.find(identity.key);
+  if (old != found->second.attempts.end()) {
+    if (!old->second.identity.direct_lan || !old->second.identity.gameplay_authorized ||
+        old->second.identity.capability != identity.capability ||
+        old->second.identity.participant != identity.participant ||
+        old->second.logical_gameplay_peer != logical ||
+        old->second.endpoint.acknowledged_peer() != native) return false;
+    old->second.identity.expires_at = expires_at;
+  } else {
+    AttemptState route; route.identity = identity; route.logical_gameplay_peer = logical;
+    route.attached_at = std::chrono::steady_clock::now();
+    if (!route.endpoint.UpdatePeer(native) || !route.endpoint.Acknowledge(native)) return false;
+    found->second.attempts.emplace(identity.key, std::move(route));
+  }
+  return true;
+}
+
 bool NatProbeIsPendingGameplaySource(uint64_t socket, LanAddress native) {
   std::lock_guard lock(state_mutex);
   auto found = states.find(socket);
@@ -614,6 +651,7 @@ void NatProbeTickLocked(uint64_t socket, State& state,
       iterator = state.attempts.erase(iterator);
       continue;
     }
+    if (attempt.identity.direct_lan) { ++iterator; continue; }
     if (attempt.identity.automatic && !attempt.identity.gameplay_authorized &&
         now - attempt.attached_at >= std::chrono::seconds(20)) {
       if (!attempt.endpoint.acknowledged() && !attempt.invite_lan_peer) {
@@ -710,6 +748,7 @@ bool NatProbeIsControlPacket(uint64_t socket, const uint8_t* data, size_t size,
                               });
   if (attempt == found->second.attempts.end()) return false;
   const auto& attempt_state = attempt->second;
+  if (attempt_state.identity.direct_lan) return false;
   if (attempt_state.identity.gameplay_authorized &&
       (std::chrono::steady_clock::now() >= attempt_state.identity.expires_at ||
        (packet.type == kRegistered && LanAddress{source_ipv4, source_port} != attempt_state.identity.server)))
@@ -758,6 +797,7 @@ bool NatProbeConsume(uint64_t socket, const uint8_t* data, size_t size, uint32_t
     return false;
   }
   auto& attempt_state = attempt->second;
+  if (attempt_state.identity.direct_lan) return false;
   if (attempt_state.identity.gameplay_authorized &&
       (std::chrono::steady_clock::now() >= attempt_state.identity.expires_at ||
        (packet.type == kRegistered && LanAddress{source_ipv4, source_port} != attempt_state.identity.server)))

@@ -18,6 +18,9 @@ struct GameplayPeerAuthorization {
   LanAddress logical;
   NatProbeIdentity traversal;
   GameplayTrafficKey traffic_key{};
+  // Present only after an authenticated private LAN ticket supplies the exact
+  // physical route. It never creates membership or a public fallback.
+  std::optional<LanAddress> authenticated_lan_endpoint;
 };
 
 struct GameplayAuthorization {

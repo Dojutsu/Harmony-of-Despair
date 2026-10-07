@@ -23,6 +23,7 @@ add_executable(unit_tests
     system/gameplay_datagram_test.cpp
     system/private_lan_invitation_test.cpp
     system/private_lan_payload_test.cpp
+    system/private_lan_authority_test.cpp
     system/session_test.cpp
     system/session_arbitration_test.cpp
     system/session_arbitration_crypto_test.cpp

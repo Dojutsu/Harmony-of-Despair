@@ -52,3 +52,11 @@ This checkpoint provides the tested file loader, possession proofs, authenticate
 ticket-envelope component and local generator. The discovery/bootstrap and protected gameplay integration remain
 active work; possession-proof unit tests alone do not establish playable LAN
 multiplayer or authenticate an unauthenticated X25519 exchange.
+
+## Private pair authority and direct routes
+
+`PrivateLanAuthority` verifies a distinct expected-client invitation proof over the full title/session identity, machine, fresh challenge and request, recipient key and private gameplay endpoint. It issues fresh member generations and independent per-pair traffic keys, link IDs and capabilities. Exact retries retain these keys; departures tombstone the old challenge, and a fresh authenticated rejoin rotates only affected links. Exact-size private tickets bind the complete session fingerprint and reject duplicate identities, aliases, links, physical routes and invalid fields.
+
+A verified ticket supplies `authenticated_lan_endpoint` to the existing gameplay authorization. Direct routes reuse the existing protected socket scope and cipher lifetime, avoid rendezvous/DNS/punching, ignore HNAT controls, reject public routes and refuse endpoint mutation during a retained link. This is a trusted local API, never a network-facing membership grant. Production LAN discovery has not yet been connected to this authority.
+
+Validation at the foundation checkpoint: clean pinned Steam Runtime 4 SDK build and 477/477 CTests passed; standalone authority proof passed 434 checks in Clang release and GCC ASan/UBSan before the final direct-route integration. The independent three-process real XSocket fixture is being added separately; actual title gameplay has not run.
