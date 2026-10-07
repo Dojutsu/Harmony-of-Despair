@@ -1,5 +1,6 @@
 /** Normal-context ownership tests; hardware capture is covered by guest_fault_test. */
 #include <rex/platform/guest_fault_state.h>
+#include <rex/platform/guest_memory.h>
 #include <rex/platform/exceptions.h>
 #include <rex/platform/seh.h>
 
@@ -375,5 +376,94 @@ TEST_CASE("Fault ownership rejects invalid transport before continuation", "[gue
       } catch (...) {
       }
     }, "exception-during-deferred-adjudication");
+  }
+}
+
+TEST_CASE("Normal memory consumers preserve nullable checked ownership", "[guest_fault][consumer]") {
+  SECTION("No current owner establishes and releases a root") {
+    REQUIRE(CurrentForAccessOrNull() == nullptr);
+    {
+      detail::MemoryConsumer consumer;
+      auto* owner = CurrentForAccessOrNull();
+      REQUIRE(owner != nullptr);
+      CHECK(owner == ExecutionActivation::Current());
+      uint32_t value = 42;
+      CHECK(Read<uint32_t>(&value) == 42);
+      CHECK(CurrentForAccessOrNull() == owner);
+      CHECK(owner->published_faults() == 0);
+    }
+    CHECK(CurrentForAccessOrNull() == nullptr);
+  }
+  SECTION("Existing running owner stays identical across consumers") {
+    ExecutionActivation owner;
+    const auto id = owner.id();
+    {
+      detail::MemoryConsumer consumer;
+      CHECK(CurrentForAccessOrNull() == &owner);
+      CHECK(ExecutionActivation::Current()->id() == id);
+      uint32_t value = 43;
+      Write<uint32_t>(&value, 44);
+      CHECK(Read<uint32_t>(&value) == 44);
+    }
+    CHECK(CurrentForAccessOrNull() == &owner);
+    CHECK(owner.published_faults() == 0);
+  }
+  SECTION("Pending fault rejects before the normal consumer leaf") {
+    CheckViolation([] {
+      ExecutionActivation owner;
+      owner.Publish(FakeCapture());
+      (void)Read<uint32_t>(nullptr);
+    }, "guest-continuation-with-pending-fault");
+  }
+  SECTION("Adjudication rejects before the normal consumer leaf") {
+    CheckViolation([] {
+      ExecutionActivation owner;
+      auto fault = FakeCapture();
+      AdjudicationScope adjudication(fault);
+      (void)Read<uint32_t>(nullptr);
+    }, "guest-access-during-adjudication");
+  }
+  SECTION("Pending owner refuses consumer construction before another effect") {
+    CheckViolation([] {
+      ExecutionActivation owner;
+      owner.Publish(FakeCapture());
+      detail::MemoryConsumer consumer;
+      std::_Exit(0);
+    }, "guest-continuation-with-pending-fault");
+  }
+  SECTION("Adjudication refuses consumer construction before another effect") {
+    CheckViolation([] {
+      ExecutionActivation owner;
+      auto fault = FakeCapture();
+      AdjudicationScope adjudication(fault);
+      detail::MemoryConsumer consumer;
+      std::_Exit(0);
+    }, "guest-access-during-adjudication");
+  }
+  SECTION("Nullable accessor itself retains the same pending refusal") {
+    CheckViolation([] {
+      ExecutionActivation owner;
+      owner.Publish(FakeCapture());
+      (void)CurrentForAccessOrNull();
+      std::_Exit(0);
+    }, "guest-continuation-with-pending-fault");
+  }
+  SECTION("Fresh native thread establishes its own independent consumer") {
+    ExecutionActivation parent;
+    std::atomic<bool> good{false};
+    std::thread child([&] {
+      bool valid = CurrentForAccessOrNull() == nullptr;
+      {
+        detail::MemoryConsumer consumer;
+        auto* owner = CurrentForAccessOrNull();
+        valid = valid && owner && owner != &parent;
+        uint32_t value = 45;
+        valid = valid && Read<uint32_t>(&value) == 45;
+      }
+      good = valid && CurrentForAccessOrNull() == nullptr;
+    });
+    child.join();
+    CHECK(good);
+    CHECK(CurrentForAccessOrNull() == &parent);
   }
 }

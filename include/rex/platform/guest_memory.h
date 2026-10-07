@@ -20,7 +20,9 @@ void RequireFillRange(void*,size_t) noexcept;
 // Try APIs, and return failure to a designated consumer before another effect.
 class MemoryConsumer {
  public:
-  MemoryConsumer() { if (!ExecutionActivation::Current()) root_.emplace(); RequireAccess(); }
+  MemoryConsumer() {
+    if (!CurrentForAccessOrNull()) { root_.emplace(); RequireAccess(); }
+  }
  private:
   std::optional<ExecutionActivation> root_;
 };

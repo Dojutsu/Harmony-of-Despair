@@ -78,14 +78,24 @@ void ExecutionActivation::RequireCurrent() const noexcept {
   if (current_activation != this) FaultContractFailure("wrong-activation-or-thread");
 }
 
-void RequireAccess() noexcept {
+namespace {
+// One normal-context admission implementation for strict and nullable callers.
+ExecutionActivation* CheckedAccessOwner(bool required) noexcept {
   if (InSignalContext()) std::_Exit(139);
   auto* owner = current_activation;
-  if (!owner) FaultContractFailure("guest-access-without-activation");
-  if (owner->phase_ != ActivationPhase::Running)
+  if (!owner) {
+    if (required) FaultContractFailure("guest-access-without-activation");
+    return nullptr;
+  }
+  if (owner->phase() != ActivationPhase::Running)
     FaultContractFailure("guest-access-during-adjudication");
-  if (owner->has_pending_fault_) FaultContractFailure("guest-continuation-with-pending-fault");
+  if (owner->HasPendingFault()) FaultContractFailure("guest-continuation-with-pending-fault");
+  return owner;
 }
+}  // namespace
+
+ExecutionActivation* CurrentForAccessOrNull() noexcept { return CheckedAccessOwner(false); }
+void RequireAccess() noexcept { (void)CheckedAccessOwner(true); }
 
 FaultToken ExecutionActivation::Publish(const CapturedFault& fault) noexcept {
   RequireCurrent();

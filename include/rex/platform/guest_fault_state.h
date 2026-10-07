@@ -88,6 +88,8 @@ class ExecutionActivation {
 
 /// Refuse access before entering a leaf when ownership or phase is invalid.
 void RequireAccess() noexcept;
+/// Validate a current owner, or return null for a consumer that establishes one.
+ExecutionActivation* CurrentForAccessOrNull() noexcept;
 /// Validate normal transport against the creating activation/thread; no consume.
 void ValidateFaultToken(FaultToken token) noexcept;
 
