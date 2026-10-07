@@ -20,6 +20,7 @@
 #include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/input/nop/nop_input_driver.h>
 #include <rex/input/sdl/sdl_input_driver.h>
+#include <rex/input/scripted/scripted_input_driver.h>
 #include <rex/input/state_merge.h>
 #include <rex/input/xinput/xinput_input_driver.h>
 #include <rex/logging.h>
@@ -30,6 +31,8 @@ REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput
     .allowed({"sdl", "xinput"});
 
 REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-through");
+REXCVAR_DEFINE_STRING(input_script, "", "Input",
+                     "Opt-in offline test controller schedule (local file, starts on first guest poll)");
 namespace rex::input {
 
 namespace {
@@ -325,6 +328,14 @@ X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
 
 std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode) {
   auto input = std::make_unique<InputSystem>(nullptr);
+
+  if (!tool_mode && !REXCVAR_GET(input_script).empty()) {
+    auto driver = std::make_unique<scripted::ScriptedInputDriver>(REXCVAR_GET(input_script));
+    if (driver->Setup() != X_STATUS_SUCCESS) return nullptr;
+    input->AddDriver(std::move(driver));
+    input->SetDeviceAssignment(std::make_unique<SlotAssignment>());
+    return input;
+  }
 
 #if REX_PLATFORM_GNU_LINUX
   const bool headless = REXCVAR_GET(headless);
