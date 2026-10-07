@@ -29,6 +29,16 @@ namespace rex::cvar {
 
 namespace {
 
+// Directory addresses and invitation codes can contain credentials or bearer
+// material. Preserve their real values for parsing while withholding them from
+// configuration diagnostics on every success and rejection path.
+std::string_view DiagnosticValue(std::string_view name, std::string_view value) {
+  if (name == "session_directory_url" || name == "session_directory_invite_code") {
+    return "<redacted>";
+  }
+  return value;
+}
+
 bool g_finalized = false;
 bool g_lifecycle_override = false;
 std::mutex g_mutex;
@@ -124,7 +134,7 @@ void ApplyTomlTable(const toml::table& table, const std::string& prefix) {
 
       switch (SetFlagFromSource(full_key, value_str, Source::kConfig)) {
         case ApplyResult::kApplied:
-          REXLOG_DEBUG("Config: {} = {}", full_key, value_str);
+          REXLOG_DEBUG("Config: {} = {}", full_key, DiagnosticValue(full_key, value_str));
           break;
         case ApplyResult::kSkipped:
           REXLOG_DEBUG("Config: {} ignored, already set by a higher-priority source", full_key);
@@ -178,11 +188,11 @@ bool ValidateConstraints(const FlagEntry& entry, std::string_view value) {
     }
 
     if (c.min.has_value() && numeric_val < *c.min) {
-      REXLOG_WARN("Flag '{}': value {} below min ({})", entry.name, value, *c.min);
+      REXLOG_WARN("Flag '{}': value {} below min ({})", entry.name, DiagnosticValue(entry.name, value), *c.min);
       return false;
     }
     if (c.max.has_value() && numeric_val > *c.max) {
-      REXLOG_WARN("Flag '{}': value {} exceeds max ({})", entry.name, value, *c.max);
+      REXLOG_WARN("Flag '{}': value {} exceeds max ({})", entry.name, DiagnosticValue(entry.name, value), *c.max);
       return false;
     }
   }
@@ -197,14 +207,14 @@ bool ValidateConstraints(const FlagEntry& entry, std::string_view value) {
       }
     }
     if (!found) {
-      REXLOG_WARN("Flag '{}': '{}' not in allowed values", entry.name, value);
+      REXLOG_WARN("Flag '{}': '{}' not in allowed values", entry.name, DiagnosticValue(entry.name, value));
       return false;
     }
   }
 
   // Custom validator
   if (c.custom_validator && !c.custom_validator(value)) {
-    REXLOG_WARN("Flag '{}': custom validation failed for '{}'", entry.name, value);
+    REXLOG_WARN("Flag '{}': custom validation failed for '{}'", entry.name, DiagnosticValue(entry.name, value));
     return false;
   }
 
@@ -678,7 +688,8 @@ void LoadConfig(const std::filesystem::path& config_path) {
     ApplyTomlTable(config, "");
     REXLOG_DEBUG("Loaded config from {}", config_path.string());
   } catch (const toml::parse_error& err) {
-    REXLOG_ERROR("Failed to parse config {}: {}", config_path.string(), err.what());
+    REXLOG_ERROR("Failed to parse config {} at line {}, column {}", config_path.string(),
+                 err.source().begin.line, err.source().begin.column);
   }
 }
 
@@ -695,10 +706,10 @@ void ApplyEnvironment() {
       continue;
     }
     if (ApplyFromSource(entry, *env_value, Source::kEnvironment)) {
-      REXLOG_DEBUG("Env: {} = {} (from {})", entry.name, *env_value, env_name);
+      REXLOG_DEBUG("Env: {} = {} (from {})", entry.name, DiagnosticValue(entry.name, *env_value), env_name);
       ++count;
     } else {
-      REXLOG_WARN("Env: failed to parse {} = {}", env_name, *env_value);
+      REXLOG_WARN("Env: failed to parse {} = {}", env_name, DiagnosticValue(entry.name, *env_value));
     }
   }
 
