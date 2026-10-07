@@ -2,7 +2,7 @@
   "schema": 1,
   "repository": "../rexglue-sdk",
   "branch": "full-send-comp",
-  "commit": "8139a09a9fb5c70c5d1df289435069f9b625161a",
+  "commit": "2d612fe0d3f18aff01ff011eb1b2bfc4f748cc2c",
   "integration_base": "7ea08238e41474b4d46f2ed1e4f6177172b86574",
   "windows_lock": "rexglue-sdk.lock.json",
   "environment_lock": "../tools/linux-steamos/steamrt4.lock.json",
