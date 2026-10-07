@@ -257,3 +257,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             "${PROJECT_SOURCE_DIR}/tests/compile/scripted_input_append_test.py")
     set_tests_properties(scripted_input_append_helper PROPERTIES LABELS "linux;input" TIMEOUT 20)
 endif()
+
+# Each CLI case execs a fresh process; no registry reset hides startup behavior.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(cvar_cli_test core/cvar_cli_test.cpp)
+    target_link_libraries(cvar_cli_test PRIVATE rexruntime)
+    set_target_properties(cvar_cli_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>
+        INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
+    add_test(NAME cvar_cli COMMAND cvar_cli_test)
+    set_tests_properties(cvar_cli PROPERTIES LABELS "linux;cvar" TIMEOUT 20)
+endif()

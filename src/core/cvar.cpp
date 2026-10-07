@@ -580,6 +580,35 @@ void UnregisterChangeCallbacks(std::string_view name) {
 //=============================================================================
 
 std::vector<std::string> Init(int argc, char** argv) {
+  // CLI11 treats --string= as an option without an attached value and consumes
+  // the next token. Supply a distinct empty argument in a private argv copy.
+  // Preserve required separated values verbatim, even when they look like
+  // options, and stop recognizing options at an unconsumed -- separator.
+  std::vector<std::string> parse_arguments;
+  bool options = true;
+  for (int i = 0; i < argc; ++i) {
+    std::string_view argument(argv[i]);
+    parse_arguments.emplace_back(argument);
+    if (i == 0 || !options) continue;
+    if (argument == "--") { options = false; continue; }
+    if (!argument.starts_with("--")) continue;
+    const auto equals = argument.find('=');
+    const auto name = argument.substr(2, equals == std::string_view::npos ? equals : equals - 2);
+    const auto* entry = GetFlagInfo(name);
+    if (!entry) continue;  // Deferred module options retain their original form.
+    const bool empty_attached = equals != std::string_view::npos && equals + 1 == argument.size();
+    if (entry->type == FlagType::String && empty_attached) {
+      parse_arguments.back().pop_back();
+      parse_arguments.emplace_back();
+    } else if (entry->type != FlagType::Boolean &&
+               (equals == std::string_view::npos || empty_attached) && i + 1 < argc) {
+      parse_arguments.emplace_back(argv[++i]);
+    }
+  }
+  std::vector<char*> parse_argv;
+  parse_argv.reserve(parse_arguments.size());
+  for (auto& argument : parse_arguments) parse_argv.push_back(argument.data());
+
   CLI::App app{"", ""};
   app.allow_extras();
 
@@ -600,7 +629,7 @@ std::vector<std::string> Init(int argc, char** argv) {
   }
 
   try {
-    app.parse(argc, argv);
+    app.parse(static_cast<int>(parse_argv.size()), parse_argv.data());
   } catch (const CLI::ParseError& e) {
     // TODO(tomc): dumb workaround for the stupid chicken and its egg.
     //             dont call rex logging funcs here for now.
@@ -611,9 +640,11 @@ std::vector<std::string> Init(int argc, char** argv) {
   // forms: --name=value, --name (true), --no-name (false); a separated
   // "--name value" pair is ambiguous with a positional, so never consumed.
   std::vector<std::string> positional;
+  bool positional_only = false;
   for (const auto& arg : app.remaining()) {
     std::string_view view(arg);
-    if (!view.starts_with("--")) {
+    if (!positional_only && view == "--") { positional_only = true; continue; }
+    if (positional_only || !view.starts_with("--")) {
       positional.push_back(arg);
       continue;
     }
