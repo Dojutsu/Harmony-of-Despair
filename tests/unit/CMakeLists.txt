@@ -7,6 +7,7 @@ add_executable(unit_tests
     kernel/object_table_test.cpp
     kernel/xgi_app_test.cpp
     core/cvar_test.cpp
+    core/wait_multiple_timeout_test.cpp
     core/cvar_privacy_test.cpp
     core/fiber_test.cpp
     core/filesystem_test.cpp

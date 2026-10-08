@@ -367,6 +367,11 @@ class PosixConditionBase {
 
       if (!all_locked) {
         locks.clear();
+        // A contended condition mutex must not bypass the caller's deadline.
+        // Keep partial acquisitions released before returning or yielding.
+        if (std::chrono::steady_clock::now() >= end_time) {
+          return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
+        }
         std::this_thread::yield();
         continue;
       }
