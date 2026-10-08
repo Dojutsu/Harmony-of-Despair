@@ -66,7 +66,8 @@ def main():
     parser.add_argument('--sdk-root', type=Path, default=Path(__file__).resolve().parents[2])
     args = parser.parse_args()
     template = (args.sdk_root / 'resources/templates/codegen/pch_h.inja').read_text()
-    start = template.index('#if REX_PLATFORM_WIN32 || (REX_PLATFORM_MAC && REX_ARCH_ARM64)')
+    # Include the static consumer selector that the access macros depend on.
+    start = template.index('// The optional Linux function scope')
     end = template.index('//=============================================================================\n// Function Dispatch', start)
     # Compile the actual emitted static macro block. Stubs describe call syntax;
     # production API and runtime semantics are covered by the focused unit tests.
