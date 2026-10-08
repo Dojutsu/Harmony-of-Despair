@@ -299,6 +299,10 @@ if(UNIX AND NOT APPLE)
     set(SDL_PULSEAUDIO_SHARED ON  CACHE BOOL "" FORCE)
     set(SDL_PIPEWIRE          ON  CACHE BOOL "" FORCE)
     set(SDL_PIPEWIRE_SHARED   ON  CACHE BOOL "" FORCE)
+    # Headless native diagnostics explicitly select dummy audio. Keep its real
+    # timed SDL callback backend so guest audio queues still consume frames.
+    # Physical ALSA/PulseAudio/PipeWire drivers remain available for normal play.
+    set(SDL_DUMMYAUDIO        ON  CACHE BOOL "" FORCE)
 endif()
 
 add_subdirectory(sdl3)
