@@ -116,3 +116,55 @@ TEST_CASE("private LAN missing invalid grants fail closed without preventing loc
 #endif
 }
 } // namespace rex::system::xam
+
+namespace rex::system::xam {
+TEST_CASE("private LAN title order advertises then binds before public-slot join", "[network][security][private-title-bind]") {
+#if REX_PLATFORM_GNU_LINUX
+  PrivateConfiguration configuration;Grants grants;constexpr uint32_t title=0x58410a7a;const auto port=FreePort();
+  REXCVAR_SET(private_lan_invitation_file,(grants.directory/"host.hpli").string());
+  SessionRegistry host_registry;
+  auto hosted=host_registry.Create(1,"PrivateTitleHost",{htonl(INADDR_LOOPBACK),3074},0x42f,6,0);REQUIRE(hosted);
+  LanDiscoveryService host(title,port);host.SetArbitrationMachineId(host_registry.local_machine_id());REQUIRE(host.Advertise(hosted));
+  // The real title opens/binds gameplay UDP only after XSessionCreate advertises.
+  RuntimeSocket host_socket(1);REQUIRE(host_registry.UpdateHostedPort(1,host_socket.address.port)==1);
+  REXCVAR_SET(private_lan_invitation_file,(grants.directory/"client.hpli").string());
+  RuntimeSocket client_socket(2);REXCVAR_SET(lan_gameplay_port,uint32_t(client_socket.address.port));
+  LanDiscoveryService client(title,port);SessionRegistry client_registry;client.SetArbitrationMachineId(client_registry.local_machine_id());
+  auto found=client.Search(500,1);REQUIRE(found.size()==1);REQUIRE(found[0].info.host_address==host_socket.address);
+  auto actual=client_registry.UpsertDiscovered(std::move(found[0]));REQUIRE(actual);
+  SessionMember member{2,"PublicTitleClient",0,true,false,false};
+  auto joined=client.Join(*actual,member,500);REQUIRE(joined);
+  REQUIRE(client_registry.CommitJoinedRecord(actual,std::move(*joined),[]{return true;}));
+  REQUIRE(client.ActivatePrivateLanGameplay(actual,2));
+  ExchangeGameplay(client_socket,host_socket,1,61);ExchangeGameplay(host_socket,client_socket,2,83);
+  REQUIRE(client.Leave(*actual,2,500));
+  host.StopAdvertising();
+#endif
+}
+}
+
+namespace rex::system::xam {
+TEST_CASE("private LAN title order binds before advertising before public-slot join", "[network][security][private-title-early-bind]") {
+#if REX_PLATFORM_GNU_LINUX
+  PrivateConfiguration configuration;Grants grants;constexpr uint32_t title=0x58410a7a;const auto port=FreePort();
+  REXCVAR_SET(private_lan_invitation_file,(grants.directory/"host.hpli").string());
+  RuntimeSocket host_socket(1);SessionRegistry host_registry;
+  auto hosted=host_registry.Create(1,"PrivateTitleHost",host_socket.address,0x42f,6,0);REQUIRE(hosted);
+  LanDiscoveryService host(title,port);host.SetArbitrationMachineId(host_registry.local_machine_id());REQUIRE(host.Advertise(hosted));
+  // The real title opens/binds gameplay UDP only after XSessionCreate advertises.
+  REQUIRE(host_registry.UpdateHostedPort(1,host_socket.address.port)==1);
+  REXCVAR_SET(private_lan_invitation_file,(grants.directory/"client.hpli").string());
+  RuntimeSocket client_socket(2);REXCVAR_SET(lan_gameplay_port,uint32_t(client_socket.address.port));
+  LanDiscoveryService client(title,port);SessionRegistry client_registry;client.SetArbitrationMachineId(client_registry.local_machine_id());
+  auto found=client.Search(500,1);REQUIRE(found.size()==1);REQUIRE(found[0].info.host_address==host_socket.address);
+  auto actual=client_registry.UpsertDiscovered(std::move(found[0]));REQUIRE(actual);
+  SessionMember member{2,"PublicTitleClient",0,true,false,false};
+  auto joined=client.Join(*actual,member,500);REQUIRE(joined);
+  REQUIRE(client_registry.CommitJoinedRecord(actual,std::move(*joined),[]{return true;}));
+  REQUIRE(client.ActivatePrivateLanGameplay(actual,2));
+  ExchangeGameplay(client_socket,host_socket,1,61);ExchangeGameplay(host_socket,client_socket,2,83);
+  REQUIRE(client.Leave(*actual,2,500));
+  host.StopAdvertising();
+#endif
+}
+}
