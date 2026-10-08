@@ -801,6 +801,7 @@ TEST_CASE("authenticated grant drives the complete host admission path",
     auto session = registry.Create(1, "Host", {htonl(INADDR_LOOPBACK), 3074}, 0x42f, 6, 0);
     auto grants = std::make_shared<HostAdmissionGrantStore>();
     NatFixture nat;
+    LegacyLanDiagnosticsScope legacy_lan_diagnostics_public_capacity;
     LanDiscoveryService host(title_id, port, grants);
     REQUIRE(host.Advertise(session));
     nat.Add(kAttemptA);
