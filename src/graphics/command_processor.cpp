@@ -960,7 +960,7 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
 
   IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
 
-  ++counter_;
+  increment_counter();
   return true;
 }
 
@@ -1206,7 +1206,7 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_SHD(memory::RingBuffer* re
   uint32_t data_value;
   if ((initiator >> 31) & 0x1) {
     // Write counter (GPU vblank counter?).
-    data_value = counter_;
+    data_value = counter();
   } else {
     // Write value.
     data_value = value;

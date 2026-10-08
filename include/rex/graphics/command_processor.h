@@ -84,8 +84,8 @@ class CommandProcessor {
   CommandProcessor(GraphicsSystem* graphics_system, system::KernelState* kernel_state);
   virtual ~CommandProcessor();
 
-  uint32_t counter() const { return counter_; }
-  void increment_counter() { counter_++; }
+  uint32_t counter() const { return counter_.load(std::memory_order_relaxed); }
+  void increment_counter() { counter_.fetch_add(1, std::memory_order_relaxed); }
 
   Shader* active_vertex_shader() const { return active_vertex_shader_; }
   Shader* active_pixel_shader() const { return active_pixel_shader_; }
@@ -243,7 +243,10 @@ class CommandProcessor {
   // MicroEngine binary from PM4_ME_INIT
   std::vector<uint32_t> me_bin_;
 
-  uint32_t counter_ = 0;
+  // Vblank and swap packets advance this from distinct host threads. This is
+  // a numeric progress counter, not publication of GPU resources; relaxed
+  // atomics preserve both increments and the guest's uint32_t wrap behavior.
+  std::atomic<uint32_t> counter_{0};
 
   uint32_t primary_buffer_ptr_ = 0;
   uint32_t primary_buffer_size_ = 0;

@@ -3,6 +3,7 @@
 add_executable(unit_tests
     test_memory.cpp
     audio/game_audio_capture_test.cpp
+    graphics/video_counter_test.cpp
     memory/heap_allocation_test.cpp
     kernel/relative_timeout_range_test.cpp
     kernel/object_table_test.cpp
