@@ -1034,6 +1034,32 @@ uint32_t XThread::SelfSuspend() {
 #endif
 
 X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable, uint64_t interval) {
+  if (static_cast<int64_t>(interval) > 0) {
+    // A positive FILETIME is an absolute guest deadline. Recompute after each
+    // bounded host slice so clock adjustments and title termination are observed.
+    for (;;) {
+      CheckTitleTermination();
+      const uint64_t now = chrono::Clock::QueryGuestSystemTime();
+      uint32_t timeout_ms = 0;
+      if (interval > now) {
+        const uint64_t remaining_ticks = interval - now;
+        const uint64_t remaining_ms = remaining_ticks / 10000 + (remaining_ticks % 10000 != 0);
+        // Ceil only absolute deadlines: do not return before a fractional ms.
+        timeout_ms = static_cast<uint32_t>(std::min<uint64_t>(remaining_ms, 100));
+        timeout_ms = std::clamp(chrono::Clock::ScaleGuestDurationMillis(timeout_ms), 1u, 100u);
+      }
+      if (alertable) {
+        // Even an expired deadline must preserve an already queued user callback.
+        const auto result = rex::thread::AlertableSleep(std::chrono::milliseconds(timeout_ms));
+        CheckTitleTermination();
+        if (result == rex::thread::SleepResult::kAlerted) return X_STATUS_USER_APC;
+      } else if (timeout_ms != 0) {
+        rex::thread::Sleep(std::chrono::milliseconds(timeout_ms));
+        CheckTitleTermination();
+      }
+      if (timeout_ms == 0) return X_STATUS_SUCCESS;
+    }
+  }
   // Share the overflow-safe conversion with object and I/O completion waits.
   uint32_t timeout_ms = TimeoutTicksToMs(static_cast<int64_t>(interval));
   timeout_ms = chrono::Clock::ScaleGuestDurationMillis(timeout_ms);
