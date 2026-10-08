@@ -1829,6 +1829,91 @@ TEST_CASE("configured invite claim is one-flight and isolated from public Search
   CHECK_FALSE(manager.ready_configured_invite());
 }
 
+TEST_CASE("late duplicate title callback preserves a terminal invite attempt",
+          "[session][configured-invite][race][terminal]") {
+  ConfiguredInviteCvarFixture cvars;
+  std::promise<void> cleanup_complete;
+  auto cleaned = cleanup_complete.get_future();
+  std::atomic<bool> cleanup_signaled{false};
+  std::atomic<uint32_t> attempts{0}, retirements{0};
+  SessionManagerDependencies dependencies;
+  dependencies.user_identity = [](uint32_t user) -> std::optional<uint64_t> {
+    return user == 0 ? std::optional<uint64_t>(kLocalXuid) : std::nullopt;
+  };
+  dependencies.invite_join_attempt_transport =
+      [&](std::string_view, uint32_t) -> std::optional<DirectoryInviteJoinAttempt> {
+    ++attempts;
+    return std::nullopt;
+  };
+  dependencies.configured_invite_stage_observer =
+      [&](ConfiguredInviteStage stage, const ConfiguredInviteOperationIdentity&) {
+    if (stage == ConfiguredInviteStage::kCancellationVisible) ++retirements;
+    if (stage == ConfiguredInviteStage::kCleanupComplete && !cleanup_signaled.exchange(true))
+      cleanup_complete.set_value();
+  };
+  SessionManager manager(nullptr, 39319, std::move(dependencies));
+  manager.OnTitleTransition(kTitle);
+  REQUIRE(cleaned.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  REQUIRE(manager.configured_invite_state() == ConfiguredInviteLifecycleState::kFailed);
+  REQUIRE(attempts == 1);
+  manager.OnTitleTransition(kTitle);
+  // Retirement is observed synchronously by OnTitleTransition. This check
+  // cannot pass merely because a second worker has not been scheduled yet.
+  CHECK(retirements == 0);
+  CHECK(manager.configured_invite_state() == ConfiguredInviteLifecycleState::kFailed);
+  manager.ShutdownAsyncActivity();
+  CHECK(attempts == 1);
+}
+
+TEST_CASE("terminal invite permits explicit retry and real identity changes",
+          "[session][runtime-invite][terminal][identity]") {
+  ConfiguredInviteCvarFixture cvars;
+  std::atomic<uint64_t> user{kLocalXuid};
+  std::atomic<uint32_t> title{kTitle}, attempts{0};
+  std::mutex mutex;
+  std::condition_variable completed;
+  uint32_t cleanups = 0;
+  SessionManagerDependencies dependencies;
+  dependencies.user_identity = [&](uint32_t index) -> std::optional<uint64_t> {
+    return index == 0 ? std::optional<uint64_t>(user.load()) : std::nullopt;
+  };
+  dependencies.current_title_id = [&] { return title.load(); };
+  dependencies.invite_join_attempt_transport =
+      [&](std::string_view, uint32_t) -> std::optional<DirectoryInviteJoinAttempt> {
+    ++attempts;
+    return std::nullopt;
+  };
+  dependencies.configured_invite_stage_observer =
+      [&](ConfiguredInviteStage stage, const ConfiguredInviteOperationIdentity&) {
+    if (stage == ConfiguredInviteStage::kCleanupComplete) {
+      std::lock_guard lock(mutex);
+      ++cleanups;
+      completed.notify_all();
+    }
+  };
+  SessionManager manager(nullptr, 39320, std::move(dependencies));
+  auto wait = [&](uint32_t count) {
+    std::unique_lock lock(mutex);
+    return completed.wait_for(lock, std::chrono::seconds(2), [&] { return cleanups >= count; });
+  };
+  manager.OnTitleTransition(title);
+  REQUIRE(wait(1));
+  REQUIRE(manager.UpdateRuntimeInviteCode("ABC234") == RuntimeInviteUpdateResult::kStarted);
+  REQUIRE(wait(2));
+  manager.OnTitleTermination();
+  manager.OnTitleTransition(title);
+  REQUIRE(wait(3));
+  ++user;
+  manager.OnTitleTransition(title);
+  REQUIRE(wait(4));
+  ++title;
+  manager.OnTitleTransition(title);
+  REQUIRE(wait(5));
+  manager.OnTitleTransition(title);
+  manager.ShutdownAsyncActivity();
+  CHECK(attempts == 5);
+}
+
 TEST_CASE("configured invite cancellation boundaries precede worker progression",
           "[session][configured-invite][race][cancellation]") {
   auto run_boundary = [](ConfiguredInviteStage target, uint16_t port) {

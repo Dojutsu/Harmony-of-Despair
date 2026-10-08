@@ -3708,15 +3708,14 @@ void SessionManager::OnTitleTransition(uint32_t title_id) {
   auto local_xuid = user_identity_ ? user_identity_(0) : std::nullopt;
   {
     std::lock_guard lock(configured_invite_mutex_);
+    // Repeated callbacks describe the same title lifetime even after its invite
+    // attempt has ended. Retry only through an explicit runtime-code update or
+    // a real title/user/code change; a late duplicate must not issue authority.
     if (configured_invite_operation_ && configured_code && local_xuid &&
         configured_invite_operation_->identity.title_id == title_id &&
         configured_invite_operation_->identity.invite_code ==
             *configured_code &&
-        configured_invite_operation_->identity.local_xuid == *local_xuid &&
-        configured_invite_state_ != ConfiguredInviteLifecycleState::kFailed &&
-        configured_invite_state_ != ConfiguredInviteLifecycleState::kExpired &&
-        configured_invite_state_ != ConfiguredInviteLifecycleState::kCompleted &&
-        configured_invite_state_ != ConfiguredInviteLifecycleState::kCancelled)
+        configured_invite_operation_->identity.local_xuid == *local_xuid)
       return;
   }
   CancelConfiguredInviteOperation();
