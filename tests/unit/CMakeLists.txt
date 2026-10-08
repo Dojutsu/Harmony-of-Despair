@@ -362,3 +362,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
     add_test(NAME socket_accept_retirement COMMAND socket_retirement_race_test --accept-close)
     set_tests_properties(socket_retirement_race socket_connect_retirement socket_accept_retirement PROPERTIES LABELS "linux;network;guest_socket;security" TIMEOUT 15)
 endif()
+
+# Exercise the real production queue, including idle wakeups and ring wrap.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(timer_queue_lifecycle_test core/timer_queue_lifecycle_test.cpp)
+    target_link_libraries(timer_queue_lifecycle_test PRIVATE rexruntime)
+    set_target_properties(timer_queue_lifecycle_test PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>
+        INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
+    add_test(NAME timer_queue_lifecycle COMMAND timer_queue_lifecycle_test)
+    set_tests_properties(timer_queue_lifecycle PROPERTIES LABELS "linux;threading;timer" TIMEOUT 20)
+endif()
