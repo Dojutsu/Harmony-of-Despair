@@ -46,4 +46,36 @@ TEST_CASE("POSIX multiple waits expire while a condition lock is contended",
     }
   }
 }
+
+TEST_CASE("POSIX single waits expire while a condition lock is contended",
+          "[thread][wait][timeout][single-wait-timeout]") {
+  for (bool alertable : {false, true}) {
+    for (auto timeout : {0ms, 20ms}) {
+      DYNAMIC_SECTION("alertable=" << alertable << " timeout=" << timeout.count()) {
+        auto mutant = rex::thread::Mutant::Create(false);
+        auto* native = static_cast<pthread_mutex_t*>(mutant->native_handle());
+        std::promise<int> acquired;
+        auto locked = acquired.get_future();
+        std::jthread blocker([&] {
+          int rc = pthread_mutex_lock(native);
+          acquired.set_value(rc);
+          if (rc == 0) {
+            std::this_thread::sleep_for(250ms);
+            pthread_mutex_unlock(native);
+          }
+        });
+        REQUIRE(locked.get() == 0);
+        const auto began = std::chrono::steady_clock::now();
+        auto result = rex::thread::Wait(mutant.get(), alertable, timeout);
+        const auto elapsed = std::chrono::steady_clock::now() - began;
+        CHECK(result == rex::thread::WaitResult::kTimeout);
+        CHECK(elapsed < 150ms);
+        blocker.join();
+        if (result == rex::thread::WaitResult::kSuccess) CHECK(mutant->Release());
+        CHECK(rex::thread::Wait(mutant.get(), false, 0ms) == rex::thread::WaitResult::kSuccess);
+        CHECK(mutant->Release());
+      }
+    }
+  }
+}
 #endif

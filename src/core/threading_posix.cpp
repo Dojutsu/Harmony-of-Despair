@@ -288,11 +288,41 @@ class PosixConditionBase {
   virtual bool Signal() = 0;
 
   WaitResult Wait(std::chrono::milliseconds timeout) {
+    // A finite budget covers internal mutex acquisition and condition waiting.
+    // Preserve the zero-time ready-object fast path without querying a clock.
+    auto deadline = std::chrono::steady_clock::time_point::max();
+    if (timeout > std::chrono::milliseconds::zero() &&
+        timeout != std::chrono::milliseconds::max()) {
+      const auto now = std::chrono::steady_clock::now();
+      const auto maximum = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::time_point::max() - now);
+      deadline = now + std::min(timeout, maximum);
+    }
     bool executed;
     auto predicate = [this] { return this->signaled(); };
 #if REX_PLATFORM_LINUX
     auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
-    int lock_result = pthread_mutex_lock(native_mutex);
+    int lock_result = timeout == std::chrono::milliseconds::max()
+                          ? pthread_mutex_lock(native_mutex)
+                          : pthread_mutex_trylock(native_mutex);
+    if (lock_result == EBUSY) {
+      if (timeout <= std::chrono::milliseconds::zero()) return WaitResult::kTimeout;
+      struct timespec until;
+      if (clock_gettime(CLOCK_MONOTONIC, &until) != 0) return WaitResult::kFailed;
+      const auto remaining = deadline - std::chrono::steady_clock::now();
+      if (remaining <= std::chrono::steady_clock::duration::zero()) return WaitResult::kTimeout;
+      const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(remaining);
+      const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(remaining - seconds);
+      until.tv_sec += seconds.count();
+      until.tv_nsec += nanos.count();
+      if (until.tv_nsec >= 1000000000) {
+        ++until.tv_sec;
+        until.tv_nsec -= 1000000000;
+      }
+      // Monotonic clock locking cannot be extended by wall-clock adjustments.
+      lock_result = pthread_mutex_clocklock(native_mutex, CLOCK_MONOTONIC, &until);
+    }
+    if (lock_result == ETIMEDOUT) return WaitResult::kTimeout;
     if (lock_result == EOWNERDEAD) {
       pthread_mutex_consistent(native_mutex);
     } else if (lock_result != 0) {
@@ -309,7 +339,9 @@ class PosixConditionBase {
         cond_.wait(lock, predicate);
         executed = true;  // Did not time out;
       } else {
-        executed = cond_.wait_for(lock, timeout, predicate);
+        executed = timeout <= std::chrono::milliseconds::zero()
+                       ? cond_.wait_for(lock, timeout, predicate)
+                       : cond_.wait_until(lock, deadline, predicate);
       }
     }
     if (executed) {
