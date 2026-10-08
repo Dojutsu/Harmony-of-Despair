@@ -1,10 +1,13 @@
 #include <rex/system/xam/gameplay_traversal.h>
+#include <rex/system/xam/private_lan_invitation.h>
 
 #include <algorithm>
 #include <mutex>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <rex/logging.h>
+#include <rex/cvar.h>
 #include <rex/platform.h>
 #if REX_PLATFORM_WIN32
 #include <winsock2.h>
@@ -25,6 +28,8 @@ struct Scope {
   std::unordered_map<std::string, std::shared_ptr<GameplayDatagramCipher>> ciphers;
   std::unordered_set<std::string> retired_links;
 };
+static_assert(std::is_nothrow_move_assignable_v<Scope>);
+static_assert(std::is_nothrow_move_constructible_v<Scope>);
 bool SameTrafficKey(const GameplayTrafficKey& a, const GameplayTrafficKey& b) {
   uint8_t difference = 0;
   for (size_t i = 0; i < a.size(); ++i) difference |= a[i] ^ b[i];
@@ -74,7 +79,7 @@ bool MemberCurrent(const Scope& scope) {
   const auto session = scope.session.lock();
   if (!session || scope.closed) return false;
   std::lock_guard lock(*session->mutex);
-  if (session->state == SessionState::kDeleted) return false;
+  if (session->state == SessionState::kDeleted || (session->private_lan_invitation&&!session->private_lan_invitation->Current())) return false;
   const auto member = std::find_if(session->members.begin(), session->members.end(),
       [&](const auto& value) { return value.xuid == scope.xuid && value.local; });
   if (member == session->members.end()) return false;
@@ -136,8 +141,12 @@ bool InstallRoutes(Scope& scope) {
     }
     auto logical = peer.logical;
     logical.port = scope.guest_port;
-    if (!NatProbeInstallGameplayIdentity(peer.traversal, *scope.socket, logical,
-                                         scope.authorization.expires_at)) return false;
+    const bool installed = peer.authenticated_lan_endpoint
+        ? NatProbeInstallAuthenticatedLanPeer(peer.traversal, *scope.socket, logical,
+            *peer.authenticated_lan_endpoint, scope.authorization.expires_at)
+        : NatProbeInstallGameplayIdentity(peer.traversal, *scope.socket, logical,
+            scope.authorization.expires_at);
+    if (!installed) return false;
   }
   return true;
 }
@@ -204,8 +213,10 @@ bool TrackGameplayAdmission(const std::shared_ptr<SessionRecord>& session, uint6
   return true;
 }
 
-bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
-                                   const GameplayAuthorization& authorization) {
+namespace {
+bool InstallGameplayAuthorizationImpl(const std::shared_ptr<SessionRecord>& session,
+    const GameplayAuthorization& authorization,std::vector<SessionMember>* proposed_members,
+    bool (*commit)(void*) noexcept,void* context,bool (*validate)(void*) noexcept) {
   auto reject = [&](const char* reason) {
     REXSYS_WARN(
         "GAMEPLAY_AUTH_INSTALL_REJECT reason={} session={} xuid={:016X} host={:016X} "
@@ -229,6 +240,7 @@ bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
   std::unordered_set<uint64_t> peers{authorization.xuid};
   std::unordered_set<uint32_t> addresses{authorization.logical.ipv4};
   std::unordered_set<std::string> links;
+  std::set<std::pair<uint32_t, uint16_t>> private_endpoints;
   for (const auto& peer : authorization.peers) {
     if (!peer.xuid) return reject("peer_missing_xuid");
     if (!peers.insert(peer.xuid).second) return reject("duplicate_peer_xuid");
@@ -241,6 +253,15 @@ bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
     if (!links.insert(peer.traversal.attempt_id).second) return reject("duplicate_peer_attempt");
     if (!ParseLink(peer.traversal.attempt_id)) return reject("invalid_crypto_link");
     if (SameTrafficKey(peer.traffic_key, {})) return reject("missing_peer_traffic_key");
+    if (peer.authenticated_lan_endpoint) {
+      const auto endpoint = *peer.authenticated_lan_endpoint;
+      const auto ip = ntohl(endpoint.ipv4);
+      const bool private_ip = (ip >> 24) == 127 || (ip >> 24) == 10 ||
+                              (ip >> 20) == 0xac1 || (ip >> 16) == 0xc0a8;
+      if (!endpoint.port || !private_ip ||
+          !private_endpoints.emplace(endpoint.ipv4, endpoint.port).second)
+        return reject("invalid_private_lan_endpoint");
+    }
   }
   Scope candidate;
   candidate.session = session;
@@ -248,6 +269,38 @@ bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
   candidate.authorization = authorization;
   std::lock_guard lock(gameplay_mutex);
   Reap();
+  std::unique_lock<std::recursive_mutex> record_lock;
+  struct RestoreRoster {
+    SessionRecord* record=nullptr;std::vector<SessionMember>* previous=nullptr;bool committed=false;
+    ~RestoreRoster(){if(record&&!committed)record->members.swap(*previous);}
+  } restore;
+  if(proposed_members) {
+    if(!commit||authorization.peers.size()+1!=proposed_members->size())return reject("invalid_private_transaction");
+    if(std::any_of(authorization.peers.begin(),authorization.peers.end(),[](const auto& peer){return !peer.authenticated_lan_endpoint;}))
+      return reject("private_route_required");
+    std::unordered_set<uint64_t> roster_ids;
+    for(const auto& member:*proposed_members) {
+      if(!member.xuid||!roster_ids.insert(member.xuid).second)return reject("duplicate_private_roster");
+      if(member.xuid==authorization.xuid) {
+        if(!member.local)return reject("private_local_member_missing");
+      } else {
+        const auto peer=std::find_if(authorization.peers.begin(),authorization.peers.end(),
+            [&](const auto& item){return item.xuid==member.xuid;});
+        if(peer==authorization.peers.end()||member.local||!member.gameplay_admission||
+           member.gameplay_admission->directory_session_id!=authorization.directory_session||
+           member.gameplay_admission->attempt_id!=peer->admission_attempt||
+           member.gameplay_admission->admission_generation!=peer->admission_generation)
+          return reject("private_peer_roster_mismatch");
+      }
+    }
+    if(!roster_ids.contains(authorization.xuid))return reject("private_local_member_missing");
+    record_lock=std::unique_lock<std::recursive_mutex>(*session->mutex);
+    if(validate&&!validate(context))return reject("stale_private_record_snapshot");
+    session->members.swap(*proposed_members);restore.record=session.get();restore.previous=proposed_members;
+    for(const auto& peer:authorization.peers)if(!PeerCurrent(candidate,peer))return reject("private_peer_not_current");
+    // Reserve before deriving an iterator; no allocation may follow commit.
+    scopes.reserve(scopes.size()+1);
+  }
   if (!MemberCurrent(candidate)) return reject("member_not_current");
   auto found = std::find_if(scopes.begin(), scopes.end(), [&](const auto& s) {
     return s.session.lock() == session && s.xuid == authorization.xuid;
@@ -273,6 +326,7 @@ bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
           previous->admission_generation != peer.admission_generation ||
           previous->logical.ipv4 != peer.logical.ipv4 ||
           previous->traversal.participant != peer.traversal.participant ||
+          previous->authenticated_lan_endpoint != peer.authenticated_lan_endpoint ||
           !SameTrafficKey(previous->traffic_key, peer.traffic_key)) return reject("crypto_link_changed");
       const auto state = found->ciphers.find(peer.traversal.attempt_id);
       if (state == found->ciphers.end()) return reject("missing_existing_crypto_state");
@@ -283,6 +337,41 @@ bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
       if (!cipher) return reject("crypto_provider_unavailable");
       candidate.ciphers.emplace(peer.traversal.attempt_id, std::move(cipher));
     }
+  }
+  if(proposed_members) {
+    if(found!=scopes.end()) {
+      if(found->closed)return reject("scope_closed");
+      const auto& old=found->authorization;
+      if(!old.member_nonce.empty()&&(old.member_nonce!=authorization.member_nonce||
+         old.directory_session!=authorization.directory_session||old.admission_attempt!=authorization.admission_attempt||
+         old.admission_generation!=authorization.admission_generation))return reject("private_member_generation_changed");
+      candidate.socket=found->socket;candidate.guest_port=found->guest_port;
+    }
+    SocketCandidate* selected=nullptr;
+    if(!candidate.socket)for(auto& socket:socket_candidates) {
+      if(socket.xuid!=candidate.xuid||socket.owned)continue;
+      if(selected)return reject("ambiguous_private_socket");
+      selected=&socket;
+    }
+    if(selected){candidate.socket=selected->socket;candidate.guest_port=selected->port;}
+    std::vector<NatProbeAuthenticatedLanPeer> routes;routes.reserve(authorization.peers.size());
+    for(const auto& peer:authorization.peers){auto logical=peer.logical;logical.port=candidate.guest_port;
+      routes.push_back({peer.traversal,logical,*peer.authenticated_lan_endpoint});}
+    struct Publication {
+      Scope* candidate;std::vector<Scope>::iterator found;bool existing;SocketCandidate* selected;
+      RestoreRoster* restore;bool (*commit)(void*) noexcept;void* context;
+    } publication{&candidate,found,found!=scopes.end(),selected,&restore,commit,context};
+    auto publish=[](void* context) noexcept {
+      auto& state=*static_cast<Publication*>(context);
+      if(!state.commit(state.context))return false;
+      if(state.existing)*state.found=std::move(*state.candidate);
+      else scopes.push_back(std::move(*state.candidate)); // Capacity was reserved.
+      if(state.selected)state.selected->owned=true;
+      state.restore->committed=true;return true;
+    };
+    if(candidate.socket)return NatProbeCommitAuthenticatedLanPeers(*candidate.socket,routes,
+        authorization.expires_at,publish,&publication);
+    return publish(&publication);
   }
   if (found != scopes.end()) {
     if (found->closed) return reject("scope_closed");
@@ -324,6 +413,18 @@ bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
       authorization.admission_generation, authorization.admission_attempt,
       found->socket.value_or(0), found->guest_port);
   return installed;
+}
+
+} // namespace
+bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
+    const GameplayAuthorization& authorization) {
+  return InstallGameplayAuthorizationImpl(session,authorization,nullptr,nullptr,nullptr,nullptr);
+}
+bool CommitPrivateLanGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
+    const GameplayAuthorization& authorization,std::vector<SessionMember> members,
+    bool (*commit)(void*) noexcept,void* context,bool (*validate)(void*) noexcept) noexcept {
+  try{return InstallGameplayAuthorizationImpl(session,authorization,&members,commit,context,validate);}
+  catch(...){return false;}
 }
 
 bool BindGameplaySocket(const std::shared_ptr<SessionRecord>& session, uint64_t local_xuid,
@@ -412,8 +513,10 @@ bool GameplayAuthorizationCurrent(const std::shared_ptr<SessionRecord>& session,
 }
 
 bool IsAuthorizedGameplaySocket(uint64_t socket) {
+  if(!REXCVAR_GET(private_lan_invitation_file).empty())return true;
   std::lock_guard lock(gameplay_mutex);
   Reap();
+  if(!REXCVAR_GET(private_lan_allow_legacy_diagnostics)&&NatProbeIsGameplaySocket(socket))return true;
   // Keep failed/expired scopes fail-closed rather than falling back to raw UDP.
   return std::any_of(scopes.begin(), scopes.end(), [&](const auto& s) {
     if (s.socket != socket) return false;

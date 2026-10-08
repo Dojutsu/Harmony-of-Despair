@@ -326,6 +326,10 @@ class HostAdmissionGrantStore {
   std::vector<HostAdmissionCompletion> TakeCompletions();
   std::optional<std::string> hosted_directory_session() const;
   size_t available_grant_count(Clock::time_point now = Clock::now()) const;
+  // The caller supplies only exact native-source acknowledgments from NatProbe.
+  // This read-only check discloses no grant data and spends no admission.
+  bool HasCurrentPrivateDiscoveryGrant(std::string_view directory_session_id,
+      std::span<const std::string> acknowledged_attempt_ids,Clock::time_point now=Clock::now()) const;
 
  private:
   struct Grant {

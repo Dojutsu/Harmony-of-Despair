@@ -1,6 +1,7 @@
 #include <rex/system/xam/nat_probe.h>
 
 #include <algorithm>
+#include <set>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -82,6 +83,7 @@ struct Identity {
   bool automatic = false;
   uint64_t owner_socket = 0;
   bool gameplay_authorized = false;
+  bool direct_lan = false;
   std::chrono::steady_clock::time_point expires_at{};
   std::string key;
 };
@@ -450,6 +452,88 @@ bool NatProbeInstallGameplayIdentity(const NatProbeIdentity& value, uint64_t soc
   return true;
 }
 
+bool NatProbeInstallAuthenticatedLanPeer(const NatProbeIdentity& value, uint64_t socket,
+    LanAddress logical, LanAddress native, std::chrono::steady_clock::time_point expires_at) {
+  const auto ip = ntohl(native.ipv4);
+  const bool private_ip = (ip >> 24) == 127 || (ip >> 24) == 10 ||
+                          (ip >> 20) == 0xac1 || (ip >> 16) == 0xc0a8;
+  Identity identity{};
+  if (value.participant > 1 || !logical.ipv4 || !logical.port || !native.port || !private_ip ||
+      expires_at <= std::chrono::steady_clock::now() ||
+      !ParseHex(value.attempt_id, identity.attempt.data()) ||
+      !ParseHex(value.capability, identity.capability.data()) ||
+      !std::any_of(identity.attempt.begin(), identity.attempt.end(), [](uint8_t b) { return b != 0; }) ||
+      !std::any_of(identity.capability.begin(), identity.capability.end(), [](uint8_t b) { return b != 0; }))
+    return false;
+  identity.key = value.attempt_id; identity.participant = value.participant;
+  identity.owner_socket = socket; identity.gameplay_authorized = true;
+  identity.direct_lan = true; identity.expires_at = expires_at;
+  std::lock_guard lock(state_mutex);
+  auto found = states.find(socket);
+  if (found == states.end() || found->second.role != NatProbeRole::kGameplay) return false;
+  auto old = found->second.attempts.find(identity.key);
+  if (old != found->second.attempts.end()) {
+    if (!old->second.identity.direct_lan || !old->second.identity.gameplay_authorized ||
+        old->second.identity.capability != identity.capability ||
+        old->second.identity.participant != identity.participant ||
+        old->second.logical_gameplay_peer != logical ||
+        old->second.endpoint.acknowledged_peer() != native) return false;
+    old->second.identity.expires_at = expires_at;
+  } else {
+    AttemptState route; route.identity = identity; route.logical_gameplay_peer = logical;
+    route.attached_at = std::chrono::steady_clock::now();
+    if (!route.endpoint.UpdatePeer(native) || !route.endpoint.Acknowledge(native)) return false;
+    found->second.attempts.emplace(identity.key, std::move(route));
+  }
+  return true;
+}
+
+bool NatProbeCommitAuthenticatedLanPeers(uint64_t socket,
+    std::span<const NatProbeAuthenticatedLanPeer> peers,
+    std::chrono::steady_clock::time_point expires_at,
+    bool (*commit)(void*) noexcept,void* context) noexcept {
+  if(!commit||peers.size()>5||expires_at<=std::chrono::steady_clock::now())return false;
+  try {
+    std::lock_guard lock(state_mutex);
+    auto found=states.find(socket);
+    if(found==states.end()||found->second.role!=NatProbeRole::kGameplay)return false;
+    auto prepared=found->second.attempts;
+    std::unordered_set<std::string> links;
+    std::set<std::pair<uint32_t,uint16_t>> endpoints,logical_addresses;
+    for(const auto& peer:peers) {
+      const auto ip=ntohl(peer.native.ipv4);
+      Identity identity{};
+      if(peer.identity.participant>1||!peer.logical.ipv4||!peer.logical.port||!peer.native.port||
+         !((ip>>24)==127||(ip>>24)==10||(ip>>20)==0xac1||(ip>>16)==0xc0a8)||
+         !ParseHex(peer.identity.attempt_id,identity.attempt.data())||
+         !ParseHex(peer.identity.capability,identity.capability.data())||
+         !std::any_of(identity.attempt.begin(),identity.attempt.end(),[](uint8_t b){return b!=0;})||
+         !std::any_of(identity.capability.begin(),identity.capability.end(),[](uint8_t b){return b!=0;})||
+         !links.insert(peer.identity.attempt_id).second||
+         !endpoints.emplace(peer.native.ipv4,peer.native.port).second||
+         !logical_addresses.emplace(peer.logical.ipv4,peer.logical.port).second)return false;
+      identity.key=peer.identity.attempt_id;identity.participant=peer.identity.participant;
+      identity.owner_socket=socket;identity.gameplay_authorized=true;identity.direct_lan=true;identity.expires_at=expires_at;
+      auto old=prepared.find(identity.key);
+      if(old!=prepared.end()) {
+        if(!old->second.identity.direct_lan||!old->second.identity.gameplay_authorized||
+           old->second.identity.capability!=identity.capability||old->second.identity.participant!=identity.participant||
+           old->second.logical_gameplay_peer!=peer.logical||old->second.endpoint.acknowledged_peer()!=peer.native)return false;
+        old->second.identity.expires_at=expires_at;
+      } else {
+        AttemptState route;route.identity=identity;route.logical_gameplay_peer=peer.logical;
+        route.attached_at=std::chrono::steady_clock::now();
+        if(!route.endpoint.UpdatePeer(peer.native)||!route.endpoint.Acknowledge(peer.native))return false;
+        prepared.emplace(identity.key,std::move(route));
+      }
+    }
+    std::erase_if(prepared,[&](const auto& pair){return pair.second.identity.gameplay_authorized&&!links.contains(pair.first);});
+    if(expires_at<=std::chrono::steady_clock::now()||!commit(context))return false;
+    found->second.attempts.swap(prepared);
+    return true;
+  }catch(...){return false;}
+}
+
 bool NatProbeIsPendingGameplaySource(uint64_t socket, LanAddress native) {
   std::lock_guard lock(state_mutex);
   auto found = states.find(socket);
@@ -548,9 +632,13 @@ bool NatProbeIsClient() {
 
 bool NatProbeIsGameplayPort(uint16_t port) {
   const uint32_t configured = REXCVAR_GET(lan_gameplay_port);
-  return port == (configured ? configured : 30742);
+  return configured?port==configured:(port==3074||port==30742);
 }
 
+bool NatProbeIsGameplaySocket(uint64_t socket) {
+  std::lock_guard lock(state_mutex);const auto found=states.find(socket);
+  return found!=states.end()&&found->second.role==NatProbeRole::kGameplay;
+}
 void NatProbeAttach(uint64_t socket, NatProbeRole role, LanAddress local,
                     XSocket* socket_object) {
   bool start_gameplay_pump = false;
@@ -569,9 +657,9 @@ void NatProbeAttach(uint64_t socket, NatProbeRole role, LanAddress local,
       attempt.attached_at = std::chrono::steady_clock::now();
       state.attempts.emplace(identity.key, std::move(attempt));
     };
-    if (auto manual = ManualIdentity()) add(*manual);
+    if(REXCVAR_GET(private_lan_invitation_file).empty()&&(role!=NatProbeRole::kGameplay||REXCVAR_GET(private_lan_allow_legacy_diagnostics)))if (auto manual = ManualIdentity()) add(*manual);
     for (const auto& [key, identity] : automatic_identities)
-      if (!(identity.invite_lan_eligible && role == NatProbeRole::kGameplay) &&
+      if (REXCVAR_GET(private_lan_invitation_file).empty()&&!(identity.invite_lan_eligible && role == NatProbeRole::kGameplay) &&
           (!identity.owner_socket || identity.owner_socket == socket) &&
           !ExpiredAttempts(role).contains(key))
         add(identity);
@@ -614,6 +702,7 @@ void NatProbeTickLocked(uint64_t socket, State& state,
       iterator = state.attempts.erase(iterator);
       continue;
     }
+    if (attempt.identity.direct_lan) { ++iterator; continue; }
     if (attempt.identity.automatic && !attempt.identity.gameplay_authorized &&
         now - attempt.attached_at >= std::chrono::seconds(20)) {
       if (!attempt.endpoint.acknowledged() && !attempt.invite_lan_peer) {
@@ -687,6 +776,8 @@ void NatProbeTick(uint64_t socket) {
 }
 
 void NatProbeTickAt(uint64_t socket, std::chrono::steady_clock::time_point now) {
+  if(!REXCVAR_GET(private_lan_invitation_file).empty())return;
+
   std::lock_guard lock(state_mutex);
   auto found = states.find(socket);
   if (found == states.end()) return;
@@ -710,6 +801,7 @@ bool NatProbeIsControlPacket(uint64_t socket, const uint8_t* data, size_t size,
                               });
   if (attempt == found->second.attempts.end()) return false;
   const auto& attempt_state = attempt->second;
+  if (attempt_state.identity.direct_lan) return false;
   if (attempt_state.identity.gameplay_authorized &&
       (std::chrono::steady_clock::now() >= attempt_state.identity.expires_at ||
        (packet.type == kRegistered && LanAddress{source_ipv4, source_port} != attempt_state.identity.server)))
@@ -758,6 +850,7 @@ bool NatProbeConsume(uint64_t socket, const uint8_t* data, size_t size, uint32_t
     return false;
   }
   auto& attempt_state = attempt->second;
+  if (attempt_state.identity.direct_lan) return false;
   if (attempt_state.identity.gameplay_authorized &&
       (std::chrono::steady_clock::now() >= attempt_state.identity.expires_at ||
        (packet.type == kRegistered && LanAddress{source_ipv4, source_port} != attempt_state.identity.server)))

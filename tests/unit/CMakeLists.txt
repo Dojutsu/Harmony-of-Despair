@@ -22,6 +22,13 @@ add_executable(unit_tests
     system/function_dispatcher_test.cpp
     system/gameplay_traversal_test.cpp
     system/gameplay_datagram_test.cpp
+    system/private_lan_invitation_test.cpp
+    system/private_lan_payload_test.cpp
+    system/private_lan_authority_test.cpp
+    system/private_lan_runtime_test.cpp
+    system/private_lan_wire_test.cpp
+    system/private_lan_discovery_test.cpp
+    system/private_lan_discovery_runtime_test.cpp
     system/session_test.cpp
     system/session_directory_url_test.cpp
     system/session_arbitration_test.cpp
@@ -62,6 +69,9 @@ target_link_libraries(unit_tests PRIVATE
 )
 if(WIN32)
     target_link_libraries(unit_tests PRIVATE ws2_32)
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(unit_tests PRIVATE OpenSSL::Crypto)
 endif()
 
 # ReXApp is shipped as source for recomp projects, rather than compiled into

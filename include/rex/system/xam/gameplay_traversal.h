@@ -18,6 +18,9 @@ struct GameplayPeerAuthorization {
   LanAddress logical;
   NatProbeIdentity traversal;
   GameplayTrafficKey traffic_key{};
+  // Present only after an authenticated private LAN ticket supplies the exact
+  // physical route. It never creates membership or a public fallback.
+  std::optional<LanAddress> authenticated_lan_endpoint;
 };
 
 struct GameplayAuthorization {
@@ -41,6 +44,15 @@ void RegisterGameplaySocketCandidate(uint64_t local_xuid, uint64_t socket, uint1
 bool TrackGameplayAdmission(const std::shared_ptr<SessionRecord>& session, uint64_t xuid);
 bool InstallGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
                                    const GameplayAuthorization& authorization);
+// Trusted private LAN transaction. Stages the complete roster, protected scope
+// and direct routes under gameplay -> record -> route lock order. The final
+// bounded callback may commit staged authority/arbitration state only; it must
+// not enter gameplay, routes, network operations or throw. Provider/allocation,
+// invalid route, stale authority and callback failures publish no state.
+bool CommitPrivateLanGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
+    const GameplayAuthorization& authorization,std::vector<SessionMember> members,
+    bool (*commit)(void*) noexcept,void* context,
+    bool (*validate)(void*) noexcept=nullptr) noexcept;
 bool BindGameplaySocket(const std::shared_ptr<SessionRecord>& session, uint64_t local_xuid,
                         uint64_t socket, uint16_t guest_port);
 void CloseGameplaySocket(uint64_t socket);

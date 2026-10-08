@@ -35,6 +35,8 @@ std::optional<std::array<uint8_t, 16>> InviteLanAuthenticationTag(
     std::string_view attempt_id, std::string_view domain,
     std::span<const uint8_t> payload = {});
 
+REXCVAR_DECLARE(std::string, private_lan_invitation_file);
+REXCVAR_DECLARE(bool, private_lan_allow_legacy_diagnostics);
 REXCVAR_DECLARE(std::string, lan_bind_address);
 REXCVAR_DECLARE(std::string, lan_discovery_listen_address);
 REXCVAR_DECLARE(uint32_t, lan_gameplay_port);
@@ -140,6 +142,10 @@ struct SessionMember {
 };
 
 struct SessionRecord;
+class PrivateLanInvitation;
+class PrivateLanAuthority;
+class PrivateLanClientBinding;
+struct GameplayAuthorization;
 class ArbitrationClientBinding;
 
 enum class DiscoveryAdmissionSource { kPublicDiscovery, kInviteGrant };
@@ -173,6 +179,11 @@ struct SessionRecord {
     status_invite_code = std::move(code);
     NotifyStatus();
   }
+  // Process-local private LAN authority; never guest/discovery serialization.
+  std::shared_ptr<const PrivateLanInvitation> private_lan_invitation;
+  std::shared_ptr<PrivateLanAuthority> private_lan_authority;
+  mutable std::shared_ptr<PrivateLanClientBinding> private_lan_client;
+  std::shared_ptr<const GameplayAuthorization> private_lan_gameplay;
   SessionInfo info{};
   // Discovery/join control endpoint. SessionInfo::host_address remains the
   // independent gameplay endpoint exposed to XGI/XNet.
@@ -355,6 +366,7 @@ class LanDiscoveryService {
                               uint32_t user_index, uint64_t xuid,
                               const DirectoryTraversalAttempt& attempt,
                               const std::string& generation);
+  bool ActivatePrivateLanGameplay(const std::shared_ptr<SessionRecord>& session,uint64_t xuid);
   void StopAllClientAdmissions();
   void StopAdvertising();
   bool IsAdvertising() const;

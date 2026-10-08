@@ -11,6 +11,7 @@
 
 #include <rex/system/xsocket.h>
 #include <rex/system/xam/nat_probe.h>
+#include "legacy_lan_diagnostics_scope.h"
 
 #if REX_PLATFORM_WIN32
 #include <WinSock2.h>
@@ -357,6 +358,7 @@ TEST_CASE("XNet address handles preserve distinct peer mappings and network byte
 
 TEST_CASE("gameplay NAT control drain preserves queued guest datagrams",
           "[network][socket][nat]") {
+  rex::system::xam::LegacyLanDiagnosticsScope legacy_diagnostics;
 #if REX_PLATFORM_WIN32
   WSADATA data{};
   REQUIRE(WSAStartup(MAKEWORD(2, 2), &data) == 0);

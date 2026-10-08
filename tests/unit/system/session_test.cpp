@@ -1,3 +1,4 @@
+#include "legacy_lan_diagnostics_scope.h"
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -779,10 +780,12 @@ TEST_CASE("LAN discovery advertises and returns a created session", "[session][n
   SessionRegistry host_registry;
   auto hosted = host_registry.Create(0xB13E000000000001ull, "DesktopHost",
                                      {LanDiscoveryService::DetermineLanIpv4(), 3074}, 1, 4, 0);
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_0;
   LanDiscoveryService host(0, discovery_port);
   host.SetTitleId(title_id);
   REQUIRE(host.Advertise(hosted));
 
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_1;
   LanDiscoveryService client(title_id, discovery_port);
   auto results = client.Search(500, 4);
   REQUIRE(results.size() == 1);
@@ -820,9 +823,11 @@ TEST_CASE("direct connect discovers and joins a host without LAN broadcast", "[s
 
   SessionRegistry host_registry;
   auto hosted = host_registry.Create(0x1001, "DesktopHost", {htonl(0xC0A8320Au), 30742}, 1, 6, 0);
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_2;
   LanDiscoveryService host(title_id, discovery_port);
   REQUIRE(host.Advertise(hosted));
 
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_3;
   LanDiscoveryService client(title_id, discovery_port);
   auto results = client.Search(500, 4);
   REQUIRE(results.size() == 1);
@@ -835,6 +840,7 @@ TEST_CASE("direct connect discovers and joins a host without LAN broadcast", "[s
   SessionMember client_member{0x1002, "ROGAlly", 0, true, false, false};
   // Deliberately use a service configured with a different fallback port.
   // Join must retain the endpoint that actually answered search.
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_4;
   LanDiscoveryService joining_client(title_id, discovery_port + 1);
   auto joined = joining_client.Join(results[0], client_member, 500);
   REQUIRE(joined);
@@ -876,11 +882,13 @@ TEST_CASE("explicit loopback discovery listener stays on its selected interface"
   constexpr uint32_t title_id = 0x58410A7A;
   SessionRegistry registry;
   auto hosted = registry.Create(1001, "LoopbackHost", {htonl(INADDR_LOOPBACK), 30742}, 1, 6, 0);
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_5;
   LanDiscoveryService host(title_id, port);
   // The existing socket on 127.0.0.2 has no SO_REUSEADDR. A wildcard listener
   // would conflict with it, so successful binding proves address isolation.
   REQUIRE(host.Advertise(hosted));
   REXCVAR_SET(lan_bind_address, "127.0.0.2");
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_6;
   LanDiscoveryService client(title_id, port);
   auto results = client.Search(500, 4);
   REQUIRE(results.size() == 1);
@@ -921,9 +929,11 @@ TEST_CASE("unreachable session directory preserves LAN discovery", "[session][ne
   SessionRegistry registry;
   auto hosted = registry.Create(0x1001, "DesktopHost",
                                 {LanDiscoveryService::DetermineLanIpv4(), 30742}, 1, 6, 0);
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_7;
   LanDiscoveryService host(title_id, discovery_port);
   REQUIRE(host.Advertise(hosted));
 
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_8;
   LanDiscoveryService client(title_id, discovery_port);
   auto results = client.Search(500, 4);
   REQUIRE(results.size() == 1);
@@ -943,12 +953,14 @@ TEST_CASE("pending NAT traversal preserves LAN broadcast discovery", "[session][
   SessionRegistry registry;
   auto hosted = registry.Create(0x1001, "DesktopHost",
                                 {LanDiscoveryService::DetermineLanIpv4(), 30742}, 1, 6, 0);
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_9;
   LanDiscoveryService host(title_id, discovery_port);
   REQUIRE(host.Advertise(hosted));
   REQUIRE(NatProbeInstallIdentity({std::string(attempt),
                                    "ffeeddccbbaa99887766554433221100",
                                    "127.0.0.1", 39046, 1}));
 
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_10;
   LanDiscoveryService client(title_id, discovery_port);
   auto results = client.Search(250, 4);
   REQUIRE(results.size() == 1);
@@ -1036,6 +1048,7 @@ TEST_CASE("stopping a LAN advertisement removes the hosted session", "[session][
   SessionRegistry registry;
   auto hosted = registry.Create(0x1001, "DesktopHost",
                                 {LanDiscoveryService::DetermineLanIpv4(), 3074}, 1, 6, 0);
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_11;
   LanDiscoveryService host(title_id, discovery_port);
   REQUIRE(host.Advertise(hosted));
   CHECK(host.IsAdvertising());
@@ -1043,6 +1056,7 @@ TEST_CASE("stopping a LAN advertisement removes the hosted session", "[session][
   host.StopAdvertising();
   CHECK_FALSE(host.IsAdvertising());
 
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_12;
   LanDiscoveryService client(title_id, discovery_port);
   CHECK(client.Search(100, 4).empty());
 }

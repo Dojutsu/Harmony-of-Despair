@@ -172,6 +172,32 @@ ArbitrationStatus SessionArbitrationAuthority::RegisterFromVerifiedEndpoint(
     const ArbitrationRegistration& request) {
   std::lock_guard lock(mutex_); return RegisterRemoteLocked(request, true);
 }
+std::optional<ArbitrationSnapshot> SessionArbitrationAuthority::RegisterFromVerifiedEndpointIf(
+    const ArbitrationRegistration& request,
+    const std::function<bool(const ArbitrationSnapshot&)>& prepare_reply) {
+  if(!prepare_reply)return std::nullopt;
+  std::lock_guard lock(mutex_);
+  auto previous=members_;const auto revision=revision_;
+  struct Restore {
+    SessionArbitrationAuthority& owner;decltype(members_)& previous;uint64_t revision;bool committed=false;
+    ~Restore(){if(!committed){owner.members_=previous;owner.revision_=revision;}
+#if REX_PLATFORM_GNU_LINUX
+      OPENSSL_cleanse(previous.data(),sizeof(previous));
+#elif REX_PLATFORM_WIN32
+      SecureZeroMemory(previous.data(),sizeof(previous));
+#endif
+    }
+  } restore{*this,previous,revision};
+  try {
+    const auto status=RegisterRemoteLocked(request,true);
+    if(status!=ArbitrationStatus::kAccepted&&status!=ArbitrationStatus::kReplay)return std::nullopt;
+    ArbitrationSnapshot snapshot{identity_,revision_,{}};
+    for(const auto& member:members_)if(member.occupied&&member.registered)
+      snapshot.registrants.push_back({member.machine_id,0,{member.xuid}});
+    if(!prepare_reply(snapshot))return std::nullopt;
+    restore.committed=true;return snapshot;
+  }catch(...){return std::nullopt;}
+}
 std::optional<ArbitrationToken> SessionArbitrationAuthority::CredentialForVerification(
     const ArbitrationIdentity& identity, uint64_t xuid, uint64_t machine_id) const {
   std::lock_guard lock(mutex_);
@@ -229,6 +255,34 @@ bool SessionArbitrationAuthority::Remove(uint64_t xuid) {
                                 RetirementReason::kLeft};
   else alive_ = false;
   *it = Member{}; ++revision_; return true;
+}
+bool SessionArbitrationAuthority::RemoveBatch(std::span<const uint64_t> xuids) noexcept {
+  std::lock_guard lock(mutex_);
+  if (!alive_ || xuids.size() >= kMaxMembers || xuids.size() > retired_.size() - retired_count_)
+    return false;
+  std::array<size_t, kMaxMembers - 1> indices{};
+  for (size_t index = 0; index < xuids.size(); ++index) {
+    if (!xuids[index] || std::find(xuids.begin(), xuids.begin() + index, xuids[index]) != xuids.begin() + index)
+      return false;
+    const auto member = std::find_if(members_.begin(), members_.end(), [&](const auto& value) {
+      return value.occupied && !value.local && value.xuid == xuids[index];
+    });
+    if (member == members_.end()) return false;
+    indices[index] = size_t(member - members_.begin());
+  }
+  for (size_t index = 0; index < xuids.size(); ++index) {
+    auto& member = members_[indices[index]];
+    for (size_t retired = 0; retired < retired_count_; ++retired)
+      if (retired_[retired].xuid == member.xuid) {
+        retired_[retired].expiry_credential = {};
+        retired_[retired].reason = RetirementReason::kLeft;
+      }
+    retired_[retired_count_++] = {member.join_challenge, member.xuid, member.machine_id,
+                                member.endpoint, {}, RetirementReason::kLeft};
+    member = Member{};
+    ++revision_;
+  }
+  return true;
 }
 std::vector<uint64_t> SessionArbitrationAuthority::ExpireUnconfirmed(Clock::time_point now) {
   std::lock_guard lock(mutex_);

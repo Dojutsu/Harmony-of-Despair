@@ -1,10 +1,12 @@
 #pragma once
 
+#include <functional>
 #include <array>
 #include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace rex::system::xam {
@@ -91,9 +93,21 @@ class SessionArbitrationAuthority final {
   std::optional<ArbitrationToken> ExpiredJoinCredentialForVerification(
       const ArbitrationIdentity& identity, const ArbitrationJoinClaim& claim) const;
   ArbitrationStatus RegisterFromVerifiedEndpoint(const ArbitrationRegistration& request);
+  // Prepare a bounded encrypted reply before publishing registration. The
+  // callback may seal/copy local data only; it must not reenter arbitration,
+  // acquire record/gameplay/route locks, send network traffic or publish state.
+  // A provider/allocation/exception/rejected callback restores prior members
+  // and revision while the arbitration lock prevents intermediate observation.
+  std::optional<ArbitrationSnapshot> RegisterFromVerifiedEndpointIf(
+      const ArbitrationRegistration& request,
+      const std::function<bool(const ArbitrationSnapshot&)>& prepare_reply);
+
   ArbitrationStatus RegisterLocal(uint64_t xuid, uint64_t machine_id, uint64_t nonce,
                                   const ArbitrationToken& attempt);
   bool Remove(uint64_t xuid);
+  // Validate a bounded complete removal before any member/tombstone mutation.
+  // Used by private LAN expiry while its outer transaction owns record state.
+  bool RemoveBatch(std::span<const uint64_t> xuids) noexcept;
   std::vector<uint64_t> ExpireUnconfirmed(Clock::time_point now);
   void Invalidate();
   std::optional<ArbitrationSnapshot> Snapshot() const;

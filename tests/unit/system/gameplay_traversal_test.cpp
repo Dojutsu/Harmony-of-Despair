@@ -1,3 +1,4 @@
+#include "legacy_lan_diagnostics_scope.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <rex/platform.h>
@@ -11,6 +12,7 @@
 #include <sys/syscall.h>
 #include <dlfcn.h>
 #include <future>
+#include <openssl/evp.h>
 #endif
 #include <rex/system/xam/gameplay_traversal.h>
 #include <rex/cvar.h>
@@ -292,6 +294,7 @@ TEST_CASE("production admission to independent gameplay sockets fixture", "[.gam
   SessionRegistry registry;
   // Match production: configured-invite code owns admission polling. After
   // readiness below, no caller polls again; gameplay must have its own lifetime.
+  LegacyLanDiagnosticsScope legacy_lan_diagnostics_0;
   LanDiscoveryService discovery(0x58410A7A,discovery_port,{},[local](uint32_t){return std::optional<uint64_t>(local);},{},false);
   discovery.SetTitleId(0x58410A7A);
   discovery.SetLocalUserIdentity(0,local);
@@ -978,6 +981,72 @@ TEST_CASE("blocked ordinary UDP receives a complete encrypted packet after admis
   CHECK(received==3);CHECK(bytes==expected);
   CHECK(uint32_t(source.sin_addr)==ntohl(auth.peers[0].logical.ipv4));
   CHECK(uint16_t(source.sin_port)==1000);CHECK(source_length==sizeof(source));
+}
+TEST_CASE("private LAN roster cipher routes and authority publish as one transaction", "[gameplay][network][security]") {
+  SessionRegistry registry;auto session=registry.Create(1,"AtomicHost",{htonl(INADDR_LOOPBACK),3074},1,3,3);
+  auto auth=Ticket(session);Udp local,second,third;
+  for(size_t i=0;i<auth.peers.size();++i)auth.peers[i].authenticated_lan_endpoint=i?third.address:second.address;
+  auto proposed=session->members;session->members.resize(1);
+  REQUIRE(TrackGameplayAdmission(session,1));
+  RegisterGameplaySocketCandidate(1,local.socket,3074);
+  struct State {bool accept=false;size_t calls=0;};State state;
+  auto commit=[](void* context) noexcept {auto& value=*static_cast<State*>(context);++value.calls;return value.accept;};
+  local.Attach(NatProbeRole::kDiscovery);
+  state.accept=true;
+  CHECK_FALSE(CommitPrivateLanGameplayAuthorization(session,auth,proposed,commit,&state));
+  CHECK(state.calls==0);CHECK(session->members.size()==1);
+  CHECK_FALSE(GameplayAuthorizationCurrent(session,1,auth.member_nonce));
+  local.Attach();state.accept=false;
+  CHECK_FALSE(CommitPrivateLanGameplayAuthorization(session,auth,proposed,commit,&state));
+  CHECK(state.calls==1);CHECK(session->members.size()==1);
+  CHECK_FALSE(NatProbeGameplayDestination(local.socket,{auth.peers[0].logical.ipv4,3074}));
+  CHECK_FALSE(GameplayAuthorizationCurrent(session,1,auth.member_nonce));
+  {
+    struct RestoreProvider {~RestoreProvider(){EVP_set_default_properties(nullptr,nullptr);}} restore;
+    REQUIRE(EVP_set_default_properties(nullptr,"provider=fsc_nonexistent")==1);
+    state.accept=true;
+    CHECK_FALSE(CommitPrivateLanGameplayAuthorization(session,auth,proposed,commit,&state));
+    CHECK(state.calls==1);CHECK(session->members.size()==1);
+  }
+  auto duplicate=proposed;duplicate[2].xuid=duplicate[1].xuid;
+  CHECK_FALSE(CommitPrivateLanGameplayAuthorization(session,auth,duplicate,commit,&state));CHECK(state.calls==1);
+  CHECK_FALSE(CommitPrivateLanGameplayAuthorization(session,auth,proposed,commit,&state,
+      [](void*) noexcept {return false;}));
+  CHECK(state.calls==1);CHECK(session->members.size()==1);
+  REQUIRE(CommitPrivateLanGameplayAuthorization(session,auth,proposed,commit,&state));
+  CHECK(state.calls==2);CHECK(session->members.size()==3);
+  CHECK(GameplayAuthorizationCurrent(session,1,auth.member_nonce));
+  for(size_t i=0;i<auth.peers.size();++i)
+    CHECK(NatProbeGameplayDestination(local.socket,{auth.peers[i].logical.ipv4,3074})==auth.peers[i].authenticated_lan_endpoint);
+  auto peer_cipher=PeerCipher(auth.peers[0]);const std::array<uint8_t,3> payload{1,2,3};
+  auto packet=peer_cipher->Seal(payload);REQUIRE(packet);std::vector<uint8_t> plaintext;
+  const auto logical=LanAddress{auth.peers[0].logical.ipv4,3074};
+  REQUIRE(OpenGameplayDatagram(local.socket,logical,*packet,plaintext,true));CHECK(plaintext==std::vector<uint8_t>(payload.begin(),payload.end()));
+  auto before=SealGameplayDatagram(local.socket,logical,payload);REQUIRE(before);
+  auth.expires_at=Clock::now()+std::chrono::seconds(40);
+  proposed[0].name="RenewedHost";
+  state.accept=false;
+  CHECK_FALSE(CommitPrivateLanGameplayAuthorization(session,auth,proposed,commit,&state));
+  CHECK(session->members.front().name=="AtomicHost");
+  CHECK_FALSE(OpenGameplayDatagram(local.socket,logical,*packet,plaintext,true));
+  state.accept=true;
+  REQUIRE(CommitPrivateLanGameplayAuthorization(session,auth,proposed,commit,&state));
+  CHECK(session->members.front().name=="RenewedHost");
+  CHECK_FALSE(OpenGameplayDatagram(local.socket,logical,*packet,plaintext,true));
+  auto after=SealGameplayDatagram(local.socket,logical,payload);REQUIRE(after);CHECK(*after!=*before);
+  auto reduced=auth;reduced.peers.pop_back();auto roster=proposed;roster.pop_back();
+  state.accept=false;
+  CHECK_FALSE(CommitPrivateLanGameplayAuthorization(session,reduced,roster,commit,&state));
+  CHECK(session->members.size()==3);
+  CHECK(NatProbeGameplayDestination(local.socket,{auth.peers[1].logical.ipv4,3074})==third.address);
+  state.accept=true;
+  REQUIRE(CommitPrivateLanGameplayAuthorization(session,reduced,roster,commit,&state));
+  CHECK(session->members.size()==2);
+  CHECK_FALSE(NatProbeGameplayDestination(local.socket,{auth.peers[1].logical.ipv4,3074}));
+  CHECK_FALSE(SealGameplayDatagram(local.socket,{auth.peers[1].logical.ipv4,3074},payload));
+  NatProbeDetach(local.socket);const auto calls=state.calls;
+  CHECK_FALSE(CommitPrivateLanGameplayAuthorization(session,reduced,roster,commit,&state));CHECK(state.calls==calls);
+  CHECK(session->members.size()==2);
 }
 } // namespace rex::system::xam
 #endif
