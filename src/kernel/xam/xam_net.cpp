@@ -20,8 +20,10 @@
 #include <cstring>
 #include <mutex>
 #include <new>
+#include <span>
 #include <thread>
 #include <unordered_map>
+#include "pending_socket_sends_lifetime.h"
 
 #if REX_PLATFORM_MAC
 #include <sys/select.h>
@@ -265,10 +267,10 @@ struct XNetStartupParams {
   uint8_t cfgQosPairWaitTimeInSeconds;
 };
 
-XNetStartupParams xnet_startup_params = {};
-std::mutex xnet_registry_mutex;
-std::unordered_map<uint32_t, XNADDR> xnet_address_registry;
-std::unordered_map<uint64_t, std::array<uint8_t, 16>> xnet_key_registry;
+static XNetStartupParams xnet_startup_params = {};
+static std::mutex xnet_registry_mutex;
+static std::unordered_map<uint32_t, XNADDR> xnet_address_registry;
+static std::unordered_map<uint64_t, std::array<uint8_t, 16>> xnet_key_registry;
 
 std::array<uint8_t, 6> SyntheticEthernetAddress(uint32_t address) {
   // The XNet address is the stable peer key available to this API. Preserve
@@ -300,11 +302,11 @@ struct PendingRecvFrom {
   bool native_call_logged = false;
 };
 
-std::mutex pending_recv_mutex;
-std::condition_variable pending_recv_changed;
-std::unordered_map<uint32_t, PendingRecvFrom> pending_recvs;
-std::atomic<bool> pending_recv_pump_running{false};
-object_ref<XHostThread> pending_recv_pump_thread;
+static std::mutex pending_recv_mutex;
+static std::condition_variable pending_recv_changed;
+static std::unordered_map<uint32_t, PendingRecvFrom> pending_recvs;
+static std::atomic<bool> pending_recv_pump_running{false};
+static object_ref<XHostThread> pending_recv_pump_thread;
 
 uint32_t LastSocketError() {
 #if REX_PLATFORM_WIN32
@@ -611,6 +613,8 @@ u32 NetDll_WSAGetLastError_entry() {
   return XThread::GetLastError();
 }
 
+namespace { bool PendingSendExists(KernelState*, uint32_t); }
+
 u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_ptr,
                              u32 buffer_count, mapped_u32 num_bytes_recv, mapped_u32 flags_ptr,
                              ppc_ptr_t<XSOCKADDR_IN> from_addr,
@@ -644,6 +648,8 @@ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_
     if (XFAILED(socket_object->SetNonBlocking(true))) {
       return failed(kWsaInvalidArgument, "nonblocking_mode");
     }
+    if (PendingSendExists(REX_KERNEL_STATE(), overlapped_ptr.guest_address()))
+      return failed(kWsaInvalidArgument, "overlapped_in_use");
     overlapped_ptr->internal = kStatusPending;
     overlapped_ptr->internal_high = 0;
     if (num_bytes_recv)
@@ -697,6 +703,11 @@ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_
   return 0;
 }
 
+namespace {
+bool PendingSendExists(KernelState*, uint32_t);
+bool QueryPendingSend(KernelState*, uint32_t, uint32_t, mapped_u32, bool, mapped_u32, uint32_t*);
+}
+
 u32 NetDll_WSAGetOverlappedResult_entry(u32 caller, u32 socket_handle,
                                         ppc_ptr_t<XWSAOVERLAPPED> overlapped_ptr,
                                         mapped_u32 bytes_transferred, u32 wait,
@@ -708,6 +719,10 @@ u32 NetDll_WSAGetOverlappedResult_entry(u32 caller, u32 socket_handle,
     return 0;
   }
 
+  uint32_t send_result = 0;
+  if (QueryPendingSend(REX_KERNEL_STATE(), socket_handle, overlapped_ptr.guest_address(),
+                       bytes_transferred, wait != 0, flags_ptr, &send_result))
+    return send_result;
   std::unique_lock lock(pending_recv_mutex);
   auto it = pending_recvs.find(overlapped_ptr.guest_address());
   // Never wait for network readiness while holding the cancellation lock.
@@ -856,7 +871,57 @@ bool StageSendDestination(memory::Memory* memory, ppc_ptr_t<XSOCKADDR_IN> to,
   *native = staged;
   return true;
 }
+#if REX_PLATFORM_GNU_LINUX
+#include "pending_socket_sends.h"
+#else
+bool PendingSendExists(KernelState*, uint32_t) { return false; }
+bool QueryPendingSend(KernelState*, uint32_t, uint32_t, mapped_u32, bool,
+                      mapped_u32, uint32_t*) { return false; }
+#endif
 }  // namespace
+
+#if REX_PLATFORM_GNU_LINUX
+void CancelPendingSocketSends(KernelState* state, XSocket* socket) {
+  auto service = FindPendingSendService(state); if (!service) return;
+  std::array<std::shared_ptr<PendingSocketSend>, PendingSocketSendService::kMaximumOperations> work{};
+  size_t count = 0;
+  { std::lock_guard lock(service->mutex);
+    for (auto& [_, op] : service->operations) if (op->socket.get() == socket) work[count++] = op; }
+  for (auto& op : std::span(work).first(count)) { std::lock_guard lock(op->mutex); CompletePendingSend(*op,995,0); }
+  service->changed.notify_all();
+}
+void CancelPendingSocketSendsForThread(KernelState* state, XThread* thread) {
+  auto service = FindPendingSendService(state); if (!service) return;
+  std::array<std::shared_ptr<PendingSocketSend>, PendingSocketSendService::kMaximumOperations> work{};
+  size_t count = 0;
+  { std::lock_guard lock(service->mutex); for (auto& [_, op] : service->operations) work[count++] = op; }
+  for (auto& op : std::span(work).first(count)) {
+    std::lock_guard lock(op->mutex); if (op->owner.get() == thread) CompletePendingSend(*op,995,0);
+  }
+  service->changed.notify_all();
+}
+void StopPendingSocketSends(KernelState* state) {
+  std::shared_ptr<PendingSocketSendService> service;
+  { std::lock_guard lock(pending_send_services_mutex);
+    auto it=pending_send_services.find(state); if (it==pending_send_services.end()) return;
+    service=it->second;
+    { std::lock_guard gate(service->mutex); service->accepting=false; service->stopping=true; }
+    pending_send_services.erase(it);
+  }
+  service->changed.notify_all();
+  if (service->worker.joinable()) service->worker.join();
+  std::array<std::shared_ptr<PendingSocketSend>, PendingSocketSendService::kMaximumOperations> work{};
+  size_t count = 0;
+  { std::lock_guard lock(service->mutex); for (auto& [_, op] : service->operations) work[count++] = op; }
+  for (auto& op : std::span(work).first(count)) { std::lock_guard lock(op->mutex); CompletePendingSend(*op,995,0,true); }
+  { std::lock_guard lock(service->mutex); service->operations.clear(); }
+}
+
+#else
+void CancelPendingSocketSends(KernelState*, XSocket*) {}
+void CancelPendingSocketSendsForThread(KernelState*, XThread*) {}
+void StopPendingSocketSends(KernelState*) {}
+#endif
 
 // If the socket is a VDP socket, buffer 0 is the game data length, and buffer 1
 // is the unencrypted game data.
@@ -927,11 +992,35 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
     return failed(kWsaNoBuffers, "send_allocation");
   }
 
+  if (overlapped) {
+    std::lock_guard lock(pending_recv_mutex);
+    if (pending_recvs.contains(overlapped.guest_address()) ||
+        PendingSendExists(REX_KERNEL_STATE(), overlapped.guest_address()))
+      return failed(kWsaInvalidArgument, "overlapped_in_use");
+  }
   const int result = socket->SendTo(combined.data(), uint32_t(size), flags,
                                     to_ptr ? &native_to : nullptr, to_len);
   const uint32_t send_error = result < 0 ? LastSocketError() : 0;
   PumpPendingRecvFrom();
-  if (result < 0) return failed(send_error, "native_send");
+  if (result < 0) {
+#if REX_PLATFORM_GNU_LINUX
+    // WSA_IO_PENDING means this exact operation is retained, not merely that
+    // authorization is outstanding. Ordinary synchronous sends still fail closed.
+    if (send_error == 10035 && overlapped &&
+        IsAuthorizedGameplaySocket(operation.handle()) && maximum == kGameplayMaximumPlaintextBytes) {
+      if (completion_routine) return failed(10045, "pending_callback_unsupported");
+      uint32_t queued = kWsaNoBuffers;
+      try {
+        queued = QueuePendingSend(REX_KERNEL_STATE(), socket_handle, socket, operation,
+            std::move(combined), flags, to_ptr ? &native_to : nullptr,
+            overlapped.guest_address(), staged_overlapped);
+      } catch (const std::bad_alloc&) { queued = kWsaNoBuffers; }
+        catch (const std::system_error&) { queued = kWsaNoBuffers; }
+      return failed(queued ? queued : 997, queued ? "pending_send_rejected" : "overlapped_pending");
+    }
+#endif
+    return failed(send_error, "native_send");
+  }
   // Recheck mapping ownership after the network call, then publish only the
   // result fields. Never copy the descriptor's event/offset bytes back over a
   // concurrent title update and never hold a mapping lease across native I/O.
@@ -1416,6 +1505,7 @@ u32 NetDll_closesocket_entry(u32 caller, u32 socket_handle) {
   // TODO: Absolutely delete this object. It is no longer valid after calling
   // closesocket.
   socket->Close();
+  CancelPendingSocketSends(REX_KERNEL_STATE(), socket.get());
   for (auto& [_, pending] : pending_recvs) {
     if (pending.socket_handle != socket_handle || pending.complete)
       continue;

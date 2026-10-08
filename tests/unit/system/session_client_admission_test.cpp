@@ -2887,5 +2887,82 @@ TEST_CASE("runtime invite input is absent from verbose native lifecycle logs",
   CHECK(REXCVAR_GET(session_directory_invite_code).empty());
 }
 
+#if REX_PLATFORM_GNU_LINUX
+TEST_CASE("production admission Bind wakes the worker after an overlapping RPC",
+          "[session][directory][client-admission][admission-wakeup][production][race]") {
+  ClientNatFixture nat;
+  auto attempt_a = InviteAttemptFor("session-a", std::string(kAttempt), std::string(kCapability));
+  auto attempt_b = InviteAttemptFor("session-b", "11112222333344445555666677778888",
+                                          "88887777666655554444333322221111");
+  attempt_a.rendezvous_host = "127.0.0.1";
+  attempt_b.rendezvous_host = "127.0.0.1";
+  const LanAddress peer{htonl(INADDR_LOOPBACK), 39194};
+  auto first = ExactDiscoveryFor(attempt_a, 1, peer);
+  auto second = ExactDiscoveryFor(attempt_b, 2, peer);
+  const int socket_a = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+  const int socket_b = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+  REQUIRE(socket_a >= 0);
+  REQUIRE(socket_b >= 0);
+  struct UntransferredSockets {
+    int first, second;
+    ~UntransferredSockets() {
+      if (first >= 0) close(first);
+      if (second >= 0) close(second);
+    }
+  } untransferred{socket_a, socket_b};
+  nat.Bind(socket_a, attempt_a, peer);
+  nat.Bind(socket_b, attempt_b, peer);
+
+  StageBarrier rpc;
+  std::unique_ptr<SessionDirectoryClient> directory;
+  // Release the controlled RPC before a failed assertion destroys its owner.
+  struct ReleaseRpc {
+    StageBarrier& rpc;
+    ~ReleaseRpc() { rpc.Release(); }
+  } release{rpc};
+  std::atomic<bool> first_arm{false}, second_arm{false};
+  std::promise<Clock::time_point> second_requested;
+  auto second_future = second_requested.get_future();
+  directory = std::make_unique<SessionDirectoryClient>(
+      [](uint32_t user) -> std::optional<uint64_t> { return kLocalXuid + user; },
+      [&](const ClientAdmissionTransportRequest& request) {
+        if (request.action == ClientAdmissionTransportAction::kArm) {
+          if (request.local_user_index == 0 && !first_arm.exchange(true))
+            rpc.ArriveAndWait();
+          if (request.local_user_index == 1 && !second_arm.exchange(true))
+            second_requested.set_value(Clock::now());
+          return AdmissionHttp(AdmissionBody(1, false, 59000, {}, request.attempt_id),
+                               request.request_started_at);
+        }
+        if (request.action == ClientAdmissionTransportAction::kStatus)
+          return AdmissionHttp(AdmissionBody(request.expected_revision, false, 59000, {},
+                                            request.attempt_id), request.request_started_at);
+        return ClientAdmissionTransportResponse{204, {}, request.request_started_at};
+      }, true);
+  directory->SetClientAdmissionTitle(kTitle);
+  REQUIRE(directory->PrepareClientAdmission(0, kTitle, attempt_a, *first, socket_a) ==
+          ClientAdmissionPrepareResult::kPrepared);
+  untransferred.first = -1;
+  REQUIRE(directory->ConfirmClientAdmissionSession(0, first));
+  REQUIRE(rpc.WaitUntilEntered());
+  // The worker's current operation snapshot contains only user0. A new bound
+  // user while its RPC is blocked must cause a new pass, not a 250ms idle wait.
+  REQUIRE(directory->PrepareClientAdmission(1, kTitle, attempt_b, *second, socket_b) ==
+          ClientAdmissionPrepareResult::kPrepared);
+  untransferred.second = -1;
+  REQUIRE(directory->ConfirmClientAdmissionSession(1, second));
+  const auto released = Clock::now();
+  rpc.Release();
+  REQUIRE(second_future.wait_for(std::chrono::milliseconds(150)) == std::future_status::ready);
+  CHECK(second_future.get() - released < std::chrono::milliseconds(150));
+  directory->StopClientAdmission(1);
+  CHECK_FALSE(directory->HasClientAdmission(1));
+  directory->StopAllClientAdmissions();
+  const auto shutdown = Clock::now();
+  directory.reset();
+  CHECK(Clock::now() - shutdown < std::chrono::milliseconds(700));
+}
+#endif
+
 }  // namespace
 }  // namespace rex::system::xam

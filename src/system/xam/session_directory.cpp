@@ -1,5 +1,7 @@
 #include <rex/system/xam/session_directory.h>
 
+#include "admission_work_wakeup.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -1575,7 +1577,7 @@ class SessionDirectoryClient::Impl {
   ~Impl() {
     StopAllClientAdmissions();
     client_admission_worker.request_stop();
-    client_admission_wake.notify_all();
+    client_admission_work.Notify();
     if (client_admission_worker.joinable())
       client_admission_worker.join();
     StopHosting();
@@ -1804,7 +1806,7 @@ class SessionDirectoryClient::Impl {
       return ClientAdmissionPrepareResult::kInvalid;
     context.socket_owner = std::make_shared<ClientAdmissionSocketOwner>(discovery_socket);
     client_admissions.emplace(local_user_index, std::move(context));
-    client_admission_wake.notify_all();
+    client_admission_work.Notify();
     return ClientAdmissionPrepareResult::kPrepared;
   }
 
@@ -1817,7 +1819,7 @@ class SessionDirectoryClient::Impl {
     if (!found->second.state.ConfirmExactSession(session)) {
       QueueCancellationLocked(found->second);
       client_admissions.erase(found);
-      client_admission_wake.notify_all();
+      client_admission_work.Notify();
       return false;
     }
     return true;
@@ -1836,7 +1838,7 @@ class SessionDirectoryClient::Impl {
     for (auto& [_, context] : client_admissions)
       QueueCancellationLocked(context);
     client_admissions.clear();
-    client_admission_wake.notify_all();
+    client_admission_work.Notify();
   }
 
   void SetClientAdmissionUserIdentity(uint32_t local_user_index, std::optional<uint64_t> xuid) {
@@ -1855,7 +1857,7 @@ class SessionDirectoryClient::Impl {
         client_admissions.erase(found);
       }
     }
-    client_admission_wake.notify_all();
+    client_admission_work.Notify();
   }
 
   void StopClientAdmission(uint32_t local_user_index) {
@@ -1865,7 +1867,7 @@ class SessionDirectoryClient::Impl {
       return;
     QueueCancellationLocked(found->second);
     client_admissions.erase(found);
-    client_admission_wake.notify_all();
+    client_admission_work.Notify();
   }
 
 
@@ -1903,7 +1905,7 @@ class SessionDirectoryClient::Impl {
     REXSYS_INFO(
         "GAMEPLAY_ADMISSION_QUEUED user={} xuid={:016X} session={} attempt={} admission={}",
         user_index, xuid, attempt.session_id, attempt.attempt_id, generation);
-    client_admission_wake.notify_all();
+    client_admission_work.Notify();
   }
 
   bool SyncHostedGameplay(const std::string& id, const std::string& token) {
@@ -2070,7 +2072,7 @@ class SessionDirectoryClient::Impl {
     for (auto& [_, context] : client_admissions)
       QueueCancellationLocked(context);
     client_admissions.clear();
-    client_admission_wake.notify_all();
+    client_admission_work.Notify();
   }
 
   bool HasClientAdmission(uint32_t local_user_index) const {
@@ -2166,7 +2168,7 @@ class SessionDirectoryClient::Impl {
     if (!exact_nat || !current) {
       QueueCancellationLocked(found->second);
       client_admissions.erase(found);
-      client_admission_wake.notify_all();
+      client_admission_work.Notify();
       if (!exact_nat)
         REXSYS_WARN("Session directory: ready candidate lost exact NAT correlation");
       return std::nullopt;
@@ -2725,22 +2727,16 @@ class SessionDirectoryClient::Impl {
 
  private:
   void ClientAdmissionLoop(std::stop_token stop, bool automatic_admission) {
-    for (;;) {
+    client_admission_work.Run(stop, [&] {
       PollGameplayClients();
       if (automatic_admission)
         PollClientAdmissions(ClientAdmissionLeaseState::Clock::now());
-
-      if (stop.stop_requested()) {
-        if (!automatic_admission)
-          break;
-        std::lock_guard lock(client_admission_mutex);
-        if (client_admissions.empty() && client_admission_cancellations.empty())
-          break;
-      }
-      std::unique_lock lock(client_admission_wait_mutex);
-      client_admission_wake.wait_for(lock, kTraversalPollInterval,
-                                     [&] { return stop.stop_requested(); });
-    }
+    }, [&] {
+      if (!automatic_admission)
+        return true;
+      std::lock_guard lock(client_admission_mutex);
+      return client_admissions.empty() && client_admission_cancellations.empty();
+    }, kTraversalPollInterval);
   }
 
   std::shared_ptr<SessionRecord> hosted;
@@ -2767,8 +2763,7 @@ class SessionDirectoryClient::Impl {
   std::unordered_map<uint32_t, ClientAdmissionContext> client_admissions;
   std::deque<ClientAdmissionCancellation> client_admission_cancellations;
   std::mutex client_admission_poll_mutex;
-  std::condition_variable client_admission_wake;
-  std::mutex client_admission_wait_mutex;
+  detail::AdmissionWorkWakeup client_admission_work;
   std::jthread client_admission_worker;
 };
 

@@ -1,3 +1,4 @@
+#include "../kernel/xam/pending_socket_sends_lifetime.h"
 /**
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
@@ -172,6 +173,8 @@ void KernelState::SetProcessTLSVars(X_KPROCESS* process, uint32_t num_slots, uin
 }
 
 KernelState::~KernelState() {
+  terminating_title_.store(true, std::memory_order_release);
+  kernel::xam::StopPendingSocketSends(this);
   app_manager_.reset();
 
   // Stop the dispatch thread before touching the object table
@@ -1047,6 +1050,7 @@ void KernelState::TerminateTitle() {
   // Guest threads poll this flag in the kernel wait primitives
   // (XThread::CheckTitleTermination) and self-exit.
   terminating_title_.store(true, std::memory_order_release);
+  kernel::xam::StopPendingSocketSends(this);
 
   // Retained so a thread that wakes and exits below can't be freed mid-drain.
   std::vector<object_ref<XThread>> target_threads;
@@ -1128,6 +1132,7 @@ void KernelState::OnThreadExecute(XThread* thread) {
 }
 
 void KernelState::OnThreadExit(XThread* thread) {
+  kernel::xam::CancelPendingSocketSendsForThread(this, thread);
   auto global_lock = global_critical_region_.Acquire();
 
   // Must be called on executing thread.

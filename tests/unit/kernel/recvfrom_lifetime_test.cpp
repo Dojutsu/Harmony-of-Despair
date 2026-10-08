@@ -794,7 +794,151 @@ static void RunBootstrapDiagnostics(KernelState* kernel) {
   std::cout << "{\"fixture\":\"bootstrap_diagnostics\",\"cases\":6,\"failures\":0,\"pending_send_error\":10035,\"no_raw_fallback\":true,\"returns_outputs_preserved\":true,\"reports_bounded\":true,\"guest_lr_verified\":true,\"private_data_absent\":true}\n";
 }
 
+#if REX_PLATFORM_GNU_LINUX
+static void RunPendingProtectedSends(KernelState* kernel) {
+  using namespace rex::system::xam;
+  auto* memory = kernel->memory();
+  const auto guest = memory->SystemHeapAlloc(128 * 1024);
+  Check(guest != 0, "pending-send guest allocation");
+  auto ptr = [&]<typename T>(uint32_t offset) { return ppc_ptr_t<T>(memory->TranslateVirtual<T*>(guest + offset), guest + offset); };
+  auto buffer = ptr.operator()<XWSABUF>(0); auto bytes = ptr.operator()<be_u32>(32);
+  auto flags = ptr.operator()<be_u32>(36); auto to = ptr.operator()<XSOCKADDR_IN>(128);
+  auto event = make_object<XEvent>(kernel); event->Initialize(true, true);
+  auto sender_handle = uint32_t(NetDll_socket_entry(1,2,2,17));
+  auto sender = kernel->object_table()->LookupObject<XSocket>(sender_handle);
+  auto receiver = make_object<XSocket>(kernel);
+  Check(sender && receiver->Initialize(XSocket::X_AF_INET,XSocket::X_SOCK_DGRAM,XSocket::X_IPPROTO_UDP)==X_STATUS_SUCCESS, "pending-send sockets");
+  N_XSOCKADDR_IN bind{}; bind.sin_family=AF_INET;bind.sin_addr=INADDR_LOOPBACK;
+  Check(sender->Bind(&bind,sizeof(bind))==X_STATUS_SUCCESS && receiver->Bind(&bind,sizeof(bind))==X_STATUS_SUCCESS,"pending-send private bind");
+  NatProbeAttach(sender->native_handle(),NatProbeRole::kGameplay,{htonl(INADDR_LOOPBACK),ntohs(sender->bound_port())},sender.get());
+  const auto xuid=kernel->user_profile()->xuid();
+  SessionRegistry registry;auto session=registry.Create(xuid+1,"Host",{htonl(INADDR_LOOPBACK),ntohs(receiver->bound_port())},1,6,0);
+  Check(bool(session),"pending-send session");session->members.front().local=false;
+  SessionMember local{};local.xuid=xuid;local.local=true;
+  local.gameplay_admission=std::make_shared<const GameplayAdmissionBinding>(GameplayAdmissionBinding{"pending-test",std::string(32,'a'),std::string(32,'b')});
+  Check(registry.JoinBatch(session,std::span(&local,1)) && TrackGameplayAdmission(session,xuid),"pending-send membership");
+  Check(BindGameplaySocket(session,xuid,sender->native_handle(),1000),"pending-send socket scope");
+  buffer->len=39;buffer->buf_ptr=guest+8192;
+  const std::string payload="SECRET-HANDSHAKE-MARKER-DO-NOT-LOG-THIS";
+  std::memcpy(memory->TranslateVirtual(guest+8192),payload.data(),payload.size());
+  to->sin_family=AF_INET;to->sin_addr=0xf0000002;to->sin_port=1000;
+  auto ov=ptr.operator()<XWSAOVERLAPPED>(320);std::memset(ov.host_address(),0,sizeof(*ov));ov->event_handle=event->handle();
+  *bytes=0x7a7b7c7d;*flags=0x6a6b6c6d;
+  const auto initiated=uint32_t(NetDll_WSASendTo_entry(1,sender_handle,buffer,1,bytes,0,to,16,ov,nullptr));
+  const auto initiation_error=XThread::GetLastError();
+  if(initiated!=uint32_t(-1)||initiation_error!=997)throw std::runtime_error("pending-send initiation result="+std::to_string(initiated)+" last_error="+std::to_string(initiation_error));
+  Check(uint32_t(*bytes)==0x7a7b7c7d && uint32_t(ov->internal)==0x103,"pending-send initiation outputs");
+  uint32_t signaled=1;event->Query(nullptr,&signaled);Check(signaled==0,"pending-send event reset");
+  Check(NetDll_WSAGetOverlappedResult_entry(1,sender_handle,ov,bytes,0,flags)==0 && XThread::GetLastError()==996,"pending-send not fabricated completion");
+  Check(!receiver->WaitReadable(0),"pending-send no raw fallback");
+  Check(NetDll_WSASendTo_entry(1,sender_handle,buffer,1,bytes,0,to,16,ov,nullptr)==uint32_t(-1) && XThread::GetLastError()==10022,"pending-send duplicate OV refused");
+  Check(NetDll_WSARecvFrom_entry(1,sender_handle,buffer,1,bytes,flags,nullptr,nullptr,ov,nullptr)==uint32_t(-1) && XThread::GetLastError()==10022,"pending-send cannot be replaced by receive");
+  Check(uint32_t(*bytes)==0x7a7b7c7d && uint32_t(ov->internal)==0x103,"pending-send duplicate outputs retained");
+  // Guest input may change after initiation; the operation owns its copy.
+  std::memset(memory->TranslateVirtual(guest+8192),'x',39);
+  GameplayAuthorization auth;auth.directory_session="pending-test";auth.xbox_session=session->info.id;
+  auth.host_xuid=xuid+1;auth.admission_attempt=local.gameplay_admission->attempt_id;auth.admission_generation=local.gameplay_admission->admission_generation;auth.xuid=xuid;auth.member_nonce=std::string(32,'1');auth.member_capability=std::string(32,'2');
+  auth.logical={htonl(0xf0000001),1000};auth.expires_at=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+  GameplayPeerAuthorization peer;peer.xuid=xuid+1;peer.member_nonce=std::string(32,'5');
+  peer.logical={htonl(0xf0000002),1000};peer.traversal={std::string(32,'3'),std::string(32,'4'),"127.0.0.1",ntohs(receiver->bound_port()),0};peer.traffic_key.fill(7);auth.peers.push_back(peer);
+  Check(InstallGameplayAuthorization(session,auth),"pending-send authenticated authorization");
+  std::array<uint8_t,56> ack{};std::memcpy(ack.data(),"HNAT",4);ack[4]=1;ack[5]=2;ack[6]=0;ack[7]=1;
+  for(size_t i=0;i<16;++i){ack[8+i]=0x33;ack[24+i]=0x44;}
+  const uint32_t ip=htonl(INADDR_LOOPBACK);std::memcpy(ack.data()+46,&ip,4);auto port=htons(ntohs(receiver->bound_port()));std::memcpy(ack.data()+50,&port,2);
+  Check(NatProbeConsume(sender->native_handle(),ack.data(),ack.size(),ip,ntohs(receiver->bound_port())),"pending-send registration");
+  ack[5]=4;ack[6]=1;
+  Check(NatProbeConsume(sender->native_handle(),ack.data(),ack.size(),ip,ntohs(receiver->bound_port())),"pending-send authenticated route");
+  Check(NetDll_WSAGetOverlappedResult_entry(1,sender_handle,ov,bytes,1,flags)==1 && uint32_t(*bytes)==39 && uint32_t(*flags)==0,"pending-send delayed result");
+  Check(uint32_t(ov->internal)==0 && uint32_t(ov->internal_high)==39,"pending-send real OV completion");
+  event->Query(nullptr,&signaled);Check(signaled==1,"pending-send saved event signaled");
+  Check(receiver->SetNonBlocking(true)==X_STATUS_SUCCESS,"pending-send receiver nonblocking");
+  GameplayLinkId link{};link.fill(0x33);auto cipher=GameplayDatagramCipher::Create(peer.traffic_key,link,1);Check(bool(cipher),"pending-send independent decoder");
+  bool decoded=false;auto until=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+  while(std::chrono::steady_clock::now()<until && !decoded){
+    std::array<uint8_t,256> wire{};auto n=recvfrom(int(receiver->native_handle()),wire.data(),wire.size(),MSG_DONTWAIT,nullptr,nullptr);
+    if(n<0){std::this_thread::sleep_for(std::chrono::milliseconds(1));continue;}
+    if(n==87){std::vector<uint8_t> plain;Check(cipher->Open(std::span(wire).first(size_t(n)),plain),"pending-send wire authentication");Check(std::string(plain.begin(),plain.end())==payload,"pending-send copied payload encrypted");decoded=true;}
+    else Check(n!=39,"pending-send never plaintext");
+  }
+  Check(decoded,"pending-send actual encrypted UDP");
+  RevokeGameplayAuthorization(session,xuid);
+  // Exact output identity changed while pending: preserve that guest update.
+  auto changed=ptr.operator()<XWSAOVERLAPPED>(384);std::memset(changed.host_address(),0,sizeof(*changed));changed->event_handle=event->handle();
+  *bytes=0x7a7b7c7d;
+  Check(NetDll_WSASendTo_entry(1,sender_handle,buffer,1,bytes,0,to,16,changed,nullptr)==uint32_t(-1) && XThread::GetLastError()==997,"pending-send changed-output retained");
+  changed->offset.low=0x12345678;CancelPendingSocketSendsForThread(kernel,XThread::GetCurrentThread());
+  Check(NetDll_WSAGetOverlappedResult_entry(1,sender_handle,changed,bytes,0,flags)==0 && XThread::GetLastError()==10014,"pending-send changed output refused");
+  Check(uint32_t(changed->offset.low)==0x12345678 && uint32_t(*bytes)==0x7a7b7c7d,"pending-send changed output preserved");
+  // Unsupported alertable callbacks must not claim retained completion.
+  auto refused=ptr.operator()<XWSAOVERLAPPED>(448);std::memset(refused.host_address(),0,sizeof(*refused));
+  Check(NetDll_WSASendTo_entry(1,sender_handle,buffer,1,bytes,0,to,16,refused,
+      mapped_void(memory->TranslateVirtual(guest+4096),guest+4096))==uint32_t(-1)&&XThread::GetLastError()==10045,
+      "pending-send callback fails explicitly");
+  Check(uint32_t(refused->internal)==0&&uint32_t(*bytes)==0x7a7b7c7d&&!PendingSendExists(kernel,refused.guest_address()),
+      "pending-send callback preserves outputs and ownership");
+  // A real finite timeout publishes failure, never fabricated bytes/success.
+  auto expired=ptr.operator()<XWSAOVERLAPPED>(4608);std::memset(expired.host_address(),0,sizeof(*expired));expired->event_handle=event->handle();
+  Check(NetDll_WSASendTo_entry(1,sender_handle,buffer,1,bytes,0,to,16,expired,nullptr)==uint32_t(-1)&&XThread::GetLastError()==997,"pending-send timeout admitted");
+  const auto timeout_started=std::chrono::steady_clock::now();
+  Check(NetDll_WSAGetOverlappedResult_entry(1,sender_handle,expired,bytes,1,flags)==0&&XThread::GetLastError()==10060,"pending-send finite timeout result");
+  Check(std::chrono::steady_clock::now()-timeout_started>=std::chrono::seconds(4)&&std::chrono::steady_clock::now()-timeout_started<std::chrono::seconds(7),"pending-send timeout is real and bounded");
+  Check(uint32_t(*bytes)==0x7a7b7c7d&&uint32_t(expired->internal)!=0&&uint32_t(expired->internal_high)==0,"pending-send timeout preserves initiation bytes");
+  // Revoked guest output is rechecked; completion cannot fault or overwrite it.
+  const auto revoked_page=memory->SystemHeapAlloc(4096);Check(revoked_page!=0,"pending-send revoked allocation");
+  auto revoked=ppc_ptr_t<XWSAOVERLAPPED>(memory->TranslateVirtual<XWSAOVERLAPPED*>(revoked_page),revoked_page);
+  std::memset(revoked.host_address(),0,sizeof(*revoked));revoked->event_handle=event->handle();
+  Check(NetDll_WSASendTo_entry(1,sender_handle,buffer,1,bytes,0,to,16,revoked,nullptr)==uint32_t(-1)&&XThread::GetLastError()==997,"pending-send revoked output admitted");
+  auto* revoked_heap=memory->LookupHeap(revoked_page);Check(revoked_heap->Protect(revoked_page,4096,memory::kMemoryProtectNoAccess),"pending-send revoke output mapping");
+  CancelPendingSocketSendsForThread(kernel,XThread::GetCurrentThread());
+  Check(revoked_heap->Protect(revoked_page,4096,memory::kMemoryProtectRead|memory::kMemoryProtectWrite),"pending-send restore output mapping");
+  Check(uint32_t(revoked->internal)==0x103&&uint32_t(*bytes)==0x7a7b7c7d,"pending-send revoked output untouched");
+  Check(NetDll_WSAGetOverlappedResult_entry(1,sender_handle,revoked,bytes,0,flags)==0&&XThread::GetLastError()==10014,"pending-send revoked output reports fault");
+  memory->SystemHeapFree(revoked_page);
+  // The actual initiating host/guest-thread lifecycle cancels retained work.
+  auto exited=ptr.operator()<XWSAOVERLAPPED>(4672);std::memset(exited.host_address(),0,sizeof(*exited));exited->event_handle=event->handle();
+  std::atomic<bool> exit_admitted=false;
+  auto initiator=object_ref<XHostThread>(new XHostThread(kernel,128*1024,0,[&]{
+    exit_admitted=NetDll_WSASendTo_entry(1,sender_handle,buffer,1,bytes,0,to,16,exited,nullptr)==uint32_t(-1)&&XThread::GetLastError()==997;
+    return 0;
+  }));Check(XSUCCEEDED(initiator->Create()),"pending-send actual initiator creation");
+  initiator->Wait(0,0,0,nullptr);Check(exit_admitted,"pending-send actual thread admitted");
+  Check(NetDll_WSAGetOverlappedResult_entry(1,sender_handle,exited,bytes,1,flags)==0&&XThread::GetLastError()==995,"pending-send thread exit cancellation");initiator.reset();
+  // Reused event handles cannot redirect a completion into a new event object.
+  auto event_reuse=ptr.operator()<XWSAOVERLAPPED>(4736);std::memset(event_reuse.host_address(),0,sizeof(*event_reuse));event_reuse->event_handle=event->handle();
+  Check(NetDll_WSASendTo_entry(1,sender_handle,buffer,1,bytes,0,to,16,event_reuse,nullptr)==uint32_t(-1)&&XThread::GetLastError()==997,"pending-send event ownership admitted");
+  Check(XSUCCEEDED(event->ReleaseHandle()),"pending-send retire original event handle");
+  auto new_event=make_object<XEvent>(kernel);new_event->Initialize(true,false);
+  CancelPendingSocketSendsForThread(kernel,XThread::GetCurrentThread());
+  uint32_t new_signaled=1;new_event->Query(nullptr,&new_signaled);event->Query(nullptr,&signaled);
+  Check(signaled==1&&new_signaled==0,"pending-send signals only retained original event");
+  Check(NetDll_WSAGetOverlappedResult_entry(1,sender_handle,event_reuse,bytes,0,flags)==0&&XThread::GetLastError()==995,"pending-send retired event completion remains queryable");
+  new_event->ReleaseHandle();new_event.reset();
+  // Payload accounting rejects before 64-operation capacity and preserves OV.
+  buffer->len=65459;std::memset(memory->TranslateVirtual(guest+8192),0x5a,65459);
+  size_t admitted=0;
+  for(size_t i=0;i<33;++i){
+    auto current=ptr.operator()<XWSAOVERLAPPED>(512+uint32_t(i)*64);std::memset(current.host_address(),0,sizeof(*current));
+    auto r=NetDll_WSASendTo_entry(1,sender_handle,buffer,1,bytes,0,to,16,current,nullptr);
+    Check(r==uint32_t(-1),"pending-send bounded queue return");
+    if(i<32){Check(XThread::GetLastError()==997,"pending-send bounded queue admission");++admitted;}
+    else Check(XThread::GetLastError()==10055 && uint32_t(current->internal)==0,"pending-send byte cap preserves output");
+  }
+  Check(admitted==32,"pending-send byte cap is effective");
+  // Teardown must drain even when a querying guest owns the global gate.
+  auto global=rex::thread::global_critical_region::AcquireDirect();
+  Check(NetDll_closesocket_entry(1,sender_handle)==0,"pending-send close under global gate");
+  auto closed=ptr.operator()<XWSAOVERLAPPED>(512);Check(uint32_t(closed->internal)==0xC0000120,"pending-send native close cancels owned work");
+  const auto began=std::chrono::steady_clock::now();StopPendingSocketSends(kernel);
+  Check(std::chrono::steady_clock::now()-began<std::chrono::seconds(1),"pending-send teardown under global gate bounded");
+  global.unlock();
+  Check(!FindPendingSendService(kernel),"pending-send service drained");
+  registry.Delete(session->info.id);sender.reset();receiver.reset();event.reset();memory->SystemHeapFree(guest);
+  std::cout << "{\"fixture\":\"pending_protected_sends\",\"cases\":13,\"failures\":0,\"actual_encrypted_payload\":true,\"no_raw_fallback\":true,\"delayed_completion\":true,\"copied_input\":true,\"bounded_payload\":true,\"teardown_drained\":true}\n";
+}
+#endif
+
 int main(int argc, char** argv) {
+  std::cout.setf(std::ios::unitbuf);
 #if REX_PLATFORM_WIN32
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa))
@@ -818,6 +962,7 @@ int main(int argc, char** argv) {
 #if REX_PLATFORM_GNU_LINUX
       if (!stale) {
         RunBootstrapDiagnostics(runtime.kernel_state());
+        RunPendingProtectedSends(runtime.kernel_state());
         RunLinuxSocketAbi(runtime.kernel_state());
         RunLinuxSendBounds(runtime.kernel_state());
         RunLinuxFatalReceive(runtime.kernel_state());
@@ -827,6 +972,7 @@ int main(int argc, char** argv) {
 #endif
     } catch (const std::exception& e) {
       std::cerr << e.what() << '\n';
+      StopPendingSocketSends(runtime.kernel_state());
       result = 1;
     }
     return result;
