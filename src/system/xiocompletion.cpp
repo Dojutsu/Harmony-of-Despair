@@ -10,6 +10,8 @@
  */
 
 #include <rex/system/xiocompletion.h>
+#include <rex/system/xthread.h>
+#include "absolute_wait_deadline.h"
 
 namespace rex::system {
 
@@ -28,19 +30,29 @@ void XIOCompletion::QueueNotification(IONotification& notification) {
 }
 
 bool XIOCompletion::WaitForNotification(uint64_t wait_ticks, IONotification* notify) {
-  auto ms = std::chrono::milliseconds(TimeoutTicksToMs(wait_ticks));
-  auto res = rex::thread::Wait(notification_semaphore_.get(), false, ms);
-  if (res == rex::thread::WaitResult::kSuccess) {
-    std::unique_lock<std::mutex> lock(notification_lock_);
-    assert_false(notifications_.empty());
+  const bool absolute = static_cast<int64_t>(wait_ticks) > 0;
+  for (;;) {
+    auto ms = absolute ? detail::AbsoluteWaitSlice(wait_ticks)
+                       : std::chrono::milliseconds(TimeoutTicksToMs(wait_ticks));
+    XThread::CheckTitleTermination();
+    auto res = rex::thread::Wait(notification_semaphore_.get(), false, ms);
+    XThread::CheckTitleTermination();
+    if (absolute && res == rex::thread::WaitResult::kTimeout &&
+        detail::AbsoluteWaitPending(wait_ticks)) {
+      continue;
+    }
+    if (res == rex::thread::WaitResult::kSuccess) {
+      std::unique_lock<std::mutex> lock(notification_lock_);
+      assert_false(notifications_.empty());
 
-    std::memcpy(notify, &notifications_.front(), sizeof(IONotification));
-    notifications_.pop();
+      std::memcpy(notify, &notifications_.front(), sizeof(IONotification));
+      notifications_.pop();
 
-    return true;
+      return true;
+    }
+
+    return false;
   }
-
-  return false;
 }
 
 }  // namespace rex::system

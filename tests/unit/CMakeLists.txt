@@ -367,6 +367,13 @@ endif()
 
 # Exercise the real production queue, including idle wakeups and ring wrap.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(absolute_object_wait_test kernel/absolute_object_wait_test.cpp)
+    target_link_libraries(absolute_object_wait_test PRIVATE rexruntime ${CMAKE_DL_LIBS})
+    target_link_options(absolute_object_wait_test PRIVATE
+        "-Wl,--export-dynamic-symbol=_ZN3rex6chrono5Clock20QueryGuestSystemTimeEv")
+    set_target_properties(absolute_object_wait_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
+    add_test(NAME absolute_object_wait COMMAND absolute_object_wait_test)
+    set_tests_properties(absolute_object_wait PROPERTIES LABELS "linux;threading;kernel;wait" TIMEOUT 20)
     add_executable(absolute_delay_test kernel/absolute_delay_test.cpp)
     target_link_libraries(absolute_delay_test PRIVATE rexruntime ${CMAKE_DL_LIBS})
     target_link_options(absolute_delay_test PRIVATE

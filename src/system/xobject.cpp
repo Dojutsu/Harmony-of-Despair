@@ -23,6 +23,7 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/util/string_utils.h>  // For TranslateAnsiStringAddress
 #include <rex/system/xobject.h>
+#include "absolute_wait_deadline.h"
 // #include <rex/kernel/xboxkrnl/private.h>  // TODO: JIT only
 #include <rex/system/xenumerator.h>
 #include <rex/system/xevent.h>
@@ -239,10 +240,7 @@ void XObject::SetAttributes(uint32_t obj_attributes_ptr) {
 
 uint32_t XObject::TimeoutTicksToMs(int64_t timeout_ticks) {
   if (timeout_ticks > 0) {
-    // Absolute time, based on January 1, 1601.
-    // TODO(benvanik): convert time to relative time.
-    assert_always();
-    return 0;
+    return detail::AbsoluteDeadlineMillis(static_cast<uint64_t>(timeout_ticks));
   } else if (timeout_ticks < 0) {
     // Unsigned magnitude also handles INT64_MIN without signed negation UB.
     // Saturate before narrowing: very long waits must not wrap into short ones.
@@ -262,54 +260,80 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
     return X_STATUS_SUCCESS;
   }
 
-  auto timeout_ms = opt_timeout ? std::chrono::milliseconds(chrono::Clock::ScaleGuestDurationMillis(
+  const bool absolute = opt_timeout && static_cast<int64_t>(*opt_timeout) > 0;
+  const uint64_t deadline = absolute ? *opt_timeout : 0;
+  for (;;) {
+    auto timeout_ms = absolute
+                          ? detail::AbsoluteWaitSlice(deadline)
+                          : opt_timeout
+                                ? std::chrono::milliseconds(chrono::Clock::ScaleGuestDurationMillis(
                                       TimeoutTicksToMs(*opt_timeout)))
                                 : std::chrono::milliseconds::max();
 
-  XThread::CheckTitleTermination();
-  auto result = rex::thread::Wait(wait_handle, alertable ? true : false, timeout_ms);
-  XThread::CheckTitleTermination();
-  switch (result) {
-    case rex::thread::WaitResult::kSuccess:
-      WaitCallback();
-      return X_STATUS_SUCCESS;
-    case rex::thread::WaitResult::kUserCallback:
-      // Or X_STATUS_ALERTED?
-      return X_STATUS_USER_APC;
-    case rex::thread::WaitResult::kTimeout:
-      rex::thread::MaybeYield();
-      return X_STATUS_TIMEOUT;
-    default:
-    case rex::thread::WaitResult::kAbandoned:
-    case rex::thread::WaitResult::kFailed:
-      return X_STATUS_ABANDONED_WAIT_0;
+    XThread::CheckTitleTermination();
+    auto result = rex::thread::Wait(wait_handle, alertable ? true : false, timeout_ms);
+    XThread::CheckTitleTermination();
+    switch (result) {
+      case rex::thread::WaitResult::kSuccess:
+        WaitCallback();
+        return X_STATUS_SUCCESS;
+      case rex::thread::WaitResult::kUserCallback:
+        // Or X_STATUS_ALERTED?
+        return X_STATUS_USER_APC;
+      case rex::thread::WaitResult::kTimeout:
+        if (absolute && detail::AbsoluteWaitPending(deadline)) {
+          continue;
+        }
+        rex::thread::MaybeYield();
+        return X_STATUS_TIMEOUT;
+      default:
+      case rex::thread::WaitResult::kAbandoned:
+      case rex::thread::WaitResult::kFailed:
+        return X_STATUS_ABANDONED_WAIT_0;
+    }
   }
 }
 
 X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object, uint32_t wait_reason,
                                 uint32_t processor_mode, uint32_t alertable,
                                 uint64_t* opt_timeout) {
-  auto timeout_ms = opt_timeout ? std::chrono::milliseconds(chrono::Clock::ScaleGuestDurationMillis(
+  const bool absolute = opt_timeout && static_cast<int64_t>(*opt_timeout) > 0;
+  const uint64_t deadline = absolute ? *opt_timeout : 0;
+  bool source_signaled = false;
+  for (;;) {
+    auto timeout_ms = absolute
+                          ? detail::AbsoluteWaitSlice(deadline)
+                          : opt_timeout
+                                ? std::chrono::milliseconds(chrono::Clock::ScaleGuestDurationMillis(
                                       TimeoutTicksToMs(*opt_timeout)))
                                 : std::chrono::milliseconds::max();
 
-  auto result =
-      rex::thread::SignalAndWait(signal_object->GetWaitHandle(), wait_object->GetWaitHandle(),
-                                 alertable ? true : false, timeout_ms);
-  switch (result) {
-    case rex::thread::WaitResult::kSuccess:
-      wait_object->WaitCallback();
-      return X_STATUS_SUCCESS;
-    case rex::thread::WaitResult::kUserCallback:
-      // Or X_STATUS_ALERTED?
-      return X_STATUS_USER_APC;
-    case rex::thread::WaitResult::kTimeout:
-      rex::thread::MaybeYield();
-      return X_STATUS_TIMEOUT;
-    default:
-    case rex::thread::WaitResult::kAbandoned:
-    case rex::thread::WaitResult::kFailed:
-      return X_STATUS_ABANDONED_WAIT_0;
+    XThread::CheckTitleTermination();
+    auto result = source_signaled
+        ? rex::thread::Wait(wait_object->GetWaitHandle(), alertable != 0, timeout_ms)
+        : rex::thread::SignalAndWait(signal_object->GetWaitHandle(), wait_object->GetWaitHandle(),
+                                    alertable != 0, timeout_ms);
+    // Rechecking a deadline must not repeat the guest-visible signal operation.
+    source_signaled = true;
+    XThread::CheckTitleTermination();
+    switch (result) {
+      case rex::thread::WaitResult::kSuccess:
+        wait_object->WaitCallback();
+        return X_STATUS_SUCCESS;
+      case rex::thread::WaitResult::kUserCallback:
+        // Or X_STATUS_ALERTED?
+        return X_STATUS_USER_APC;
+      case rex::thread::WaitResult::kTimeout:
+        if (absolute && detail::AbsoluteWaitPending(deadline)) {
+          continue;
+        }
+        rex::thread::MaybeYield();
+        return X_STATUS_TIMEOUT;
+      default:
+      case rex::thread::WaitResult::kAbandoned:
+      case rex::thread::WaitResult::kFailed:
+        return X_STATUS_ABANDONED_WAIT_0;
+    }
   }
 }
 
@@ -322,53 +346,68 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
     assert_not_null(wait_handles[i]);
   }
 
-  auto timeout_ms = opt_timeout ? std::chrono::milliseconds(chrono::Clock::ScaleGuestDurationMillis(
+  const bool absolute = opt_timeout && static_cast<int64_t>(*opt_timeout) > 0;
+  const uint64_t deadline = absolute ? *opt_timeout : 0;
+  for (;;) {
+    auto timeout_ms = absolute
+                          ? detail::AbsoluteWaitSlice(deadline)
+                          : opt_timeout
+                                ? std::chrono::milliseconds(chrono::Clock::ScaleGuestDurationMillis(
                                       TimeoutTicksToMs(*opt_timeout)))
                                 : std::chrono::milliseconds::max();
 
-  XThread::CheckTitleTermination();
-  if (wait_type) {
-    auto result =
-        rex::thread::WaitAny(std::move(wait_handles), alertable ? true : false, timeout_ms);
     XThread::CheckTitleTermination();
-    switch (result.first) {
-      case rex::thread::WaitResult::kSuccess:
-        objects[result.second]->WaitCallback();
+    if (wait_type) {
+      auto result =
+          rex::thread::WaitAny(absolute ? wait_handles : std::move(wait_handles), alertable != 0,
+                               timeout_ms);
+      XThread::CheckTitleTermination();
+      switch (result.first) {
+        case rex::thread::WaitResult::kSuccess:
+          objects[result.second]->WaitCallback();
 
-        return X_STATUS(result.second);
-      case rex::thread::WaitResult::kUserCallback:
-        // Or X_STATUS_ALERTED?
-        return X_STATUS_USER_APC;
-      case rex::thread::WaitResult::kTimeout:
-        rex::thread::MaybeYield();
-        return X_STATUS_TIMEOUT;
-      default:
-      case rex::thread::WaitResult::kAbandoned:
-        return X_STATUS(X_STATUS_ABANDONED_WAIT_0 + result.second);
-      case rex::thread::WaitResult::kFailed:
-        return X_STATUS_UNSUCCESSFUL;
-    }
-  } else {
-    auto result =
-        rex::thread::WaitAll(std::move(wait_handles), alertable ? true : false, timeout_ms);
-    XThread::CheckTitleTermination();
-    switch (result) {
-      case rex::thread::WaitResult::kSuccess:
-        for (uint32_t i = 0; i < count; i++) {
-          objects[i]->WaitCallback();
+          return X_STATUS(result.second);
+        case rex::thread::WaitResult::kUserCallback:
+          // Or X_STATUS_ALERTED?
+          return X_STATUS_USER_APC;
+        case rex::thread::WaitResult::kTimeout:
+          if (absolute && detail::AbsoluteWaitPending(deadline)) {
+          continue;
         }
+          rex::thread::MaybeYield();
+          return X_STATUS_TIMEOUT;
+        default:
+        case rex::thread::WaitResult::kAbandoned:
+          return X_STATUS(X_STATUS_ABANDONED_WAIT_0 + result.second);
+        case rex::thread::WaitResult::kFailed:
+          return X_STATUS_UNSUCCESSFUL;
+      }
+    } else {
+      auto result =
+          rex::thread::WaitAll(absolute ? wait_handles : std::move(wait_handles), alertable != 0,
+                               timeout_ms);
+      XThread::CheckTitleTermination();
+      switch (result) {
+        case rex::thread::WaitResult::kSuccess:
+          for (uint32_t i = 0; i < count; i++) {
+            objects[i]->WaitCallback();
+          }
 
-        return X_STATUS_SUCCESS;
-      case rex::thread::WaitResult::kUserCallback:
-        // Or X_STATUS_ALERTED?
-        return X_STATUS_USER_APC;
-      case rex::thread::WaitResult::kTimeout:
-        rex::thread::MaybeYield();
-        return X_STATUS_TIMEOUT;
-      default:
-      case rex::thread::WaitResult::kAbandoned:
-      case rex::thread::WaitResult::kFailed:
-        return X_STATUS_ABANDONED_WAIT_0;
+          return X_STATUS_SUCCESS;
+        case rex::thread::WaitResult::kUserCallback:
+          // Or X_STATUS_ALERTED?
+          return X_STATUS_USER_APC;
+        case rex::thread::WaitResult::kTimeout:
+          if (absolute && detail::AbsoluteWaitPending(deadline)) {
+          continue;
+        }
+          rex::thread::MaybeYield();
+          return X_STATUS_TIMEOUT;
+        default:
+        case rex::thread::WaitResult::kAbandoned:
+        case rex::thread::WaitResult::kFailed:
+          return X_STATUS_ABANDONED_WAIT_0;
+      }
     }
   }
 }
