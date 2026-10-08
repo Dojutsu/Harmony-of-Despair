@@ -1370,6 +1370,10 @@ class LanDiscoveryService::Impl {
           const auto source_bytes = InviteLanSourceBytes(remote);
           const auto request_proof =
               InviteLanMac(attempt_id, "invite-lan-request-v1", source_bytes);
+          const std::array acknowledged{attempt_id};
+          const auto hosted_session=admission_grants->hosted_directory_session();
+          if (!legacy_diagnostics&&(!hosted_session||!admission_grants->HasCurrentPrivateDiscoveryGrant(*hosted_session,acknowledged)))
+            continue;
           if (!selector || !request_proof ||
               !InviteLanEqual(invite_packet.selector, selector->data(), selector->size()) ||
               !InviteLanEqual(invite_packet.proof, request_proof->data(),
@@ -1447,6 +1451,11 @@ class LanDiscoveryService::Impl {
                  reinterpret_cast<sockaddr*>(&source), length);
         continue;
       }
+      if (valid && query.type == kQuery && !legacy_diagnostics) {
+        const auto matches=NatProbeMatchAcknowledgedDiscoveryAttempts(socket,{source.sin_addr.s_addr,ntohs(source.sin_port)});
+        const auto hosted_session=admission_grants->hosted_directory_session();
+        valid=hosted_session&&admission_grants->HasCurrentPrivateDiscoveryGrant(*hosted_session,matches);
+      }
       if (valid && query.type == kQuery) {
         REXSYS_INFO("LAN discovery: received search query from {:08X}:{}", source.sin_addr.s_addr,
                     ntohs(source.sin_port));
@@ -1507,6 +1516,10 @@ class LanDiscoveryService::Impl {
           }
           existing = valid && std::any_of(advertised->members.begin(), advertised->members.end(),
                                           [&](const auto& member) { return member.xuid == xuid; });
+          if(valid&&existing&&!legacy_diagnostics) {
+            const auto member=std::find_if(advertised->members.begin(),advertised->members.end(),[&](const auto& value){return value.xuid==xuid;});
+            valid=member!=advertised->members.end()&&bool(member->gameplay_admission);
+          }
         }
         if (expired_reply) {
           // The fixed, retired receipt proves only expiry. No member is
@@ -1567,6 +1580,7 @@ class LanDiscoveryService::Impl {
               }
             }
           }
+          if(!legacy_diagnostics&&!existing&&!reservation)valid=false;
           if (valid) {
             const auto token = NewArbitrationToken();
             std::lock_guard record_lock(*advertised->mutex);
@@ -2035,7 +2049,7 @@ std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint
                                                        uint32_t local_user_index) {
   (void)local_user_index;
   if(impl_->private_configured)return impl_->private_adapter?impl_->private_adapter->Search(timeout_ms,max_results):std::vector<SessionRecord>{};
-  if(!impl_->legacy_diagnostics&&REXCVAR_GET(session_directory_url).empty())return {};
+  if(!impl_->legacy_diagnostics)return {};
   static std::atomic<uint64_t> next_search_attempt{0};
   const uint64_t search_attempt = ++next_search_attempt;
   const auto search_started = std::chrono::steady_clock::now();
@@ -2408,8 +2422,8 @@ std::optional<SessionRecord> LanDiscoveryService::Join(const SessionRecord& sess
                                                        const SessionMember& member,
                                                        uint32_t timeout_ms) {
   if(impl_->private_configured)return impl_->private_adapter?impl_->private_adapter->Join(session,member,timeout_ms):std::nullopt;
-  if(!impl_->legacy_diagnostics&&REXCVAR_GET(session_directory_url).empty())return std::nullopt;
   auto admission_lease = directory_.AcquireClientAdmissionSocket(member.user_index, session);
+  if(!impl_->legacy_diagnostics&&!admission_lease)return std::nullopt;
   if (!admission_lease && directory_.HasClientAdmission(member.user_index)) return std::nullopt;
   if (!admission_lease) impl_->client_exchange = true;
   struct ExchangeScope { std::function<void()> release; ~ExchangeScope() { release(); } };
@@ -2572,7 +2586,8 @@ std::optional<ArbitrationSnapshot> LanDiscoveryService::RegisterArbitration(
 std::optional<SessionRecord> LanDiscoveryService::Leave(const SessionRecord& session, uint64_t xuid,
                                                         uint32_t timeout_ms) {
   if(impl_->private_configured)return impl_->private_adapter?impl_->private_adapter->Leave(session,xuid,timeout_ms):std::nullopt;
-  if(!impl_->legacy_diagnostics&&REXCVAR_GET(session_directory_url).empty())return std::nullopt;
+  if(!impl_->legacy_diagnostics&&(!session.arbitration_client||!session.arbitration_client->confirmed||
+     session.arbitration_client->xuid!=xuid||session.arbitration_client->identity!=RecordIdentity(session)))return std::nullopt;
   SessionMember member;
   member.xuid = xuid;
   impl_->client_exchange = true;

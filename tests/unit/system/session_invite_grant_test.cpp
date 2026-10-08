@@ -965,3 +965,65 @@ TEST_CASE("poll invalidation racing a reservation never creates reusable authori
 }
 
 }  // namespace rex::system::xam
+
+namespace rex::system::xam {
+TEST_CASE("Directory configuration alone grants no public discovery or host membership", "[session][invite-grant][network][security]") {
+  struct ProtectedDirectoryConfiguration {
+    std::string url=REXCVAR_GET(session_directory_url),build=REXCVAR_GET(session_directory_build_id),
+      invite=REXCVAR_GET(private_lan_invitation_file),listener=REXCVAR_GET(lan_discovery_listen_address);
+    bool legacy=REXCVAR_GET(private_lan_allow_legacy_diagnostics);
+    ProtectedDirectoryConfiguration(){REXCVAR_SET(session_directory_url,std::string("http://127.0.0.1:1"));
+      REXCVAR_SET(session_directory_build_id,std::string{});REXCVAR_SET(private_lan_invitation_file,std::string{});
+      REXCVAR_SET(lan_discovery_listen_address,std::string("127.0.0.1"));REXCVAR_SET(private_lan_allow_legacy_diagnostics,false);}
+    ~ProtectedDirectoryConfiguration(){REXCVAR_SET(session_directory_url,url);REXCVAR_SET(session_directory_build_id,build);
+      REXCVAR_SET(private_lan_invitation_file,invite);REXCVAR_SET(lan_discovery_listen_address,listener);REXCVAR_SET(private_lan_allow_legacy_diagnostics,legacy);}
+  } configuration;
+  // Empty build ID prevents any HTTP worker/request. Only the test-owned UDP
+  // listener operates; the URL tests selection, not an external service.
+  constexpr uint32_t title=0x58410a7a;uint16_t port;
+  {SocketFixture probe;REQUIRE(probe.socket!=kBadSocket);port=BindLoopback(probe.socket).port;}
+  SessionRegistry registry;auto session=registry.Create(1,"PrivateMetadata",{htonl(INADDR_LOOPBACK),3074},1,3,3);REQUIRE(session);
+  auto grants=std::make_shared<HostAdmissionGrantStore>();NatFixture nat;LanDiscoveryService host(title,port,grants);
+  REQUIRE(host.Advertise(session));SocketFixture peer,other;REQUIRE(peer.socket!=kBadSocket);REQUIRE(other.socket!=kBadSocket);
+  const auto address=BindLoopback(peer.socket);BindLoopback(other.socket);
+  DiscoveryWirePacket query{};PutBigEndian(query,0,0x5245584c);PutBigEndian(query,4,2,2);query[6]=1;PutBigEndian(query,8,title);
+  CHECK_FALSE(TransferDiscovery(peer.socket,port,query));
+  CHECK_FALSE(TransferDiscovery(peer.socket,port,JoinPacket(*session,title,2,false)));
+  CHECK_FALSE(TransferDiscovery(peer.socket,port,JoinPacket(*session,title,2,true)));
+  {std::lock_guard lock(*session->mutex);CHECK(session->members.size()==1);}
+  LanDiscoveryService ungranted_client(title,port);CHECK(ungranted_client.Search(50,1).empty());
+  SessionRecord copy=*session;SessionMember member{3,"Ungrant",0,true,false,false};
+  CHECK_FALSE(ungranted_client.Join(copy,member,50));CHECK_FALSE(copy.arbitration_client);
+  Install(*grants,Clock::now(),PrivateAttempt(kAttemptA,1,60000));
+  CHECK_FALSE(TransferDiscovery(peer.socket,port,query));
+  nat.Add(kAttemptA);AcknowledgeHostAttempt(peer.socket,port,kAttemptA,address);
+  REQUIRE(TransferDiscovery(peer.socket,port,query));CHECK(grants->available_grant_count()==1);
+  CHECK_FALSE(TransferDiscovery(other.socket,port,query));
+  CHECK_FALSE(TransferDiscovery(other.socket,port,JoinPacket(*session,title,3,false)));
+  {std::lock_guard lock(*session->mutex);CHECK(session->members.size()==1);}
+  const auto join=JoinPacket(*session,title,2,false);REQUIRE(TransferDiscovery(peer.socket,port,join));
+  {std::lock_guard lock(*session->mutex);REQUIRE(session->members.size()==2);CHECK(session->members.back().gameplay_admission);}
+  CHECK(grants->available_grant_count()==0);CHECK_FALSE(TransferDiscovery(peer.socket,port,query));
+  REQUIRE(TransferDiscovery(peer.socket,port,join));
+  CHECK_FALSE(TransferDiscovery(other.socket,port,JoinPacket(*session,title,4,false)));
+  host.StopAdvertising();
+}
+
+TEST_CASE("Discovery grant checks are read-only current unique and invalidation-aware", "[session][invite-grant][security]") {
+  HostAdmissionGrantStore grants;const auto now=Clock::time_point{}+std::chrono::seconds(10);
+  const std::array one{std::string(kAttemptA)},wrong{std::string(kAttemptB)};
+  CHECK_FALSE(grants.HasCurrentPrivateDiscoveryGrant("session-a",one,now));Install(grants,now);
+  CHECK(grants.HasCurrentPrivateDiscoveryGrant("session-a",one,now));CHECK(grants.available_grant_count(now)==1);
+  CHECK_FALSE(grants.HasCurrentPrivateDiscoveryGrant("session-b",one,now));CHECK_FALSE(grants.HasCurrentPrivateDiscoveryGrant("session-a",wrong,now));
+  CHECK_FALSE(grants.HasCurrentPrivateDiscoveryGrant("session-a",one,now+std::chrono::seconds(1)));
+  const auto reserved=Reserve(grants,2,now);REQUIRE(reserved.status==HostAdmissionReservationStatus::kReserved);
+  CHECK(grants.HasCurrentPrivateDiscoveryGrant("session-a",one,now));grants.InvalidateSession("session-a");
+  CHECK_FALSE(grants.HasCurrentPrivateDiscoveryGrant("session-a",one,now));grants.Finish(reserved.reservation,false,now);
+  Install(grants,now);const auto second=Reserve(grants,2,now);REQUIRE(second.status==HostAdmissionReservationStatus::kReserved);
+  grants.Finish(second.reservation,true,now);CHECK_FALSE(grants.HasCurrentPrivateDiscoveryGrant("session-a",one,now));
+  HostAdmissionGrantStore ambiguous;const std::array attempts{PrivateAttempt(kAttemptA),PrivateAttempt(kAttemptB)};
+  ambiguous.ApplyAuthenticatedPoll("session-a",attempts,now);const std::array both{std::string(kAttemptA),std::string(kAttemptB)};
+  CHECK_FALSE(ambiguous.HasCurrentPrivateDiscoveryGrant("session-a",both,now));CHECK(ambiguous.HasCurrentPrivateDiscoveryGrant("session-a",one,now));
+}
+
+} // namespace rex::system::xam

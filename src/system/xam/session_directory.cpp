@@ -671,6 +671,18 @@ size_t HostAdmissionGrantStore::available_grant_count(Clock::time_point now) con
   });
 }
 
+bool HostAdmissionGrantStore::HasCurrentPrivateDiscoveryGrant(std::string_view session,
+    std::span<const std::string> acknowledged,Clock::time_point now) const {
+  std::lock_guard lock(mutex_);
+  if(session.empty()||session!=hosted_directory_session_)return false;
+  size_t matches=0;
+  for(const auto& [attempt,grant]:grants_)
+    if(grant.directory_session_id==session&&!grant.consumed_xuid&&!grant.invalidated_while_reserved&&
+       now<grant.expires_at&&std::find(acknowledged.begin(),acknowledged.end(),attempt)!=acknowledged.end())
+      ++matches;
+  return matches==1;
+}
+
 namespace {
 constexpr uint32_t kDirectoryProtocolVersion = 1;
 constexpr uint32_t kNoSessionIndex = 0xFFFFFFFFu;
