@@ -487,6 +487,25 @@ static void RunLinuxSendBounds(KernelState* kernel) {
         uint32_t(*query) == payload.size() && uint32_t(*flags) == 0 && pending_recvs.empty(),
         "scatter send query preserves completion semantics");
   receive(payload.data(), payload.size());
+  // The title reuses its successful synchronous send OVERLAPPED without
+  // querying it between sends. Every zero return is already completed.
+  for (unsigned attempt = 0; attempt < 4; ++attempt) {
+    reset_outputs();
+    Check(send() == 0 && uint32_t(*bytes) == payload.size(),
+          "completed synchronous send OVERLAPPED can be reused without querying");
+    Check(uint32_t(overlapped->internal) == 0 &&
+          uint32_t(overlapped->internal_high) == payload.size() &&
+          uint32_t(overlapped->offset.low) == 0xA7A7A7A7,
+          "reused synchronous send publishes exact completion fields");
+    event->Query(&type, &state);
+    Check(state == 1, "reused synchronous send signals its actual event");
+    receive(payload.data(), payload.size());
+  }
+  *query = 99; *flags = 99;
+  Check(NetDll_WSAGetOverlappedResult_entry(1, sender->handle(), overlapped, query, 0, flags) == 1 &&
+        uint32_t(*query) == payload.size() && uint32_t(*flags) == 0 && pending_recvs.empty(),
+        "latest reused synchronous send completion remains queryable");
+  std::cout << "Synchronous send OVERLAPPED reuse without intermediate queries passed\\n";
   reset_outputs(); failure(send(0), 10022);
   failure(send(65), 10022); failure(send(0xFFFFFFFF), 10022);
   failure(NetDll_WSASendTo_entry(1, sender->handle(), bad.operator()<XWSABUF>(0xFFFFFFFC),
