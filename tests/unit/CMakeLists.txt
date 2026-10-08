@@ -3,7 +3,6 @@
 add_executable(unit_tests
     test_memory.cpp
     audio/game_audio_capture_test.cpp
-    graphics/video_counter_test.cpp
     memory/heap_allocation_test.cpp
     kernel/relative_timeout_range_test.cpp
     kernel/object_table_test.cpp
@@ -391,3 +390,27 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME timer_queue_lifecycle COMMAND timer_queue_lifecycle_test)
     set_tests_properties(timer_queue_lifecycle PROPERTIES LABELS "linux;threading;timer" TIMEOUT 20)
 endif()
+
+# Protected graphics methods are intentionally hidden in the runtime ABI.
+# Compile the actual producer translation units into this regression fixture
+# rather than exporting private methods to tests.
+add_executable(video_counter_test
+    graphics/video_counter_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/graphics/graphics_system.cpp
+    ${PROJECT_SOURCE_DIR}/src/graphics/command_processor.cpp
+)
+target_include_directories(video_counter_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/thirdparty ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(video_counter_test PRIVATE rexruntime Catch2::Catch2WithMain)
+target_compile_options(video_counter_test PRIVATE
+    -UTRACY_ENABLE -UREXGLUE_ENABLE_PROFILING
+    -UREXGLUE_ENABLE_PERF_COUNTERS -UREXGLUE_PROFILE_GUEST_FUNCTIONS)
+set_target_properties(video_counter_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:rexruntime>)
+if(UNIX AND NOT APPLE)
+    set_target_properties(video_counter_test PROPERTIES
+        INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
+endif()
+catch_discover_tests(video_counter_test
+    TEST_PREFIX "graphics."
+    PROPERTIES LABELS "graphics;video-counter" TIMEOUT 30)
