@@ -2964,5 +2964,57 @@ TEST_CASE("production admission Bind wakes the worker after an overlapping RPC",
 }
 #endif
 
+#if REX_PLATFORM_GNU_LINUX
+TEST_CASE("admission identity snapshot cannot retire a concurrently bound user",
+          "[session][directory][client-admission][production][race]") {
+  ClientNatFixture nat;
+  auto a = InviteAttemptFor("session-a", std::string(kAttempt), std::string(kCapability));
+  auto b = InviteAttemptFor("session-b", "11112222333344445555666677778888",
+                                           "88887777666655554444333322221111");
+  a.rendezvous_host = b.rendezvous_host = "127.0.0.1";
+  const LanAddress peer{htonl(INADDR_LOOPBACK), 39194};
+  auto first = ExactDiscoveryFor(a, 1, peer), second = ExactDiscoveryFor(b, 2, peer);
+  const int sa = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+  const int sb = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+  REQUIRE(sa >= 0); REQUIRE(sb >= 0);
+  struct Untransferred {
+    int a,b;
+    ~Untransferred() { if(a>=0)close(a);if(b>=0)close(b); }
+  } sockets{sa,sb};
+  nat.Bind(sa,a,peer);nat.Bind(sb,b,peer);
+  StageBarrier identity;
+  std::atomic<bool> block_next{false};
+  std::atomic<unsigned> second_arms{0};
+  SessionDirectoryClient directory(
+      [&](uint32_t user) -> std::optional<uint64_t> {
+        if(user==0 && block_next.exchange(false))identity.ArriveAndWait();
+        return kLocalXuid+user;
+      }, [&](const ClientAdmissionTransportRequest& request) {
+        if(request.action==ClientAdmissionTransportAction::kArm) {
+          if(request.local_user_index==1)++second_arms;
+          return AdmissionHttp(AdmissionBody(1,false,59000,{},request.attempt_id),request.request_started_at);
+        }
+        return ClientAdmissionTransportResponse{204,{},request.request_started_at};
+      }, false);
+  directory.SetClientAdmissionTitle(kTitle);
+  REQUIRE(directory.PrepareClientAdmission(0,kTitle,a,*first,sa)==ClientAdmissionPrepareResult::kPrepared);
+  sockets.a=-1;REQUIRE(directory.ConfirmClientAdmissionSession(0,first));
+  block_next=true;
+  auto poll=std::async(std::launch::async,[&]{directory.PollClientAdmissions(Clock::now());});
+  struct Release { StageBarrier& barrier;~Release(){barrier.Release();} } release{identity};
+  REQUIRE(identity.WaitUntilEntered());
+  REQUIRE(directory.PrepareClientAdmission(1,kTitle,b,*second,sb)==ClientAdmissionPrepareResult::kPrepared);
+  sockets.b=-1;REQUIRE(directory.ConfirmClientAdmissionSession(1,second));
+  identity.Release();poll.get();
+  CHECK(directory.HasClientAdmission(1));
+  CHECK(second_arms==0);
+  directory.PollClientAdmissions(Clock::now());
+  CHECK(second_arms==1);
+  CHECK(directory.HasClientAdmission(1));
+  directory.StopAllClientAdmissions();
+  directory.PollClientAdmissions(Clock::now());
+}
+#endif
+
 }  // namespace
 }  // namespace rex::system::xam

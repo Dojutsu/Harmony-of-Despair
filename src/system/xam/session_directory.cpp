@@ -2488,17 +2488,22 @@ class SessionDirectoryClient::Impl {
     std::lock_guard poll_lock(client_admission_poll_mutex);
     std::vector<ClientAdmissionCancellation> cancellations;
     std::vector<ClientAdmissionOperation> operations;
-    std::unordered_map<uint32_t, std::optional<uint64_t>> live_users;
+    struct UserSnapshot {
+      uint64_t lifecycle_token;
+      std::optional<uint64_t> xuid;
+    };
+    std::unordered_map<uint32_t, UserSnapshot> live_users;
     if (client_admission_user_identity) {
-      std::vector<uint32_t> users;
+      std::vector<std::pair<uint32_t, uint64_t>> users;
       {
         std::lock_guard lock(client_admission_mutex);
         users.reserve(client_admissions.size());
-        for (const auto& [local_user_index, _] : client_admissions)
-          users.push_back(local_user_index);
+        for (const auto& [local_user_index, context] : client_admissions)
+          users.emplace_back(local_user_index, context.state.lifecycle_token());
       }
-      for (uint32_t local_user_index : users)
-        live_users[local_user_index] = client_admission_user_identity(local_user_index);
+      for (const auto& [local_user_index, token] : users)
+        live_users.emplace(local_user_index, UserSnapshot{
+            token, client_admission_user_identity(local_user_index)});
     }
     {
       std::lock_guard lock(client_admission_mutex);
@@ -2508,7 +2513,17 @@ class SessionDirectoryClient::Impl {
       for (auto iterator = client_admissions.begin(); iterator != client_admissions.end();) {
         auto& context = iterator->second;
         auto user = client_admission_users.find(iterator->first);
-        auto current_user = client_admission_user_identity ? live_users[iterator->first]
+        auto identity = live_users.find(iterator->first);
+        if (client_admission_user_identity &&
+            (identity == live_users.end() ||
+             identity->second.lifecycle_token != context.state.lifecycle_token())) {
+          // A Bind/replacement arrived while identities were queried outside
+          // the mutex. Its notification causes another pass; this older
+          // snapshot has no authority to cancel or arm the new lifecycle.
+          ++iterator;
+          continue;
+        }
+        auto current_user = client_admission_user_identity ? identity->second.xuid
                                                            : (user == client_admission_users.end()
                                                                   ? std::optional<uint64_t>{}
                                                                   : user->second);
