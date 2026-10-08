@@ -3,6 +3,9 @@
 #include <rex/thread.h>
 #if REX_PLATFORM_LINUX
 #include <pthread.h>
+#include <time.h>
+#include <memory>
+#include <vector>
 #include <chrono>
 #include <future>
 #include <thread>
@@ -74,6 +77,55 @@ TEST_CASE("POSIX single waits expire while a condition lock is contended",
         if (result == rex::thread::WaitResult::kSuccess) CHECK(mutant->Release());
         CHECK(rex::thread::Wait(mutant.get(), false, 0ms) == rex::thread::WaitResult::kSuccess);
         CHECK(mutant->Release());
+      }
+    }
+  }
+}
+
+TEST_CASE("POSIX finite multiple waits sleep through fractional milliseconds",
+          "[thread][wait][timeout][multiple-wait-idle-cpu]") {
+  for (bool alertable : {false, true}) {
+    for (bool wait_all : {false, true}) {
+      DYNAMIC_SECTION("alertable=" << alertable << " all=" << wait_all) {
+        // Nine real empty production semaphores match the audio worker's
+        // alertable WaitAny slice. Measure executing thread CPU, not elapsed
+        // wall time, so scheduler delays cannot be mistaken for busy work.
+        std::vector<std::unique_ptr<rex::thread::Semaphore>> objects;
+        rex::thread::WaitHandle* handles[9];
+        for (size_t i = 0; i < 9; ++i) {
+          objects.push_back(rex::thread::Semaphore::Create(0, 1));
+          REQUIRE(objects.back());
+          handles[i] = objects.back().get();
+        }
+        auto cpu_ns = [] {
+          timespec sample{};
+          REQUIRE(clock_gettime(CLOCK_THREAD_CPUTIME_ID, &sample) == 0);
+          return uint64_t(sample.tv_sec) * 1000000000 + sample.tv_nsec;
+        };
+        const auto cpu_before = cpu_ns();
+        const auto began = std::chrono::steady_clock::now();
+        for (unsigned i = 0; i < 80; ++i) {
+          CHECK(rex::thread::WaitMultiple(handles, 9, wait_all, alertable, 1ms).first ==
+                rex::thread::WaitResult::kTimeout);
+        }
+        const auto cpu_elapsed_ns = cpu_ns() - cpu_before;
+        const auto elapsed = std::chrono::steady_clock::now() - began;
+        INFO("thread CPU ns=" << cpu_elapsed_ns);
+        CHECK(elapsed >= 75ms);
+        CHECK(cpu_elapsed_ns < 30000000);
+        // Timed-out polls do not consume later signals; WaitAny keeps its
+        // real index and WaitAll consumes only when every handle is ready.
+        objects[4]->Release(1, nullptr);
+        const auto ready = rex::thread::WaitMultiple(handles, 9, false, alertable, 0ms);
+        CHECK(ready.first == rex::thread::WaitResult::kSuccess);
+        CHECK(ready.second == 4);
+        CHECK(rex::thread::WaitMultiple(handles, 9, false, alertable, 0ms).first ==
+              rex::thread::WaitResult::kTimeout);
+        for (auto& object : objects) object->Release(1, nullptr);
+        CHECK(rex::thread::WaitMultiple(handles, 9, true, alertable, 10ms).first ==
+              rex::thread::WaitResult::kSuccess);
+        CHECK(rex::thread::WaitMultiple(handles, 9, false, alertable, 0ms).first ==
+              rex::thread::WaitResult::kTimeout);
       }
     }
   }
