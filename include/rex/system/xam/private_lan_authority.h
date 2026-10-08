@@ -55,6 +55,11 @@ class PrivateLanAuthority final {
   std::unique_ptr<Admission> PrepareDeparture(const PrivateLanJoinClaim& claim,
       std::span<const uint8_t> proof,Clock::time_point now=Clock::now());
   std::unique_ptr<Admission> PrepareExpiration(Clock::time_point now=Clock::now());
+  // The title may bind UDP after advertising. Update only a host-only authority
+  // through the same revision-checked transaction as the local session record.
+  // Existing peer tickets/routes never silently change endpoint.
+  std::unique_ptr<Admission> PrepareHostEndpoint(LanAddress endpoint);
+
   static std::unique_ptr<PrivateLanAuthority> Create(uint32_t title,
       ArbitrationIdentity identity, LanAddress host_endpoint,
       std::shared_ptr<const PrivateLanInvitation> invitation);

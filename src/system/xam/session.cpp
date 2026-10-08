@@ -997,9 +997,24 @@ size_t SessionRegistry::UpdateHostedPort(uint64_t host_xuid, uint16_t port) {
   for (auto& [_, session] : sessions_) {
     std::lock_guard session_lock(*session->mutex);
     if (session->host_xuid == host_xuid && session->state != SessionState::kDeleted) {
-      session->info.host_address.port = port;
-      for (auto& member : session->members)
-        if (member.xuid == host_xuid) member.gameplay_address = session->info.host_address;
+      if (!port) continue;
+      const LanAddress endpoint{session->info.host_address.ipv4, port};
+      if (session->private_lan_authority && session->info.host_address != endpoint) {
+        // The real title advertises before binding. Publish the physical port
+        // and the authority's future encrypted tickets together. An active
+        // peer route cannot be redirected by rebinding a local socket.
+        auto prepared=session->private_lan_authority->PrepareHostEndpoint(endpoint);
+        if(!prepared||!prepared->CommitIf([&]() noexcept {
+          session->info.host_address=endpoint;
+          for(auto& member:session->members)
+            if(member.xuid==host_xuid)member.gameplay_address=endpoint;
+          return true;
+        }))continue;
+      } else {
+        session->info.host_address=endpoint;
+        for(auto& member:session->members)
+          if(member.xuid==host_xuid)member.gameplay_address=endpoint;
+      }
       ++updated;
     }
   }

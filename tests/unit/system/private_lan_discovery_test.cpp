@@ -136,6 +136,9 @@ TEST_CASE("private LAN title order advertises then binds before public-slot join
   auto joined=client.Join(*actual,member,500);REQUIRE(joined);
   REQUIRE(client_registry.CommitJoinedRecord(actual,std::move(*joined),[]{return true;}));
   REQUIRE(client.ActivatePrivateLanGameplay(actual,2));
+  REQUIRE(host_registry.UpdateHostedPort(1,client_socket.address.port)==0);
+  REQUIRE(hosted->info.host_address==host_socket.address);
+  REQUIRE(host_registry.UpdateHostedPort(1,host_socket.address.port)==1);
   ExchangeGameplay(client_socket,host_socket,1,61);ExchangeGameplay(host_socket,client_socket,2,83);
   REQUIRE(client.Leave(*actual,2,500));
   host.StopAdvertising();
@@ -162,6 +165,9 @@ TEST_CASE("private LAN title order binds before advertising before public-slot j
   auto joined=client.Join(*actual,member,500);REQUIRE(joined);
   REQUIRE(client_registry.CommitJoinedRecord(actual,std::move(*joined),[]{return true;}));
   REQUIRE(client.ActivatePrivateLanGameplay(actual,2));
+  REQUIRE(host_registry.UpdateHostedPort(1,client_socket.address.port)==0);
+  REQUIRE(hosted->info.host_address==host_socket.address);
+  REQUIRE(host_registry.UpdateHostedPort(1,host_socket.address.port)==1);
   ExchangeGameplay(client_socket,host_socket,1,61);ExchangeGameplay(host_socket,client_socket,2,83);
   REQUIRE(client.Leave(*actual,2,500));
   host.StopAdvertising();

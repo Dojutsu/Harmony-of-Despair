@@ -67,6 +67,27 @@ void Run(){
   auto proof=[&](const PrivateLanInvitation& invitation,const PrivateLanJoinClaim& claim){
     auto tag=invitation.Proof(claim.xuid,"lan-private-join-claim-v1",PrivateLanJoinTranscript(title,identity,claim));
     Check(bool(tag),"client creates its expected private claim proof");return *tag;};
+  {
+    auto binding=PrivateLanAuthority::Create(title,identity,{htonl(INADDR_LOOPBACK),30001},invitations.host);
+    Check(bool(binding),"host endpoint binding authority");
+    Check(!binding->PrepareHostEndpoint({htonl(0x08080808),30004})&&
+          !binding->PrepareHostEndpoint({htonl(INADDR_LOOPBACK),0}),"unsafe host endpoints rejected");
+    auto first=binding->PrepareHostEndpoint({htonl(INADDR_LOOPBACK),30004});
+    auto stale=binding->PrepareHostEndpoint({htonl(INADDR_LOOPBACK),30005});
+    Check(bool(first)&&bool(stale),"host-only endpoint drafts");
+    Check(!first->CommitIf([]() noexcept {return false;}),"failed record publication preserves authority");
+    Check(first->Commit(),"retry successful exact record publication");
+    Check(!stale->Commit(),"stale host endpoint draft cannot overwrite committed port");
+    Check(binding->Admit(second,proof(*invitations.second,second)),"join after late host bind");
+    auto encoded=binding->Ticket(2);Check(bool(encoded),"client ticket after late host bind");
+    auto parsed=ParsePrivateLanGameplayTicket(title,identity,2,*encoded);
+    Check(bool(parsed)&&Peer(*parsed,1).authenticated_lan_endpoint==
+          LanAddress{htonl(INADDR_LOOPBACK),30004},"client receives committed physical host endpoint");
+    Check(!binding->PrepareHostEndpoint({htonl(INADDR_LOOPBACK),30005}),"admitted routes cannot be redirected by host rebind");
+    Check(binding->Remove(2),"peer removal before safe host rebind");
+    auto after=binding->PrepareHostEndpoint({htonl(INADDR_LOOPBACK),30005});
+    Check(bool(after)&&after->Commit(),"host-only rebind after peer departure");
+  }
   Check(authority->Admit(second,proof(*invitations.second,second)),"second authenticated admission");
   auto ticket=[&](uint64_t xuid){auto encoded=authority->Ticket(xuid);Check(bool(encoded),"private ticket issuance");
     auto parsed=ParsePrivateLanGameplayTicket(title,identity,xuid,*encoded);Check(bool(parsed),"exact private ticket parse");return *parsed;};

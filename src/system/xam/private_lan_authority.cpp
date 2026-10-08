@@ -204,6 +204,21 @@ std::unique_ptr<PrivateLanAuthority::Admission> PrivateLanAuthority::PrepareImpl
   (void)claim;(void)proof;(void)now;(void)departure;return {};
 #endif
 }
+std::unique_ptr<PrivateLanAuthority::Admission> PrivateLanAuthority::PrepareHostEndpoint(LanAddress endpoint) {
+  if(!PrivateEndpoint(endpoint))return {};
+  try {
+    auto draft=std::make_unique<Admission::Draft>();draft->owner=state_;
+    std::lock_guard lock(state_->mutex);
+    if(!state_->active||!state_->invitation->Current()||state_->revision==UINT64_MAX||
+       state_->members.size()!=1||!state_->pairs.empty())return {};
+    const auto host=state_->members.find(state_->identity.host_xuid);
+    if(host==state_->members.end())return {};
+    draft->base_revision=state_->revision;draft->members=state_->members;
+    draft->pairs=state_->pairs;draft->retired=state_->retired;
+    draft->members.at(state_->identity.host_xuid).join.endpoint=endpoint;
+    return std::unique_ptr<Admission>(new Admission(std::move(draft)));
+  }catch(...){return {};}
+}
 std::unique_ptr<PrivateLanAuthority::Admission> PrivateLanAuthority::PrepareExpiration(Clock::time_point now) {
   try {
     auto draft=std::make_unique<Admission::Draft>();draft->owner=state_;
