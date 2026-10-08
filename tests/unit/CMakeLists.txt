@@ -413,5 +413,5 @@ if(UNIX AND NOT APPLE)
         INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
 endif()
 catch_discover_tests(video_counter_test
-    TEST_PREFIX "graphics."
+    TEST_PREFIX "unit.graphics."
     PROPERTIES LABELS "graphics;video-counter" TIMEOUT 30)
