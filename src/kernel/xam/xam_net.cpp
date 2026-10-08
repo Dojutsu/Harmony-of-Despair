@@ -994,9 +994,15 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
 
   if (overlapped) {
     std::lock_guard lock(pending_recv_mutex);
-    if (pending_recvs.contains(overlapped.guest_address()) ||
+    auto previous = pending_recvs.find(overlapped.guest_address());
+    if ((previous != pending_recvs.end() && !previous->second.complete) ||
         PendingSendExists(REX_KERNEL_STATE(), overlapped.guest_address()))
       return failed(kWsaInvalidArgument, "overlapped_in_use");
+    // Completed OVERLAPPED operations may be reused without querying their
+    // cached results. Only the host's terminal state permits this; guest writes
+    // cannot make an in-flight operation reusable. Keep all argument/mapping
+    // validation above, and retire the old cache before initiating new I/O.
+    if (previous != pending_recvs.end()) pending_recvs.erase(previous);
   }
   const int result = socket->SendTo(combined.data(), uint32_t(size), flags,
                                     to_ptr ? &native_to : nullptr, to_len);

@@ -505,7 +505,49 @@ static void RunLinuxSendBounds(KernelState* kernel) {
   Check(NetDll_WSAGetOverlappedResult_entry(1, sender->handle(), overlapped, query, 0, flags) == 1 &&
         uint32_t(*query) == payload.size() && uint32_t(*flags) == 0 && pending_recvs.empty(),
         "latest reused synchronous send completion remains queryable");
-  std::cout << "Synchronous send OVERLAPPED reuse without intermediate queries passed\\n";
+  // A rejected reissue must leave the previous completed result queryable.
+  reset_outputs();
+  Check(send() == 0, "synchronous completion before rejected reissue");
+  receive(payload.data(), payload.size());
+  Check(send(0) == uint32_t(-1) && XThread::GetLastError() == 10022,
+        "invalid synchronous reissue refused");
+  Check(NetDll_WSAGetOverlappedResult_entry(1, sender->handle(), overlapped, query, 0, flags) == 1 &&
+        uint32_t(*query) == payload.size() && pending_recvs.empty(),
+        "invalid reissue preserves prior completed result");
+  // Reusing an OVERLAPPED owned by an active receive remains invalid.
+  auto collision_buffer = ptr.operator()<XWSABUF>(1800);
+  collision_buffer->len = 16; collision_buffer->buf_ptr = guest + 3000;
+  reset_outputs(); *flags = 0;
+  Check(NetDll_WSARecvFrom_entry(1, receiver->handle(), collision_buffer, 1,
+          bytes, flags, nullptr, nullptr, overlapped, nullptr) == uint32_t(-1) &&
+        XThread::GetLastError() == 997,
+        "synchronous reuse collision fixture has an actual pending receive");
+  Check(send() == uint32_t(-1) && XThread::GetLastError() == 10022 &&
+        uint32_t(overlapped->internal) == X_STATUS_PENDING &&
+        !receiver->WaitReadable(0, false),
+        "active receive OVERLAPPED cannot be reused for a send");
+  // Guest status fields cannot forge the host's completion ownership.
+  overlapped->internal = 0;
+  Check(send() == uint32_t(-1) && XThread::GetLastError() == 10022 &&
+        !receiver->WaitReadable(0, false),
+        "guest writes cannot make an active receive reusable");
+  Check(sender->SendTo(const_cast<uint8_t*>(payload.data()), payload.size(), 0,
+          &address, sizeof(address)) == int(payload.size()) &&
+        receiver->WaitReadable(1000, false), "complete active reuse collision fixture");
+  PumpPendingRecvFrom();
+  Check(pending_recvs.at(overlapped.guest_address()).complete &&
+        uint32_t(overlapped->internal) == 0,
+        "refused send leaves actual receive completion usable");
+  Check(send() == 0, "completed receive OVERLAPPED can be reused for a synchronous send");
+  receive(payload.data(), payload.size());
+  Check(NetDll_WSAGetOverlappedResult_entry(1, receiver->handle(), overlapped, query, 0, flags) == 0 &&
+        XThread::GetLastError() == 10022,
+        "retired completion owner cannot consume the reused send result");
+  Check(NetDll_WSAGetOverlappedResult_entry(1, sender->handle(), overlapped, query, 0, flags) == 1 &&
+        uint32_t(*query) == payload.size() && pending_recvs.empty(),
+        "reused completion belongs to its actual latest socket");
+  std::cout << "{\"fixture\":\"synchronous_send_reuse\",\"sends\":4,\"invalid_reissue_preserves_completion\":true,\"active_receive_refused\":true,\"guest_completion_forgery_refused\":true,\"completed_receive_reuse\":true}\n";
+
   reset_outputs(); failure(send(0), 10022);
   failure(send(65), 10022); failure(send(0xFFFFFFFF), 10022);
   failure(NetDll_WSASendTo_entry(1, sender->handle(), bad.operator()<XWSABUF>(0xFFFFFFFC),
