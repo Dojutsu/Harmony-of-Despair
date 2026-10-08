@@ -280,3 +280,22 @@ TEST_CASE("Prepared encrypted arbitration replies fail without publishing regist
   auto wrong=fixture.Request();++wrong.endpoint.port;
   CHECK_FALSE(fixture.authority.RegisterFromVerifiedEndpointIf(wrong,[&](const auto&){++calls;return true;}));CHECK(calls==1);
 }
+
+TEST_CASE("Private arbitration batch retirement rejects incomplete removal without mutation", "[session][arbitration][security]") {
+  Fixture fixture;fixture.Admit();auto second=fixture.claim;second.xuid+=1;second.machine_id+=1;second.challenge=Token(22);
+  REQUIRE(fixture.authority.Admit(second,Token(23),{}).status==ArbitrationStatus::kAccepted);
+  const auto before=fixture.authority.Snapshot();REQUIRE(before);
+  for(const auto values:{std::vector<uint64_t>{fixture.claim.xuid,second.xuid+1},
+      std::vector<uint64_t>{fixture.claim.xuid,fixture.claim.xuid},
+      std::vector<uint64_t>{fixture.claim.xuid,fixture.identity.host_xuid},std::vector<uint64_t>{0}}) {
+    CHECK_FALSE(fixture.authority.RemoveBatch(values));CHECK(fixture.authority.Snapshot()->revision==before->revision);
+    CHECK(fixture.authority.CredentialForVerification(fixture.identity,fixture.claim.xuid,fixture.claim.machine_id)==fixture.remote_credential);
+    CHECK(fixture.authority.CredentialForVerification(fixture.identity,second.xuid,second.machine_id)==Token(23));
+  }
+  const std::array<uint64_t,2> both{fixture.claim.xuid,second.xuid};REQUIRE(fixture.authority.RemoveBatch(both));
+  CHECK_FALSE(fixture.authority.CredentialForVerification(fixture.identity,fixture.claim.xuid,fixture.claim.machine_id));
+  CHECK_FALSE(fixture.authority.CredentialForVerification(fixture.identity,second.xuid,second.machine_id));
+  CHECK(fixture.authority.CheckAdmission(fixture.claim,{}).status==ArbitrationStatus::kRetiredAttempt);
+  CHECK(fixture.authority.CheckAdmission(second,{}).status==ArbitrationStatus::kRetiredAttempt);
+  CHECK(fixture.authority.Snapshot()->revision==before->revision+2);
+}

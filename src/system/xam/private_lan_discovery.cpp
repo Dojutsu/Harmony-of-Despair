@@ -149,6 +149,14 @@ struct PrivateLanDiscoveryAdapter::Impl {
   std::weak_ptr<SessionRecord> client;uint64_t client_xuid=0;
 #if REX_PLATFORM_GNU_LINUX
   std::unique_ptr<Socket> listener;
+  struct DepartureReceipt {
+    Packet request{};ArbitrationToken proof{};LanAddress source{};
+    PrivateLanDiscoveryWire reply{};Clock::time_point deadline{};bool valid=false;
+  };
+  std::array<DepartureReceipt,5> departure_receipts{};
+  void ClearDepartureReceipts() noexcept {
+    OPENSSL_cleanse(departure_receipts.data(),sizeof(departure_receipts));
+  }
   std::optional<SessionRecord> Exchange(const SessionRecord& s,const SessionMember& member,uint8_t operation,
       const std::shared_ptr<PrivateLanClientBinding>& binding,uint32_t timeout) {
     if(!invitation||!invitation->Current()||invitation->host()||member.xuid!=invitation->clients().front()||
@@ -191,6 +199,12 @@ struct PrivateLanDiscoveryAdapter::Impl {
     if(p[6]==kQuery){auto reply=Encode(*host,title);Write(reply,624,Read<16>(p,624));PrivateLanDiscoveryFrame response;response.public_packet=reply;
       if(auto wire=SealPrivateLanDiscoveryFrame(*invitation,xuid,title,PrivateLanDiscoveryDirection::kReply,response))Send(listener->fd,*wire,source);return;}
     if(PacketIdentity(p)!=IdentityOf(*host))return;
+    if(p[6]==kLeave)for(const auto& receipt:departure_receipts)
+      if(receipt.valid&&Clock::now()<receipt.deadline&&source==receipt.source&&
+         CRYPTO_memcmp(p.data(),receipt.request.data(),p.size())==0&&
+         CRYPTO_memcmp(frame.join_claim_proof.data(),receipt.proof.data(),receipt.proof.size())==0) {
+        Send(listener->fd,receipt.reply,source);return;
+      }
     if(p[6]==kRegister){Register(p,source);return;}
     if(p[6]!=kJoin&&p[6]!=kLeave)return;
     auto claim=Claim(p);if(claim.endpoint.ipv4!=source.ipv4||!Private(claim.endpoint)||!claim.machine_id||Get(p,92,4)&~6u)return;
@@ -203,7 +217,7 @@ struct PrivateLanDiscoveryAdapter::Impl {
       else if(p[6]==kLeave||Nonzero(Read<16>(p,500)))return;
       arb={xuid,claim.machine_id,{source.ipv4,source.port},claim.challenge,credential};
     }
-    if(p[6]==kLeave){Depart(source,claim,credential,before,authority,frame.join_claim_proof);return;}
+    if(p[6]==kLeave){Depart(source,claim,credential,before,authority,frame.join_claim_proof,p);return;}
     auto admission=authority->Prepare(claim,frame.join_claim_proof);if(!admission)return;
     auto host_bytes=admission->Ticket(host->host_xuid),client_bytes=admission->Ticket(xuid);
     if(!host_bytes||!client_bytes)return;SecretBytes clean_host{*host_bytes},clean_client{*client_bytes};
@@ -235,11 +249,14 @@ struct PrivateLanDiscoveryAdapter::Impl {
         const auto result=c.host->arbitration->Admit(c.arb,c.credential,Clock::now());
         if(!result.accepted())return false;c.host->private_lan_gameplay=std::move(c.auth);return true;});
     },&commit,[](void* context) noexcept {auto& c=*static_cast<Commit*>(context);return SameRoster(*c.host,*c.before);});
-    if(okay){host->NotifyStatus();Send(listener->fd,*wire,source);}
+    if(okay){
+      for(auto& receipt:departure_receipts)if(receipt.valid&&Get(receipt.request,84,8)==xuid)receipt.valid=false;
+      host->NotifyStatus();Send(listener->fd,*wire,source);
+    }
   }
   void Register(const Packet& p,LanAddress source);
   void Depart(LanAddress source,const PrivateLanJoinClaim& claim,const ArbitrationToken& credential,
-      const SessionRecord& before,const std::shared_ptr<PrivateLanAuthority>& authority,std::span<const uint8_t> proof);
+      const SessionRecord& before,const std::shared_ptr<PrivateLanAuthority>& authority,std::span<const uint8_t> proof,const Packet& request);
   void RenewHost();
   void Run(){auto refresh=Clock::now();while(running){try {
     LanAddress source;if(auto frame=Receive(listener->fd,*invitation,0,title,PrivateLanDiscoveryDirection::kRequest,source))Handle(*frame,source);
@@ -256,10 +273,11 @@ void PrivateLanDiscoveryAdapter::Impl::Register(const Packet& p,LanAddress sourc
     if(host->state==SessionState::kDeleted||!host->arbitration||IdentityOf(*host)!=PacketIdentity(p)||Get(p,92,4))return;
     const auto credential=host->arbitration->CredentialForVerification(IdentityOf(*host),xuid,machine);
     if(!credential||!Verify(p,*credential,"private-lan-register-v1"))return;
+    const auto base_reply=Encode(*host,title);
     const auto snapshot=host->arbitration->RegisterFromVerifiedEndpointIf(
         {IdentityOf(*host),xuid,machine,{source.ipv4,source.port},*credential,Read<16>(p,468)},
         [&](const ArbitrationSnapshot& registered) {
-          auto reply=Encode(*host,title);reply[6]=kRegisterReply;Write(reply,468,Read<16>(p,468));Write(reply,624,Read<16>(p,624));
+          auto reply=base_reply;reply[6]=kRegisterReply;Write(reply,468,Read<16>(p,468));Write(reply,624,Read<16>(p,624));
           Put(reply,516,registered.revision,8);uint32_t mask=0;
           for(size_t i=0;i<host->members.size();++i)for(const auto& member:registered.registrants)
             if(member.machine_id==host->members[i].machine_id&&member.xuids.size()==1&&member.xuids[0]==host->members[i].xuid)mask|=1u<<i;
@@ -273,7 +291,7 @@ void PrivateLanDiscoveryAdapter::Impl::Register(const Packet& p,LanAddress sourc
 }
 void PrivateLanDiscoveryAdapter::Impl::Depart(LanAddress source,
     const PrivateLanJoinClaim& claim,const ArbitrationToken& credential,const SessionRecord& before,
-    const std::shared_ptr<PrivateLanAuthority>& authority,std::span<const uint8_t> proof) {
+    const std::shared_ptr<PrivateLanAuthority>& authority,std::span<const uint8_t> proof,const Packet& request) {
   auto admission=authority->PrepareDeparture(claim,proof);if(!admission)return;
   auto bytes=admission->Ticket(before.host_xuid);if(!bytes)return;SecretBytes clean{*bytes};
   auto ticket=ParsePrivateLanGameplayTicket(title,IdentityOf(before),before.host_xuid,*bytes);if(!ticket)return;
@@ -283,15 +301,19 @@ void PrivateLanDiscoveryAdapter::Impl::Depart(LanAddress source,
   if(!Sign(reply,credential,"private-lan-leave-reply-v1"))return;
   PrivateLanDiscoveryFrame frame;frame.public_packet=reply;
   auto wire=SealPrivateLanDiscoveryFrame(*invitation,claim.xuid,title,PrivateLanDiscoveryDirection::kReply,frame);if(!wire)return;
+  DepartureReceipt receipt;receipt.request=request;std::copy_n(proof.begin(),receipt.proof.size(),receipt.proof.begin());
+  receipt.source=source;receipt.reply=*wire;receipt.deadline=Clock::now()+std::chrono::seconds(5);receipt.valid=true;
+  const auto clients=invitation->clients();const auto client=std::find(clients.begin(),clients.end(),claim.xuid);
+  if(client==clients.end())return;const auto receipt_index=size_t(client-clients.begin());
   auto authorization=std::make_shared<const GameplayAuthorization>(std::move(ticket->authorization));
   struct Commit {SessionRecord* host;const SessionRecord* before;PrivateLanAuthority::Admission* admission;
     uint64_t xuid;std::shared_ptr<const GameplayAuthorization> auth;};
   Commit commit{host.get(),&before,admission.get(),claim.xuid,authorization};
   if(CommitPrivateLanGameplayAuthorization(host,*authorization,std::move(candidate.members),[](void* context) noexcept {
     auto& c=*static_cast<Commit*>(context);return c.admission->CommitIf([&]() noexcept {
-      if(!c.host->arbitration->Remove(c.xuid))return false;c.host->private_lan_gameplay=std::move(c.auth);return true;});
+      if(!c.host->arbitration->RemoveBatch(std::span<const uint64_t>(&c.xuid,1)))return false;c.host->private_lan_gameplay=std::move(c.auth);return true;});
   },&commit,[](void* context) noexcept {auto& c=*static_cast<Commit*>(context);return SameRoster(*c.host,*c.before);})) {
-    host->NotifyStatus();Send(listener->fd,*wire,source);
+    departure_receipts[receipt_index]=receipt;host->NotifyStatus();Send(listener->fd,*wire,source);
   }
 }
 void PrivateLanDiscoveryAdapter::Impl::RenewHost() {
@@ -308,7 +330,7 @@ void PrivateLanDiscoveryAdapter::Impl::RenewHost() {
     std::shared_ptr<const GameplayAuthorization> auth;};Commit commit{host.get(),&before,expiration.get(),authorization};
   if(CommitPrivateLanGameplayAuthorization(host,*authorization,std::move(candidate.members),[](void* context) noexcept {
     auto& c=*static_cast<Commit*>(context);return c.expiration->CommitIf([&]() noexcept {
-      for(auto xuid:c.expiration->RemovedMembers())if(!c.host->arbitration->Remove(xuid))return false;
+      if(!c.host->arbitration->RemoveBatch(c.expiration->RemovedMembers()))return false;
       c.host->private_lan_gameplay=std::move(c.auth);return true;});
   },&commit,[](void* context) noexcept {auto& c=*static_cast<Commit*>(context);return SameRoster(*c.host,*c.before);})&&!expired.empty())host->NotifyStatus();
 }
@@ -352,7 +374,7 @@ void PrivateLanDiscoveryAdapter::StopClient(){impl_->client_running=false;if(imp
 void PrivateLanDiscoveryAdapter::Stop() {
   impl_->running=false;if(impl_->thread.joinable())impl_->thread.join();StopClient();
 #if REX_PLATFORM_GNU_LINUX
-  impl_->listener.reset();
+  impl_->listener.reset();impl_->ClearDepartureReceipts();
 #endif
   if(impl_->host){RevokeGameplayAuthorization(impl_->host,impl_->host->host_xuid);std::lock_guard lock(*impl_->host->mutex);
     impl_->host->private_lan_authority.reset();impl_->host->private_lan_gameplay.reset();}

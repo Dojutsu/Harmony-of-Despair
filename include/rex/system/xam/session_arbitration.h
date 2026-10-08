@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace rex::system::xam {
@@ -104,6 +105,9 @@ class SessionArbitrationAuthority final {
   ArbitrationStatus RegisterLocal(uint64_t xuid, uint64_t machine_id, uint64_t nonce,
                                   const ArbitrationToken& attempt);
   bool Remove(uint64_t xuid);
+  // Validate a bounded complete removal before any member/tombstone mutation.
+  // Used by private LAN expiry while its outer transaction owns record state.
+  bool RemoveBatch(std::span<const uint64_t> xuids) noexcept;
   std::vector<uint64_t> ExpireUnconfirmed(Clock::time_point now);
   void Invalidate();
   std::optional<ArbitrationSnapshot> Snapshot() const;

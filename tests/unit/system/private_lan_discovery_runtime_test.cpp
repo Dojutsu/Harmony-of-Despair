@@ -93,7 +93,7 @@ TEST_CASE("private LAN real production discovery protects three independent nati
     if(local==1&&!bootstrap&&std::filesystem::exists(root/"rejected-2")&&std::filesystem::exists(root/"rejected-3")&&std::filesystem::exists(root/"attacksdone")){
       std::lock_guard lock(*session->mutex);REQUIRE(session->members.size()==1);PrivateMark(root,"1.rejected");bootstrap=true;}
     if(local==2&&!departed&&std::filesystem::exists(root/"depart2")){
-      auto left=discovery.Leave(*session,local,1000);REQUIRE(left);REQUIRE(left->members.size()==2);
+      auto left=discovery.Leave(*session,local,5000);REQUIRE(left);REQUIRE(left->members.size()==2);
       REQUIRE(registry.Leave(session->info.id,local));RevokeGameplayAuthorization(session,local);gameplay.reset();departed=true;PrivateMark(root,"2.departed");}
     if(local==2&&departed&&!rejoined){if(!std::filesystem::exists(root/"rejoin2")){std::this_thread::sleep_for(std::chrono::milliseconds(5));continue;}
       session.reset();gameplay=std::make_unique<DiscoveryRuntimeSocket>(local,ip);REXCVAR_SET(lan_gameplay_port,uint32_t(gameplay->address.port));

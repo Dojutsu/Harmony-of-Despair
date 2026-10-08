@@ -256,6 +256,34 @@ bool SessionArbitrationAuthority::Remove(uint64_t xuid) {
   else alive_ = false;
   *it = Member{}; ++revision_; return true;
 }
+bool SessionArbitrationAuthority::RemoveBatch(std::span<const uint64_t> xuids) noexcept {
+  std::lock_guard lock(mutex_);
+  if (!alive_ || xuids.size() >= kMaxMembers || xuids.size() > retired_.size() - retired_count_)
+    return false;
+  std::array<size_t, kMaxMembers - 1> indices{};
+  for (size_t index = 0; index < xuids.size(); ++index) {
+    if (!xuids[index] || std::find(xuids.begin(), xuids.begin() + index, xuids[index]) != xuids.begin() + index)
+      return false;
+    const auto member = std::find_if(members_.begin(), members_.end(), [&](const auto& value) {
+      return value.occupied && !value.local && value.xuid == xuids[index];
+    });
+    if (member == members_.end()) return false;
+    indices[index] = size_t(member - members_.begin());
+  }
+  for (size_t index = 0; index < xuids.size(); ++index) {
+    auto& member = members_[indices[index]];
+    for (size_t retired = 0; retired < retired_count_; ++retired)
+      if (retired_[retired].xuid == member.xuid) {
+        retired_[retired].expiry_credential = {};
+        retired_[retired].reason = RetirementReason::kLeft;
+      }
+    retired_[retired_count_++] = {member.join_challenge, member.xuid, member.machine_id,
+                                member.endpoint, {}, RetirementReason::kLeft};
+    member = Member{};
+    ++revision_;
+  }
+  return true;
+}
 std::vector<uint64_t> SessionArbitrationAuthority::ExpireUnconfirmed(Clock::time_point now) {
   std::lock_guard lock(mutex_);
   std::vector<uint64_t> expired;
