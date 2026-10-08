@@ -31,6 +31,13 @@ class CounterCommandProcessor final : public rex::graphics::CommandProcessor {
  private:
   bool SetupContext() override { return true; }
   void ShutdownContext() override {}
+  rex::graphics::Shader* LoadShader(rex::graphics::xenos::ShaderType, uint32_t,
+                                    const uint32_t*, uint32_t) override {
+    return nullptr;
+  }
+  bool IssueDraw(rex::graphics::xenos::PrimitiveType, uint32_t,
+                 IndexBufferInfo*, bool) override { return false; }
+  bool IssueCopy() override { return false; }
   uint32_t swaps_ = 0;  // Only the packet producer accesses this during a run.
 };
 
