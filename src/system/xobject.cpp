@@ -10,6 +10,7 @@
  */
 
 #include <chrono>
+#include <limits>
 #include <mutex>
 #include <vector>
 
@@ -243,8 +244,11 @@ uint32_t XObject::TimeoutTicksToMs(int64_t timeout_ticks) {
     assert_always();
     return 0;
   } else if (timeout_ticks < 0) {
-    // Relative time.
-    return (uint32_t)(-timeout_ticks / 10000);  // Ticks -> MS
+    // Unsigned magnitude also handles INT64_MIN without signed negation UB.
+    // Saturate before narrowing: very long waits must not wrap into short ones.
+    const uint64_t ticks = uint64_t(0) - static_cast<uint64_t>(timeout_ticks);
+    return static_cast<uint32_t>(std::min<uint64_t>(
+        ticks / 10000, std::numeric_limits<uint32_t>::max()));
   } else {
     return 0;
   }
