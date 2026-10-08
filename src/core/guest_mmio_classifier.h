@@ -1,5 +1,9 @@
 #pragma once
 #include <rex/system/mmio_handler.h>
+#include <rex/platform/guest_fault_state.h>
+#include <algorithm>
+#include <bit>
+#include <limits>
 namespace rex::guest::detail {
 // Runtime-private friend bridge; it exposes no dynamic entry or cached pointer.
 struct MappedAccessClassifier {
@@ -24,14 +28,14 @@ struct MappedAccessClassifier {
   const bool point_inside = first >= virtual_begin && first < virtual_end;
   uint32_t guest_first, guest_last;
   try {
-    guest_first = handler.host_to_guest_virtual_(handler.handler.host_to_guest_virtual_context_,
+    guest_first = handler.host_to_guest_virtual_(handler.host_to_guest_virtual_context_,
                                          reinterpret_cast<const void*>(clipped_first));
   } catch (...) {
     rex::guest::FaultContractFailure(point_inside ? "exception-classifying-mmio-address"
                                                  : "exception-classifying-mmio-range");
   }
   try {
-    guest_last = handler.host_to_guest_virtual_(handler.handler.host_to_guest_virtual_context_,
+    guest_last = handler.host_to_guest_virtual_(handler.host_to_guest_virtual_context_,
                                         reinterpret_cast<const void*>(clipped_last));
   } catch (...) {
     rex::guest::FaultContractFailure("exception-classifying-mmio-range");
