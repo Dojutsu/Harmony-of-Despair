@@ -625,12 +625,20 @@ void ReXApp::OnDestroy() {
   OnShutdown();
 
 #if REX_PLATFORM_GNU_LINUX
-  // The headless SDL loop can be stopped by SIGINT/SIGTERM without a window
-  // close callback. Ask the guest title to stop before joining its launch
-  // thread, matching the termination request made by the window close path.
-  if (REXCVAR_GET(headless) && runtime_ && runtime_->kernel_state()) {
+  // SIGINT/SIGTERM reaches this path without OnClosing. Once a module has
+  // launched, use the same process-exit policy as window close: cooperative
+  // termination may leave guest or interrupt workers alive, so dismantling
+  // dispatch/memory here would race their next callback. The subclass shutdown
+  // hook above has already stopped and joined its capture worker.
+  // Keep failed prelaunch initialization on ordinary cleanup/error handling.
+  if (REXCVAR_GET(headless) && module_thread_.joinable() && runtime_ &&
+      runtime_->kernel_state()) {
+    shutting_down_.store(true, std::memory_order_release);
     REXLOG_INFO("Headless shutdown: requesting title termination");
     runtime_->kernel_state()->TerminateTitle();
+    REXLOG_INFO("Title terminated; exiting headless process without subsystem teardown.");
+    rex::FlushLogging();
+    std::_Exit(0);
   }
 #endif
 
