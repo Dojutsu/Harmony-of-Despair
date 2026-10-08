@@ -89,11 +89,11 @@ struct FrameScope {
   }
   ~FrameScope() { frame.phase = 0; current_frame = saved; }
 };
-void AdmitCapture() noexcept {
+__attribute__((always_inline)) inline void AdmitCapture() noexcept {
   if(signal_depth) std::_Exit(139); // async-signal-safe terminal ABI refusal
   if(capture_suppressed) std::_Exit(86); // no nested guest operation in callback
 }
-AccessFrame MakeFrame(char* site, char* failure, const void* address, size_t width,
+__attribute__((always_inline)) inline AccessFrame MakeFrame(char* site, char* failure, const void* address, size_t width,
                       int intent) noexcept {
   AccessFrame f;
   f.site = reinterpret_cast<uintptr_t>(site);
@@ -115,7 +115,7 @@ AccessAttempt Finish(const AccessFrame& frame, int status, size_t completed) noe
 }
 using Leaf = int (*)(const void*, void*);
 template<class FinishCapture>
-auto ScalarCapture(const void* address, void* value, size_t width, bool write,
+__attribute__((always_inline)) inline auto ScalarCapture(const void* address, void* value, size_t width, bool write,
                    FinishCapture finish) noexcept {
   AdmitCapture();
   platform::seh_initialize();
@@ -134,7 +134,7 @@ AccessAttempt Scalar(const void* address, void* value, size_t width, bool write)
         return Finish(frame, status, status ? 0 : size);
       });
 }
-bool ScalarCompact(const void* address, void* value, size_t width, bool write,
+__attribute__((always_inline)) inline bool ScalarCompact(const void* address, void* value, size_t width, bool write,
                    detail::ScalarCaptureFailure& failure) noexcept {
   return ScalarCapture(address, value, width, write,
       [&failure](const AccessFrame& frame, int status, size_t) noexcept {
@@ -148,11 +148,11 @@ bool ScalarCompact(const void* address, void* value, size_t width, bool write,
 }  // namespace
 
 namespace detail {
-bool CaptureReadCompact(const void* address, void* output, size_t width,
+__attribute__((always_inline)) inline bool CaptureReadCompact(const void* address, void* output, size_t width,
                         ScalarCaptureFailure& failure) noexcept {
   return ScalarCompact(address, output, width, false, failure);
 }
-bool CaptureWriteCompact(void* address, const void* value, size_t width,
+__attribute__((always_inline)) inline bool CaptureWriteCompact(void* address, const void* value, size_t width,
                          ScalarCaptureFailure& failure) noexcept {
   return ScalarCompact(address, const_cast<void*>(value), width, true, failure);
 }

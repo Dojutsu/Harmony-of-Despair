@@ -2,7 +2,7 @@
 #include <rex/platform/guest_memory.h>
 #include "guest_access_compact.h"
 #include "guest_mmio_classifier.h"
-#include "../system/guest_deferred_transaction.h"
+#include "guest_deferred_transaction_inline.h"
 #include <rex/exception_handler.h>
 #include <rex/logging.h>
 #include <rex/memory/utils.h>
@@ -248,7 +248,7 @@ AccessResult<bool> TryReadBytes(const void* address,void* output,size_t width,bo
   }
   ValidateRange(address,width,reservation,vector,false,&boundary);
   if(reservation)RejectMappedAtomic(address,width);
-  auto transaction=detail::DeferredTransactionBridge::Create();
+  auto transaction=detail::DeferredTransactionBridge::CreateInline();
   if(CompleteMappedRead(address,output,width,vector||reservation,transaction))return AccessResult<bool>::Success(true);
   for(unsigned attempt=0;attempt<kRetryLimit;++attempt){
     ScalarCaptureFailure failure;
@@ -261,7 +261,7 @@ AccessResult<bool> TryReadBytes(const void* address,void* output,size_t width,bo
     } else {
       success = CaptureReadCompact(address, output, width, failure);
     }
-    if(success){if(!detail::DeferredTransactionBridge::CompleteNative(transaction))FaultContractFailure("duplicate-native-completion");return AccessResult<bool>::Success(true);}
+    if(success){if(!detail::DeferredTransactionBridge::CompleteNativeInline(transaction))FaultContractFailure("duplicate-native-completion");return AccessResult<bool>::Success(true);}
     if (!failure) FaultContractFailure("missing-compact-capture-fault");
     const auto& fault = *failure;
     auto kind=reservation?MMIO::DeferredAccessKind::kAtomic:vector?MMIO::DeferredAccessKind::kVector128:
@@ -286,7 +286,7 @@ AccessResult<bool> TryWriteBytes(void* address,const void* value,size_t width,bo
       return Terminal<bool>(captured->fault);
     }
   }
-  ValidateRange(address,width,false,vector,true,&boundary);auto transaction=detail::DeferredTransactionBridge::Create();
+  ValidateRange(address,width,false,vector,true,&boundary);auto transaction=detail::DeferredTransactionBridge::CreateInline();
   if(CompleteMappedWrite(address,value,width,vector,transaction))return AccessResult<bool>::Success(true);
   for(unsigned attempt=0;attempt<kRetryLimit;++attempt){
     ScalarCaptureFailure failure;
@@ -298,7 +298,7 @@ AccessResult<bool> TryWriteBytes(void* address,const void* value,size_t width,bo
     } else {
       success = CaptureWriteCompact(address, value, width, failure);
     }
-    if(success){if(!detail::DeferredTransactionBridge::CompleteNative(transaction))FaultContractFailure("duplicate-native-completion");return AccessResult<bool>::Success(true);}
+    if(success){if(!detail::DeferredTransactionBridge::CompleteNativeInline(transaction))FaultContractFailure("duplicate-native-completion");return AccessResult<bool>::Success(true);}
     if (!failure) FaultContractFailure("missing-compact-capture-fault");
     const auto& fault = *failure;
     auto kind=vector?MMIO::DeferredAccessKind::kVector128:

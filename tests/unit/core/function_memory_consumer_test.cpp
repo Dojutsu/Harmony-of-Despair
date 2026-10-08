@@ -3,7 +3,7 @@
 #include <thread>
 #include <atomic>
 #include <rex/platform/function_memory_consumer.h>
-#include "../../../src/system/guest_deferred_transaction.h"
+#include "../../../src/core/guest_deferred_transaction_inline.h"
 #include <rex/system/xmemory.h>
 #include <rex/platform/exceptions.h>
 #include <rex/logging.h>
@@ -30,7 +30,9 @@ void CompletionSignal(int signal) {
   if(signal!=SIGUSR1||!transaction)std::_Exit(96);
   (void)::write(STDERR_FILENO,marker,sizeof(marker)-1);
   rex::guest::EnterSignalContext();
-  if(signal_private)rex::guest::detail::DeferredTransactionBridge::CompleteNative(*transaction);
+  if(signal_private==3)(void)rex::guest::detail::DeferredTransactionBridge::CreateInline();
+  else if(signal_private==2)rex::guest::detail::DeferredTransactionBridge::CompleteNativeInline(*transaction);
+  else if(signal_private)rex::guest::detail::DeferredTransactionBridge::CompleteNative(*transaction);
   else transaction->CompleteNative();
   std::_Exit(97);
 }
@@ -93,6 +95,9 @@ bool Child(const char* executable,const char* mode,int expected,const char* mark
 }
 int main(int argc,char** argv) {
  const rlimit no_core{0,0};if(setrlimit(RLIMIT_CORE,&no_core))return 94;
+ if(argc>1&&!std::strcmp(argv[1],"state-inline-without-owner")) {
+  (void)rex::guest::detail::DeferredTransactionBridge::CreateInline();return 92;
+ }
  rex::InitLogging();
  if(argc>1&&!std::strcmp(argv[1],"state-without-owner")) {
   rex::guest::detail::RequireAccessState();return 92;
@@ -128,6 +133,30 @@ int main(int argc,char** argv) {
    if(raise(SIGUSR1))return 96;return 97;
   }
 
+  if(!std::strncmp(argv[1],"state-inline-",13)) {
+   auto transaction=rex::guest::detail::DeferredTransactionBridge::CreateInline();
+   auto complete=[&]{return rex::guest::detail::DeferredTransactionBridge::CompleteNativeInline(transaction);};
+   if(!std::strcmp(argv[1],"state-inline-owner")) {
+    rex::guest::ExecutionActivation nested;(void)complete();return 92;
+   }
+   if(!std::strcmp(argv[1],"state-inline-pending")) {
+    activation.Publish(fault);(void)complete();return 92;
+   }
+   if(!std::strcmp(argv[1],"state-inline-adjudicating")) {
+    rex::guest::AdjudicationScope adjudication(fault);(void)complete();return 92;
+   }
+   if(!std::strcmp(argv[1],"state-inline-foreign-thread")) {
+    std::thread foreign([&]{(void)complete();});foreign.join();return 92;
+   }
+   if(!std::strcmp(argv[1],"state-inline-completion-signal")||!std::strcmp(argv[1],"state-inline-creation-signal")) {
+    signal_private=!std::strcmp(argv[1],"state-inline-completion-signal")?2:3;
+    signal_transaction.store(&transaction,std::memory_order_relaxed);
+    struct sigaction action{};action.sa_handler=CompletionSignal;sigemptyset(&action.sa_mask);
+    if(sigaction(SIGUSR1,&action,nullptr))return 95;
+    std::fflush(stdout);if(raise(SIGUSR1))return 96;return 97;
+   }
+   return 91;
+  }
   if(!std::strncmp(argv[1],"state-signal-",13)) {
    signal_state_operation=!std::strcmp(argv[1],"state-signal-current")?1:
       !std::strcmp(argv[1],"state-signal-private")?2:
@@ -169,6 +198,10 @@ int main(int argc,char** argv) {
   auto* expected=&parent;
   rex::runtime::MMIOHandler::DeferredTransaction transaction;
   if(!transaction.CompleteNative()||transaction.CompleteNative())return 105;
+  state_assertions+=2;
+  auto inline_transaction=rex::guest::detail::DeferredTransactionBridge::CreateInline();
+  if(!rex::guest::detail::DeferredTransactionBridge::CompleteNativeInline(inline_transaction)||
+     rex::guest::detail::DeferredTransactionBridge::CompleteNativeInline(inline_transaction))return 106;
   state_assertions+=2;
   bool workers_ok[2]{false,false};unsigned worker_assertions[2]{};
   auto run=[&](unsigned index) {
@@ -275,6 +308,13 @@ int main(int argc,char** argv) {
  const auto* loader=std::getenv("HARMONY_TEST_ELF_LOADER");
  if(loader){if(argv[0][0]!='/'||std::strlen(argv[0])>=sizeof(executable))return 98;std::strcpy(executable,argv[0]);}
  else{auto length=readlink("/proc/self/exe",executable,sizeof(executable)-1);if(length<=0)return 98;executable[length]=0;}
+ if(!Child(executable,"state-inline-without-owner",86,"mmio-transaction-without-owner")||
+    !Child(executable,"state-inline-owner",86,"mmio-transaction-wrong-owner")||
+    !Child(executable,"state-inline-pending",86,"guest-continuation-with-pending-fault")||
+    !Child(executable,"state-inline-adjudicating",86,"guest-access-during-adjudication")||
+    !Child(executable,"state-inline-foreign-thread",86,"mmio-transaction-wrong-owner")||
+    !Child(executable,"state-inline-completion-signal",139,"transaction-bridge-signal-enter")||
+    !Child(executable,"state-inline-creation-signal",139,"transaction-bridge-signal-enter"))return 107;
  if(!Child(executable,"state-without-owner",86,"guest-access-without-activation")||
     !Child(executable,"state-pending",86,"guest-continuation-with-pending-fault")||
     !Child(executable,"state-adjudicating",86,"guest-access-during-adjudication")||

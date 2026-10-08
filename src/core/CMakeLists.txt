@@ -84,7 +84,10 @@ endif()
 # backends keep their existing independent source selection.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     enable_language(ASM)
-    target_sources(rexcore PRIVATE guest_access_posix.cpp guest_access_amd64.S guest_fault_state.cpp guest_memory_posix.cpp)
+    # Compile the mutually dependent private scalar backend together so the
+    # compiler can inline its ordinary capture path. All exported APIs, exact
+    # fault leaves, per-operation admission, retries and MMIO checks remain.
+    target_sources(rexcore PRIVATE guest_scalar_backend_posix.cpp guest_access_amd64.S guest_fault_state.cpp)
 
     if(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
         # These checked-access paths live in the runtime's bounded PIC image.
@@ -94,7 +97,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
         # preserve the runtime's eager binding without PLT trampolines on each
         # guest access. The linker verifies the signed relocation range.
         set_property(SOURCE
-            guest_access_posix.cpp guest_fault_state.cpp guest_memory_posix.cpp
+            guest_scalar_backend_posix.cpp guest_fault_state.cpp
             memory_posix.cpp seh_posix.cpp
             APPEND PROPERTY COMPILE_OPTIONS -mcmodel=small -fno-plt)
     endif()
