@@ -1176,7 +1176,9 @@ WaitResult Wait(WaitHandle* wait_handle, bool is_alertable, std::chrono::millise
       return WaitResult::kUserCallback;
     }
     if (HasAlertableTimeoutElapsed(deadline)) {
-      return WaitResult::kTimeout;
+      // Expiration prevents sleeping, not acquisition of an already-ready
+      // object. Keep pending APC dispatch above and native consumption below.
+      return posix_wait_handle->condition().Wait(std::chrono::milliseconds(0));
     }
     auto result = posix_wait_handle->condition().Wait(ComputeAlertableWaitTimeout(deadline));
     if (result != WaitResult::kTimeout) {
@@ -1208,7 +1210,7 @@ WaitResult SignalAndWait(WaitHandle* wait_handle_to_signal, WaitHandle* wait_han
       return WaitResult::kUserCallback;
     }
     if (HasAlertableTimeoutElapsed(deadline)) {
-      return WaitResult::kTimeout;
+      return posix_wait_handle_to_wait_on->condition().Wait(std::chrono::milliseconds(0));
     }
     result = posix_wait_handle_to_wait_on->condition().Wait(ComputeAlertableWaitTimeout(deadline));
     if (result != WaitResult::kTimeout) {
@@ -1240,7 +1242,10 @@ std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[], size_t wa
       return std::make_pair(WaitResult::kUserCallback, 0);
     }
     if (HasAlertableTimeoutElapsed(deadline)) {
-      return std::make_pair(WaitResult::kTimeout, 0);
+      // This retains WaitAny index selection and WaitAll all-or-nothing
+      // consumption even when the caller asks for an alertable poll.
+      return PosixConditionBase::WaitMultiple(std::vector<PosixConditionBase*>(conditions),
+                                             wait_all, std::chrono::milliseconds(0));
     }
     auto result = PosixConditionBase::WaitMultiple(std::vector<PosixConditionBase*>(conditions),
                                                    wait_all, ComputeAlertableWaitTimeout(deadline));

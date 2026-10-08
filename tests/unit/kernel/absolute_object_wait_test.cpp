@@ -66,6 +66,11 @@ int main() {
       Check(single(a.get(),RealClock()-1)==X_STATUS_TIMEOUT,"expired empty object times out");a->Set(0,false);
       Check(single(a.get(),RealClock()-1)==X_STATUS_SUCCESS,"expired ready object still satisfies wait");
       Check(single(a.get(),0)==X_STATUS_TIMEOUT,"auto-reset signal consumed once");
+      a->Set(0,false);Check(single(a.get(),0,1)==X_STATUS_SUCCESS,"zero-time alertable single wait acquires ready object");
+      Check(single(a.get(),0)==X_STATUS_TIMEOUT,"alertable poll consumes auto-reset signal once");
+      b->Set(0,false);Check(multiple(true,0,1)==1,"zero-time alertable WaitAny acquires ready object's index");
+      a->Set(0,false);b->Set(0,false);Check(multiple(false,RealClock()-1,1)==X_STATUS_SUCCESS,"expired alertable WaitAll acquires ready set");
+      Check(single(a.get(),0)==X_STATUS_TIMEOUT&&single(b.get(),0)==X_STATUS_TIMEOUT,"expired alertable WaitAll consumes each signal once");
       auto began=std::chrono::steady_clock::now();Check(single(a.get(),RealClock()+300000)==X_STATUS_TIMEOUT,"future empty object times out");
       Check(std::chrono::steady_clock::now()-began>=25ms,"future deadline actually waits");
       Check(Converter::TimeoutTicksToMs(std::numeric_limits<int64_t>::max())==UINT32_MAX,"huge absolute converter saturates before narrowing");
@@ -99,6 +104,11 @@ int main() {
       Check(ctx->r3.u32==X_STATUS_TIMEOUT&&std::chrono::steady_clock::now()-began>=210ms,"signal-and-wait honors multi-slice absolute deadline");
       Check(single(signal.get(),0)==X_STATUS_SUCCESS,"signal-and-wait actually signals source");
       Check(single(signal.get(),0)==X_STATUS_TIMEOUT,"signal source is signaled once across all slices");
+      a->Set(0,false);store(RealClock()-1);ctx->r3.u64=signal->handle();ctx->r4.u64=a->handle();ctx->r5.u64=0;ctx->r6.u64=1;ctx->r7.u64=address;
+      __imp__NtSignalAndWaitForSingleObjectEx(*ctx,memory->virtual_membase());
+      Check(ctx->r3.u32==X_STATUS_SUCCESS,"expired alertable signal-and-wait acquires ready target");
+      Check(single(signal.get(),0)==X_STATUS_SUCCESS,"expired alertable signal-and-wait signals source");
+      Check(single(signal.get(),0)==X_STATUS_TIMEOUT,"expired alertable signal-and-wait source signal is exactly once");
       auto io=rex::system::object_ref<rex::system::XIOCompletion>(new rex::system::XIOCompletion(runtime.kernel_state()));
       rex::system::XIOCompletion::IONotification expected{17,23,0,1234},output{91,92,93,94};
       Check(!io->WaitForNotification(RealClock()-1,&output)&&output.key_context==91&&output.num_bytes==94,"expired empty completion preserves output");
