@@ -398,6 +398,7 @@ add_executable(video_counter_test
     graphics/video_counter_test.cpp
     ${PROJECT_SOURCE_DIR}/src/graphics/graphics_system.cpp
     ${PROJECT_SOURCE_DIR}/src/graphics/command_processor.cpp
+    ${PROJECT_SOURCE_DIR}/src/graphics/register_file.cpp
 )
 target_include_directories(video_counter_test PRIVATE
     ${PROJECT_SOURCE_DIR}/thirdparty ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
