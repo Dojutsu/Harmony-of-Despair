@@ -287,7 +287,9 @@ class PosixConditionBase {
   virtual ~PosixConditionBase() = default;
   virtual bool Signal() = 0;
 
-  WaitResult Wait(std::chrono::milliseconds timeout) {
+  WaitResult Wait(std::chrono::milliseconds timeout,
+                  std::chrono::steady_clock::time_point deadline_limit =
+                      std::chrono::steady_clock::time_point::max()) {
     // A finite budget covers internal mutex acquisition and condition waiting.
     // Preserve the zero-time ready-object fast path without querying a clock.
     auto deadline = std::chrono::steady_clock::time_point::max();
@@ -297,6 +299,7 @@ class PosixConditionBase {
       const auto maximum = std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::time_point::max() - now);
       deadline = now + std::min(timeout, maximum);
+      deadline = std::min(deadline, deadline_limit);
     }
     bool executed;
     auto predicate = [this] { return this->signaled(); };
@@ -354,18 +357,24 @@ class PosixConditionBase {
 
   static std::pair<WaitResult, size_t> WaitMultiple(std::vector<PosixConditionBase*>&& handles,
                                                     bool wait_all,
-                                                    std::chrono::milliseconds timeout) {
+                                                    std::chrono::milliseconds timeout,
+                                                    std::chrono::steady_clock::time_point deadline_limit =
+                                                        std::chrono::steady_clock::time_point::max()) {
     assert_true(!handles.empty());
 
     if (handles.size() == 1) {
-      auto result = handles[0]->Wait(timeout);
+      auto result = handles[0]->Wait(timeout, deadline_limit);
       return std::make_pair(result, 0);
     }
 
     auto start_time = std::chrono::steady_clock::now();
-    auto end_time = (timeout == std::chrono::milliseconds::max())
-                        ? std::chrono::steady_clock::time_point::max()
-                        : start_time + timeout;
+    auto end_time = std::chrono::steady_clock::time_point::max();
+    if (timeout != std::chrono::milliseconds::max()) {
+      const auto maximum = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::time_point::max() - start_time);
+      end_time = start_time + std::clamp(timeout, std::chrono::milliseconds::zero(), maximum);
+    }
+    end_time = std::min(end_time, deadline_limit);
 
     while (true) {
       size_t first_signaled = std::numeric_limits<size_t>::max();
@@ -1147,12 +1156,13 @@ std::chrono::milliseconds ComputeAlertableWaitTimeout(
   if (deadline == std::chrono::steady_clock::time_point::max()) {
     return kAlertablePollSlice;
   }
-  auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-      deadline - std::chrono::steady_clock::now());
-  if (remaining <= std::chrono::milliseconds::zero()) {
+  const auto remaining = deadline - std::chrono::steady_clock::now();
+  if (remaining <= std::chrono::steady_clock::duration::zero()) {
     return std::chrono::milliseconds::zero();
   }
-  return std::min(remaining, kAlertablePollSlice);
+  // Positive fractional budgets must reach a sleeping wait instead of a
+  // repeated zero-time poll. Each condition clamps to the original deadline.
+  return std::min(std::chrono::ceil<std::chrono::milliseconds>(remaining), kAlertablePollSlice);
 }
 
 }  // namespace
@@ -1216,7 +1226,7 @@ WaitResult Wait(WaitHandle* wait_handle, bool is_alertable, std::chrono::millise
       // object. Keep pending APC dispatch above and native consumption below.
       return posix_wait_handle->condition().Wait(std::chrono::milliseconds(0));
     }
-    auto result = posix_wait_handle->condition().Wait(ComputeAlertableWaitTimeout(deadline));
+    auto result = posix_wait_handle->condition().Wait(ComputeAlertableWaitTimeout(deadline), deadline);
     if (result != WaitResult::kTimeout) {
       return result;
     }
@@ -1248,7 +1258,7 @@ WaitResult SignalAndWait(WaitHandle* wait_handle_to_signal, WaitHandle* wait_han
     if (HasAlertableTimeoutElapsed(deadline)) {
       return posix_wait_handle_to_wait_on->condition().Wait(std::chrono::milliseconds(0));
     }
-    result = posix_wait_handle_to_wait_on->condition().Wait(ComputeAlertableWaitTimeout(deadline));
+    result = posix_wait_handle_to_wait_on->condition().Wait(ComputeAlertableWaitTimeout(deadline), deadline);
     if (result != WaitResult::kTimeout) {
       return result;
     }
@@ -1284,7 +1294,7 @@ std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[], size_t wa
                                              wait_all, std::chrono::milliseconds(0));
     }
     auto result = PosixConditionBase::WaitMultiple(std::vector<PosixConditionBase*>(conditions),
-                                                   wait_all, ComputeAlertableWaitTimeout(deadline));
+                                                   wait_all, ComputeAlertableWaitTimeout(deadline), deadline);
     if (result.first != WaitResult::kTimeout) {
       return result;
     }
