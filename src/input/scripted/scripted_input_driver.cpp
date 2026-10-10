@@ -9,6 +9,17 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#elif REX_PLATFORM_WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <aclapi.h>
+#include <array>
+#include <vector>
 #endif
 #include <rex/logging.h>
 
@@ -46,6 +57,65 @@ bool ReadOwnedScript(const std::filesystem::path& path, std::string& text,
   device = static_cast<uint64_t>(before.st_dev); inode = static_cast<uint64_t>(before.st_ino);
   error.clear(); return true;
 }
+#elif REX_PLATFORM_WIN32
+// Windows equivalent of the owned-file check: the script must be owned by this
+// user (or the elevated default owner, Administrators) and not be a reparse point.
+bool OwnedByCaller(HANDLE handle) {
+  PSID owner = nullptr; PSECURITY_DESCRIPTOR descriptor = nullptr;
+  if (GetSecurityInfo(handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr, nullptr,
+                      nullptr, &descriptor) != ERROR_SUCCESS || !owner) return false;
+  struct Free { PSECURITY_DESCRIPTOR value; ~Free() { LocalFree(value); } } free_descriptor{descriptor};
+  HANDLE token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+  struct CloseToken { HANDLE value; ~CloseToken() { CloseHandle(value); } } close_token{token};
+  DWORD size = 0; GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+  if (!size || size > 4096) return false;
+  std::vector<uint8_t> user(size);
+  if (!GetTokenInformation(token, TokenUser, user.data(), size, &size)) return false;
+  std::array<uint8_t, SECURITY_MAX_SID_SIZE> admins{}; DWORD admins_size = DWORD(admins.size());
+  const bool administrators = CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr, admins.data(),
+                                                 &admins_size) && EqualSid(owner, admins.data());
+  return EqualSid(owner, reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid) || administrators;
+}
+bool ReadOwnedScript(const std::filesystem::path& path, std::string& text,
+                     uint64_t& device, uint64_t& inode, std::string& error) {
+  // The appending writer opens the file between rows, so share read and write.
+  HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ | READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) { error = "input script cannot be opened safely"; return false; }
+  struct Close { HANDLE value; ~Close() { CloseHandle(value); } } close{handle};
+  BY_HANDLE_FILE_INFORMATION before{}, after{};
+  auto size_of = [](const BY_HANDLE_FILE_INFORMATION& info) {
+    return (uint64_t(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+  };
+  if (!GetFileInformationByHandle(handle, &before) ||
+      (before.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+      !OwnedByCaller(handle) || size_of(before) > Timeline::kMaximumBytes) {
+    error = "input script is not a bounded private owned regular file"; return false;
+  }
+  text.assign(Timeline::kMaximumBytes + 1, '\0');
+  size_t offset = 0;
+  while (offset < text.size()) {
+    DWORD count = 0;
+    if (!ReadFile(handle, text.data() + offset, DWORD(text.size() - offset), &count, nullptr)) {
+      error = "input script read failed"; return false;
+    }
+    if (!count) break;
+    offset += count;
+  }
+  text.resize(offset);
+  if (text.size() > Timeline::kMaximumBytes || !GetFileInformationByHandle(handle, &after) ||
+      after.dwVolumeSerialNumber != before.dwVolumeSerialNumber ||
+      after.nFileIndexHigh != before.nFileIndexHigh || after.nFileIndexLow != before.nFileIndexLow ||
+      size_of(after) != size_of(before) || size_of(after) != text.size() ||
+      after.ftLastWriteTime.dwLowDateTime != before.ftLastWriteTime.dwLowDateTime ||
+      after.ftLastWriteTime.dwHighDateTime != before.ftLastWriteTime.dwHighDateTime) {
+    error = "input script changed during bounded read"; return false;
+  }
+  device = before.dwVolumeSerialNumber;
+  inode = (uint64_t(before.nFileIndexHigh) << 32) | before.nFileIndexLow;
+  error.clear(); return true;
+}
 #endif
 }
 
@@ -58,7 +128,7 @@ ScriptedInputDriver::ScriptedInputDriver(std::filesystem::path script, Clock clo
 
 X_STATUS ScriptedInputDriver::Setup() {
   if (append_only_) {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
     std::string text, error;
     if (!ReadOwnedScript(script_, text, script_device_, script_inode_, error)) {
       REXLOG_ERROR("Offline controller append setup rejected: {}", error); return X_STATUS_INVALID_PARAMETER;
@@ -77,7 +147,7 @@ X_STATUS ScriptedInputDriver::Setup() {
     REXLOG_INFO("Offline controller append-only reload enabled; 250ms cadence, private owned file");
     return X_STATUS_SUCCESS;
 #else
-    REXLOG_ERROR("Offline controller append-only reload requires Linux"); return X_STATUS_INVALID_PARAMETER;
+    REXLOG_ERROR("Offline controller append-only reload requires Linux or Windows"); return X_STATUS_INVALID_PARAMETER;
 #endif
   }
   std::error_code ec;
@@ -111,7 +181,7 @@ void ScriptedInputDriver::ReportReloadError(const std::string& error) {
 void ScriptedInputDriver::Reload(std::chrono::steady_clock::time_point now, uint64_t elapsed_ms) {
   if (!append_only_ || (reload_clock_set_ && now - reloaded_at_ < std::chrono::milliseconds(250))) return;
   reloaded_at_ = now; reload_clock_set_ = true;
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   std::string text, error; uint64_t device = 0, inode = 0;
   if (!ReadOwnedScript(script_, text, device, inode, error)) { ReportReloadError(error); return; }
   if (device != script_device_ || inode != script_inode_) {
@@ -168,6 +238,12 @@ X_RESULT ScriptedInputDriver::Sample(DeviceId id, X_INPUT_STATE* out, bool start
         REXLOG_INFO("Offline controller append clock: monotonic_ms={} pid={} device={} inode={} external_clock={}",
                     uint64_t(monotonic.tv_sec) * 1000 + uint64_t(monotonic.tv_nsec) / 1000000,
                     ::getpid(), script_device_, script_inode_, external_clock_);
+    }
+#elif REX_PLATFORM_WIN32
+    if (append_only_) {
+      REXLOG_INFO("Offline controller append clock: monotonic_ms={} pid={} device={} inode={} external_clock={}",
+                  uint64_t(GetTickCount64()), uint32_t(GetCurrentProcessId()), script_device_, script_inode_,
+                  external_clock_);
     }
 #endif
   }
