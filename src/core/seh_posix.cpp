@@ -20,6 +20,7 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 
 #if REX_PLATFORM_LINUX
 #include "signal_posix.h"
+#include <rex/exception_handler.h>
 #include <rex/platform/guest_access.h>
 #endif
 
@@ -49,8 +50,14 @@ static void signal_handler(int sig, siginfo_t* info, void* ucontext) {
     guest::LeaveSignalContext();
     return;
   }
-  // An arbitrary protected C++ instruction is not a recovery boundary. Never
+  guest::LeaveSignalContext();
+  // Direct generated guest memory: MMIO and physical write-watch faults are
+  // serviced here by the installed callbacks, as on Windows. Otherwise never
   // throw or run a runtime callback from this signal context.
+  if (arch::ExceptionHandler::DispatchSignal(sig, info, ucontext)) {
+    return;
+  }
+  guest::EnterSignalContext();
   ForwardSignal(sig, info, ucontext, previous_handlers[sig]);
   guest::LeaveSignalContext();
 #else

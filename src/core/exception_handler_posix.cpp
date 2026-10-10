@@ -54,17 +54,10 @@ constexpr size_t kMaxHandlerCount = 8;
 // Executed in order.
 std::pair<ExceptionHandler::Handler, void*> handlers_[kMaxHandlerCount];
 
-static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
-                                     void* signal_context) {
-#if REX_PLATFORM_LINUX
-  // Registered access capture lives in SEH's minimal signal entry. Linux
-  // callbacks are dispatched only from normal runtime context below.
-  auto& previous = signal_number == SIGILL ? original_sigill_handler_
-                                         : original_sigsegv_handler_;
-  platform::ForwardSignal(signal_number, signal_info, signal_context, previous);
-  return;
-#else
-
+// Builds the host thread context from the signal context, runs the installed
+// callbacks and applies their register changes. Returns whether one handled it.
+[[maybe_unused]] static bool DispatchSignalToHandlers(int signal_number, siginfo_t* signal_info,
+                                                      void* signal_context) {
 #if REX_PLATFORM_MAC
   // Darwin's mcontext_t is already a pointer (__darwin_mcontext64*); copy it.
   mcontext_t mcontext = reinterpret_cast<ucontext_t*>(signal_context)->uc_mcontext;
@@ -189,7 +182,7 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       // On non-Mac POSIX, SIGBUS is a bus error (misaligned access), not a
       // protection fault — don't handle it here.
       assert_unhandled_case(signal_number);
-      return;
+      return false;
 #endif
       [[fallthrough]];
     case SIGSEGV: {
@@ -272,6 +265,7 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
     } break;
     default:
       assert_unhandled_case(signal_number);
+      return false;
   }
 
   for (size_t i = 0; i < rex::countof(handlers_) && handlers_[i].first; ++i) {
@@ -428,18 +422,33 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       }
 #endif  // REX_PLATFORM_MAC
 #endif  // REX_ARCH
-      return;
+      return true;
     }
   }
+  return false;
+}
+
 #if REX_PLATFORM_LINUX
-  // MMIO/runtime handlers declined ownership. Preserve SEH/host handlers and
-  // the original crash signal rather than returning to the same fault forever.
-  auto& previous = signal_number == SIGILL ? original_sigill_handler_
-                                         : original_sigsegv_handler_;
-  platform::ForwardSignal(signal_number, signal_info, signal_context, previous);
-#endif
+bool ExceptionHandler::DispatchSignal(int signal_number, void* signal_info, void* signal_context) {
+#if defined(REXGLUE_DIRECT_GUEST_MEMORY) && REXGLUE_DIRECT_GUEST_MEMORY
+  if (signal_number != SIGSEGV || !signal_info || !handlers_[0].first) {
+    return false;
+  }
+  return DispatchSignalToHandlers(signal_number, static_cast<siginfo_t*>(signal_info),
+                                  signal_context);
+#else
+  (void)signal_number;
+  (void)signal_info;
+  (void)signal_context;
+  return false;
 #endif
 }
+#else
+static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
+                                     void* signal_context) {
+  DispatchSignalToHandlers(signal_number, signal_info, signal_context);
+}
+#endif
 
 void ExceptionHandler::Install(Handler fn, void* data) {
 #if REX_PLATFORM_LINUX

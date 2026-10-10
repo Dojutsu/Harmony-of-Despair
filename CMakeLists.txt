@@ -23,6 +23,9 @@ option(REXGLUE_ENABLE_SANITIZERS "Enable UndefinedBehaviorSanitizer" OFF)
 option(REXGLUE_ENABLE_FIDELITYFX "Enable optional AMD FidelityFX integration (experimental)" OFF)
 option(REXGLUE_ENABLE_TRACY                "Enable Tracy profiler integration" ON)
 option(REXGLUE_ENABLE_PERF_COUNTERS        "Enable lightweight perf counter registry and overlay" ON)
+# Linux x86-64: generated code uses native guest loads/stores (as on Windows) and
+# the runtime services MMIO/write-watch faults from its exception handler chain.
+option(REXGLUE_LINUX_DIRECT_GUEST_MEMORY   "Use native generated guest memory access on Linux x86-64" OFF)
 # Propagate profiling defines globally (compiled out in Release)
 if(REXGLUE_ENABLE_TRACY)
     add_compile_definitions($<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PROFILING>)

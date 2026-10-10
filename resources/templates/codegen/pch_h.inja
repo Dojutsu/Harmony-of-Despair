@@ -125,9 +125,18 @@ extern PPCFuncMapping PPCFuncMappings[];
 // Memory Access
 //=============================================================================
 
+// REXGLUE_DIRECT_GUEST_MEMORY selects the native guest load/store expressions on
+// Linux x86-64, as on Windows. The runtime then services MMIO and physical
+// write-watch faults from its exception handler chain.
+#if REX_PLATFORM_LINUX && REX_ARCH_AMD64 && !(defined(REXGLUE_DIRECT_GUEST_MEMORY) && REXGLUE_DIRECT_GUEST_MEMORY)
+#define REX_LINUX_CHECKED_GUEST_MEMORY 1
+#else
+#define REX_LINUX_CHECKED_GUEST_MEMORY 0
+#endif
+
 // The optional Linux function scope is unsupported across native nonlocal jumps.
 // Keep this off for projects using setjmp/longjmp or foreign callbacks that jump.
-#if REX_PLATFORM_LINUX && REX_ARCH_AMD64 && defined(REXGLUE_FUNCTION_MEMORY_CONSUMER) && REXGLUE_FUNCTION_MEMORY_CONSUMER
+#if REX_LINUX_CHECKED_GUEST_MEMORY && defined(REXGLUE_FUNCTION_MEMORY_CONSUMER) && REXGLUE_FUNCTION_MEMORY_CONSUMER
 #include <rex/platform/function_memory_consumer.h>
 #define REX_FUNC_PROLOGUE() REX_FUNC_ALIGNMENT_PROLOGUE(); [[maybe_unused]] rex::guest::detail::FunctionMemoryConsumer __rex_function_memory
 #define REX_MEMORY_CONSUMER_CALL(name) __rex_function_memory.name
@@ -144,7 +153,7 @@ extern PPCFuncMapping PPCFuncMappings[];
 
 #define REX_RAW_ADDR(x) (base + (u32)(x) + REX_PHYS_HOST_OFFSET(x))
 
-#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+#if REX_LINUX_CHECKED_GUEST_MEMORY
 #include <rex/platform/guest_memory.h>
 #define REX_LOAD_U8(x) REX_MEMORY_CONSUMER_CALL(Read)<u8>(REX_RAW_ADDR(x))
 #define REX_LOAD_U16(x) __builtin_bswap16(REX_MEMORY_CONSUMER_CALL(Read)<u16>(REX_RAW_ADDR(x)))
@@ -178,7 +187,7 @@ extern PPCFuncMapping PPCFuncMappings[];
 
 #define REX_IS_MMIO_ADDR(addr) ((addr) >= 0x7F000000u && (addr) < 0x80000000u)
 
-#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+#if REX_LINUX_CHECKED_GUEST_MEMORY
 #define REX_MM_STORE_U8(addr, val) \
   do { u32 _address = (addr); auto _value = (val); \
     if (REX_IS_MMIO_ADDR(_address)) { REX_MEMORY_CONSUMER_CALL(MmioWrite32)(base, _address, static_cast<u32>(_value)); } \
@@ -310,7 +319,7 @@ extern PPCFuncMapping PPCFuncMappings[];
 
 // The Windows backends preserve the original native expressions. Only Linux
 // guest accesses enter registered leaves; host vector temporaries remain native.
-#if REX_PLATFORM_LINUX && REX_ARCH_AMD64
+#if REX_LINUX_CHECKED_GUEST_MEMORY
 #define REX_LOAD_VECTOR(x) REX_MEMORY_CONSUMER_CALL(ReadVector)<simde__m128i>(REX_RAW_ADDR(x))
 #define REX_STORE_VECTOR(x, y) REX_MEMORY_CONSUMER_CALL(WriteVector)(REX_RAW_ADDR(x), (y))
 #define REX_LOAD_RESERVED_U32(x) REX_MEMORY_CONSUMER_CALL(ReadReserved32)(REX_RAW_ADDR(x))
@@ -380,7 +389,7 @@ inline std::unordered_map<u32, jmp_buf>& get_jmp_buf_map() {
 // Trap Handling
 //=============================================================================
 
-#if REX_PLATFORM_LINUX && REX_ARCH_AMD64 && defined(REXGLUE_FUNCTION_MEMORY_CONSUMER) && REXGLUE_FUNCTION_MEMORY_CONSUMER
+#if REX_LINUX_CHECKED_GUEST_MEMORY && defined(REXGLUE_FUNCTION_MEMORY_CONSUMER) && REXGLUE_FUNCTION_MEMORY_CONSUMER
 namespace rex::guest::detail {
 template<bool Allowed = false> inline int RejectFunctionScopeNonlocalJump() {
   static_assert(Allowed, "Function memory consumers cannot cross native setjmp/longjmp; disable REXGLUE_FUNCTION_MEMORY_CONSUMER for this project");
@@ -396,7 +405,7 @@ inline void ppc_trap(PPCContext& ctx, u8* base, u16 trap_type) {
   switch (trap_type) {
     case 20:
     case 26: {
-      #if REX_PLATFORM_LINUX && REX_ARCH_AMD64 && defined(REXGLUE_FUNCTION_MEMORY_CONSUMER) && REXGLUE_FUNCTION_MEMORY_CONSUMER
+      #if REX_LINUX_CHECKED_GUEST_MEMORY && defined(REXGLUE_FUNCTION_MEMORY_CONSUMER) && REXGLUE_FUNCTION_MEMORY_CONSUMER
       rex::guest::detail::FunctionMemoryConsumer __rex_function_memory;
 #endif
       auto str = REX_LOAD_STRING(ctx.r3.u32, ctx.r4.u16);

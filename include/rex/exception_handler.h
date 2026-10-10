@@ -533,6 +533,14 @@ class ExceptionHandler {
   static bool DispatchDeferred(Exception* exception);
 #endif
 
+#if REX_PLATFORM_LINUX
+  // REXGLUE_DIRECT_GUEST_MEMORY only: run the installed callbacks for a SIGSEGV
+  // that no checked access leaf owns, as the Windows/macOS handlers do. Returns
+  // whether a callback handled it (the signal context is then updated to
+  // resume). Always false when direct guest memory is not compiled in.
+  static bool DispatchSignal(int signal_number, void* signal_info, void* signal_context);
+#endif
+
   // Uninstalls a previously-installed exception handler.
   static void Uninstall(Handler fn, void* data);
 };

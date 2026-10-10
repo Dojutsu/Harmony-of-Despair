@@ -126,6 +126,10 @@ if(REXGLUE_ENABLE_PERF_COUNTERS)
         $<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PERF_COUNTERS>)
 endif()
 
+if(REXGLUE_LINUX_DIRECT_GUEST_MEMORY AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(rexruntime PUBLIC REXGLUE_DIRECT_GUEST_MEMORY=1)
+endif()
+
 if(WIN32)
     target_link_libraries(rexruntime PRIVATE bcrypt ws2_32 winhttp)
     target_link_libraries(rexruntime PUBLIC dxgi dxguid)

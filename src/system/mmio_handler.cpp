@@ -60,7 +60,9 @@ std::unique_ptr<MMIOHandler> MMIOHandler::Install(uint8_t* virtual_membase,
   // Linux adjudicates registered leaf failures in normal runtime context; no
   // complex MMIO/watch callback is installed in the signal-handler chain.
   // Explicit REX_MM_LOAD/STORE device accesses still use CheckLoad/CheckStore.
-#if !REX_PLATFORM_LINUX
+  // Direct Linux generated memory faults on these pages and is serviced by the
+  // same callback from the signal handler, as on Windows.
+#if !REX_PLATFORM_LINUX || (defined(REXGLUE_DIRECT_GUEST_MEMORY) && REXGLUE_DIRECT_GUEST_MEMORY)
   arch::ExceptionHandler::Install(ExceptionCallbackThunk, handler.get());
 #endif
 
@@ -83,7 +85,7 @@ MMIOHandler::MMIOHandler(uint8_t* virtual_membase, uint8_t* physical_membase, ui
 
 MMIOHandler::~MMIOHandler() {
   REX_MAPPING_OWNER_MUTATION();
-#if !REX_PLATFORM_LINUX
+#if !REX_PLATFORM_LINUX || (defined(REXGLUE_DIRECT_GUEST_MEMORY) && REXGLUE_DIRECT_GUEST_MEMORY)
   arch::ExceptionHandler::Uninstall(ExceptionCallbackThunk, this);
 #endif
 

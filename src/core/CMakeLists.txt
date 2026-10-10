@@ -157,6 +157,10 @@ if(REXGLUE_ENABLE_TRACY)
         $<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PROFILING>)
 endif()
 
+if(REXGLUE_LINUX_DIRECT_GUEST_MEMORY AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(rexcore PUBLIC REXGLUE_DIRECT_GUEST_MEMORY=1)
+endif()
+
 if(REXGLUE_ENABLE_PERF_COUNTERS)
     target_sources(rexcore PRIVATE perf/counter.cpp)
     target_compile_definitions(rexcore PUBLIC
