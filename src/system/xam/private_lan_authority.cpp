@@ -5,14 +5,17 @@
 #include <map>
 #include <mutex>
 #include <set>
-#if REX_PLATFORM_GNU_LINUX
-#include <arpa/inet.h>
-#include <openssl/crypto.h>
-#include <openssl/evp.h>
-#include <openssl/rand.h>
-#endif
+#include "private_lan_crypto.h"
 namespace rex::system::xam {
 namespace {
+namespace crypto=lan_crypto;
+// IPv4 values are stored in network byte order, as in sockaddr_in.
+uint32_t HostOrder(uint32_t network) {
+  uint8_t b[4];std::memcpy(b,&network,4);return (uint32_t(b[0])<<24)|(uint32_t(b[1])<<16)|(uint32_t(b[2])<<8)|b[3];
+}
+uint32_t NetworkOrder(uint32_t host) {
+  const uint8_t b[4]{uint8_t(host>>24),uint8_t(host>>16),uint8_t(host>>8),uint8_t(host)};uint32_t value;std::memcpy(&value,b,4);return value;
+}
 constexpr size_t kTicketHeader = 112, kTicketPeer = 116;
 using Bytes16 = std::array<uint8_t,16>;
 using Bytes32 = std::array<uint8_t,32>;
@@ -29,55 +32,31 @@ uint64_t Get(const uint8_t* input,unsigned size) {
   uint64_t value=0;for(unsigned i=0;i<size;++i)value=(value<<8)|input[i];return value;
 }
 bool PrivateEndpoint(LanAddress endpoint) {
-#if REX_PLATFORM_GNU_LINUX
-  const auto ip=ntohl(endpoint.ipv4);
+  const auto ip=HostOrder(endpoint.ipv4);
   return endpoint.port&&((ip>>24)==127||(ip>>24)==10||(ip>>20)==0xac1||(ip>>16)==0xc0a8);
-#else
-  (void)endpoint;return false;
-#endif
 }
 bool Logical(uint32_t ip) {
-#if REX_PLATFORM_GNU_LINUX
-  const auto value=ntohl(ip);return (value>>24)==0xf0&&(value&0xffffff)!=0;
-#else
-  (void)ip;return false;
-#endif
+  const auto value=HostOrder(ip);return (value>>24)==0xf0&&(value&0xffffff)!=0;
 }
 bool Random(std::span<uint8_t> output) {
-#if REX_PLATFORM_GNU_LINUX
-  return RAND_bytes(output.data(),int(output.size()))==1&&Nonzero(output);
-#else
-  (void)output;return false;
-#endif
+  return crypto::Random(output)&&Nonzero(output);
 }
 std::optional<Bytes32> Fingerprint(uint32_t title,const ArbitrationIdentity& identity) {
-#if REX_PLATFORM_GNU_LINUX
   std::vector<uint8_t> input;Put(input,title,4);Append(input,identity.session_id);Append(input,identity.exchange_key);
   Append(input,identity.incarnation);Put(input,identity.nonce,8);Put(input,identity.host_xuid,8);Put(input,identity.host_machine_id,8);
-  Bytes32 result{};unsigned length=0;
-  if(EVP_Digest(input.data(),input.size(),result.data(),&length,EVP_sha256(),nullptr)!=1||length!=result.size())return std::nullopt;
+  Bytes32 result{};
+  if(!crypto::Sha256({input},result))return std::nullopt;
   return result;
-#else
-  (void)title;(void)identity;return std::nullopt;
-#endif
 }
 struct Pair {
   Bytes16 link{},capability{};Bytes32 traffic{};
-  ~Pair(){
-#if REX_PLATFORM_GNU_LINUX
-    OPENSSL_cleanse(traffic.data(),traffic.size());OPENSSL_cleanse(capability.data(),capability.size());
-#endif
-  }
+  ~Pair(){crypto::Cleanse(traffic.data(),traffic.size());crypto::Cleanse(capability.data(),capability.size());}
 };
 struct Member {
   PrivateLanJoinClaim join;
   PrivateLanAuthority::Clock::time_point last_fresh_rpc{};
   Bytes16 nonce{},generation{},capability{};uint32_t logical=0;
-  ~Member(){
-#if REX_PLATFORM_GNU_LINUX
-    OPENSSL_cleanse(capability.data(),capability.size());
-#endif
-  }
+  ~Member(){crypto::Cleanse(capability.data(),capability.size());}
 };
 bool SameAdmission(const Member& member,const PrivateLanJoinClaim& claim) {
   return member.join.xuid==claim.xuid&&member.join.machine_id==claim.machine_id&&
@@ -127,22 +106,18 @@ bool PrivateLanAuthority::Admission::CommitIfRaw(bool (*publish)(void*) noexcept
 }
 std::unique_ptr<PrivateLanAuthority> PrivateLanAuthority::Create(uint32_t title,
     ArbitrationIdentity identity,LanAddress endpoint,std::shared_ptr<const PrivateLanInvitation> invitation) {
-#if REX_PLATFORM_GNU_LINUX
-  if(!title||!identity.host_xuid||!identity.host_machine_id||!identity.nonce||!Nonzero(identity.session_id)||
+  if(!crypto::Available()||!title||!identity.host_xuid||!identity.host_machine_id||!identity.nonce||!Nonzero(identity.session_id)||
       !Nonzero(identity.exchange_key)||!Nonzero(identity.incarnation)||!PrivateEndpoint(endpoint)||
       !invitation||!invitation->host()||!invitation->Current()||invitation->host_xuid()!=identity.host_xuid)return {};
   try {
     auto state=std::make_shared<State>();state->title=title;state->identity=identity;state->invitation=std::move(invitation);
     auto hash=Fingerprint(title,identity);if(!hash)return {};state->fingerprint=*hash;
     Member host;host.join.xuid=identity.host_xuid;host.join.machine_id=identity.host_machine_id;
-    host.join.endpoint=endpoint;host.logical=htonl(0xf0000001);
+    host.join.endpoint=endpoint;host.logical=NetworkOrder(0xf0000001);
     if(!Random(host.nonce)||!Random(host.generation)||!Random(host.capability))return {};
     state->members.emplace(host.join.xuid,host);
     return std::unique_ptr<PrivateLanAuthority>(new PrivateLanAuthority(std::move(state)));
   }catch(...){return {};}
-#else
-  (void)title;(void)identity;(void)endpoint;(void)invitation;return {};
-#endif
 }
 std::unique_ptr<PrivateLanAuthority::Admission> PrivateLanAuthority::Prepare(
     const PrivateLanJoinClaim& claim,std::span<const uint8_t> proof,Clock::time_point now) {
@@ -154,7 +129,6 @@ std::unique_ptr<PrivateLanAuthority::Admission> PrivateLanAuthority::PrepareDepa
 }
 std::unique_ptr<PrivateLanAuthority::Admission> PrivateLanAuthority::PrepareImpl(
     const PrivateLanJoinClaim& claim,std::span<const uint8_t> proof,Clock::time_point now,bool departure) {
-#if REX_PLATFORM_GNU_LINUX
   if(!claim.xuid||claim.xuid==state_->identity.host_xuid||!claim.machine_id||!PrivateEndpoint(claim.endpoint)||
       !Nonzero(claim.challenge)||!Nonzero(std::span(claim.request_id).first(8))||
       !Get(claim.request_id.data()+8,8)||!Nonzero(claim.client_public_key))return {};
@@ -193,16 +167,13 @@ std::unique_ptr<PrivateLanAuthority::Admission> PrivateLanAuthority::PrepareImpl
     if(!Random(member.nonce)||!Random(member.generation)||!Random(member.capability))return {};
     const auto clients=state_->invitation->clients();const auto ordinal=std::find(clients.begin(),clients.end(),claim.xuid);
     if(ordinal==clients.end()) { return {}; }
-    member.logical=htonl(0xf0000002+uint32_t(ordinal-clients.begin()));
+    member.logical=NetworkOrder(0xf0000002+uint32_t(ordinal-clients.begin()));
     for(const auto& [xuid,previous]:draft->members) {
       (void)previous;Pair pair;if(!Random(pair.link)||!Random(pair.capability)||!Random(pair.traffic))return {};
       const auto ordered=std::minmax(xuid,claim.xuid);draft->pairs.emplace(std::make_pair(ordered.first,ordered.second),pair);
     }
     draft->members.emplace(claim.xuid,member);return std::unique_ptr<Admission>(new Admission(std::move(draft)));
   }catch(...){return {};}
-#else
-  (void)claim;(void)proof;(void)now;(void)departure;return {};
-#endif
 }
 std::unique_ptr<PrivateLanAuthority::Admission> PrivateLanAuthority::PrepareHostEndpoint(LanAddress endpoint) {
   if(!PrivateEndpoint(endpoint))return {};
@@ -279,9 +250,7 @@ std::optional<std::vector<uint8_t>> EncodeAuthorityTicket(const auto& context,co
     struct CleanTemporary {
       std::vector<uint8_t>& bytes;
       ~CleanTemporary() {
-#if REX_PLATFORM_GNU_LINUX
-        if(!bytes.empty())OPENSSL_cleanse(bytes.data(),bytes.size());
-#endif
+        crypto::Cleanse(bytes.data(),bytes.size());
       }
     } cleanse{bytes};
     bytes.reserve(kTicketHeader+(members.size()-1)*kTicketPeer);
@@ -314,13 +283,12 @@ std::optional<std::vector<uint8_t>> PrivateLanAuthority::Admission::Ticket(uint6
 }
 std::optional<PrivateLanGameplayTicket> ParsePrivateLanGameplayTicket(uint32_t title,
     const ArbitrationIdentity& identity,uint64_t local,std::span<const uint8_t> bytes,uint16_t guest_port) {
-#if REX_PLATFORM_GNU_LINUX
   if(!title||!local||!guest_port||!identity.host_xuid||!identity.host_machine_id||!identity.nonce||
       !Nonzero(identity.session_id)||!Nonzero(identity.exchange_key)||!Nonzero(identity.incarnation)||bytes.size()<kTicketHeader||std::memcmp(bytes.data(),"HPLT",4)||
       bytes[4]!=1||bytes[5]>5||bytes[6]||bytes[7]||bytes.size()!=kTicketHeader+size_t(bytes[5])*kTicketPeer)return std::nullopt;
   try {
     const auto hash=Fingerprint(title,identity);
-    if(!hash||CRYPTO_memcmp(hash->data(),bytes.data()+8,hash->size())||Get(bytes.data()+40,8)!=identity.host_xuid||
+    if(!hash||!crypto::Equal(hash->data(),bytes.data()+8,hash->size())||Get(bytes.data()+40,8)!=identity.host_xuid||
         Get(bytes.data()+48,8)!=local)return std::nullopt;
     const auto lease=Get(bytes.data()+108,4);
     uint32_t logical=0;std::memcpy(&logical,bytes.data()+104,4);
@@ -354,8 +322,5 @@ std::optional<PrivateLanGameplayTicket> ParsePrivateLanGameplayTicket(uint32_t t
     if(local!=identity.host_xuid&&!xuids.contains(identity.host_xuid))return std::nullopt;
     return result;
   }catch(...){return std::nullopt;}
-#else
-  (void)title;(void)identity;(void)local;(void)bytes;(void)guest_port;return std::nullopt;
-#endif
 }
 }  // namespace rex::system::xam

@@ -2,13 +2,10 @@
 #include <rex/platform.h>
 #include <algorithm>
 #include <cstring>
-#if REX_PLATFORM_GNU_LINUX
-#include <openssl/evp.h>
-#include <openssl/crypto.h>
-#include <openssl/rand.h>
-#endif
+#include "private_lan_crypto.h"
 namespace rex::system::xam {
 namespace {
+namespace crypto=lan_crypto;
 constexpr size_t kHeader=40,kBody=1384,kClaim=640,kPayloadProof=656,kLength=672,kReserved=674,kCiphertext=676;
 constexpr size_t kRecipientKey=532,kServerKey=564,kIv=596,kTag=608,kRequest=624;
 static_assert(kHeader+kBody+16==kPrivateLanDiscoveryWireBytes);
@@ -46,20 +43,14 @@ bool Role(const PrivateLanInvitation& invitation,PrivateLanDiscoveryDirection di
   if(direction!=PrivateLanDiscoveryDirection::kRequest&&direction!=PrivateLanDiscoveryDirection::kReply)return false;
   return invitation.host()==((direction==PrivateLanDiscoveryDirection::kReply)==sealing)&&invitation.Current();
 }
-#if REX_PLATFORM_GNU_LINUX
-template<size_t N> struct SensitiveBytes {
-  std::array<uint8_t,N> bytes{};
-  ~SensitiveBytes(){OPENSSL_cleanse(bytes.data(),bytes.size());}
-};
-using Cipher=std::unique_ptr<EVP_CIPHER_CTX,decltype(&EVP_CIPHER_CTX_free)>;
-#endif
+template<size_t N> using SensitiveBytes=crypto::SensitiveArray<N>;
+struct CleanKey {std::array<uint8_t,32>& key;~CleanKey(){crypto::Cleanse(key.data(),key.size());}};
 } // namespace
 std::optional<PrivateLanDiscoveryWire> SealPrivateLanDiscoveryFrame(
     const PrivateLanInvitation& invitation,uint64_t client,uint32_t title,
     PrivateLanDiscoveryDirection direction,const PrivateLanDiscoveryFrame& frame) {
-#if REX_PLATFORM_GNU_LINUX
   try {
-    if(!Role(invitation,direction,true))return std::nullopt;
+    if(!crypto::Available()||!Role(invitation,direction,true))return std::nullopt;
     SensitiveBytes<kBody> plaintext;auto& body=plaintext.bytes;
     std::copy(frame.public_packet.begin(),frame.public_packet.end(),body.begin());
     std::copy(frame.join_claim_proof.begin(),frame.join_claim_proof.end(),body.begin()+kClaim);
@@ -76,46 +67,32 @@ std::optional<PrivateLanDiscoveryWire> SealPrivateLanDiscoveryFrame(
     if(!Shape(body,invitation.host_xuid(),client,title,direction))return std::nullopt;
     auto key=invitation.DiscoveryKey(client,direction==PrivateLanDiscoveryDirection::kReply);
     if(!key)return std::nullopt;
-    struct CleanKey {std::array<uint8_t,32>& key;~CleanKey(){OPENSSL_cleanse(key.data(),key.size());}} cleanse{*key};
+    CleanKey cleanse{*key};
     const auto selector=invitation.Selector(client);if(!selector)return std::nullopt;
     PrivateLanDiscoveryWire wire{};std::memcpy(wire.data(),"HPLN",4);wire[4]=3;wire[5]=direction==PrivateLanDiscoveryDirection::kReply?1:0;
     std::copy(selector->begin(),selector->end(),wire.begin()+8);wire[36]=uint8_t(kBody>>8);wire[37]=uint8_t(kBody);
-    if(RAND_bytes(wire.data()+24,12)!=1||!Nonzero(std::span(wire).subspan(24,12)))return std::nullopt;
-    Cipher cipher(EVP_CIPHER_CTX_new(),EVP_CIPHER_CTX_free);int count=0,written=0;
-    if(!cipher||EVP_EncryptInit_ex(cipher.get(),EVP_aes_256_gcm(),nullptr,nullptr,nullptr)!=1||
-       EVP_CIPHER_CTX_ctrl(cipher.get(),EVP_CTRL_GCM_SET_IVLEN,12,nullptr)!=1||
-       EVP_EncryptInit_ex(cipher.get(),nullptr,nullptr,key->data(),wire.data()+24)!=1||
-       EVP_EncryptUpdate(cipher.get(),nullptr,&count,wire.data(),kHeader)!=1||
-       EVP_EncryptUpdate(cipher.get(),wire.data()+kHeader,&written,body.data(),kBody)!=1||written!=int(kBody)||
-       EVP_EncryptFinal_ex(cipher.get(),wire.data()+kHeader+written,&count)!=1||count!=0||
-       EVP_CIPHER_CTX_ctrl(cipher.get(),EVP_CTRL_GCM_GET_TAG,16,wire.data()+kHeader+kBody)!=1)return std::nullopt;
+    if(!crypto::Random(std::span(wire).subspan(24,12))||!Nonzero(std::span(wire).subspan(24,12)))return std::nullopt;
+    std::array<uint8_t,12> iv{};std::copy_n(wire.begin()+24,12,iv.begin());
+    if(!crypto::AesGcmSeal(*key,iv,std::span(wire).first(kHeader),body,wire.data()+kHeader,
+                           std::span(wire).subspan<kHeader+kBody,16>()))return std::nullopt;
     return wire;
   }catch(...){return std::nullopt;}
-#else
-  (void)invitation;(void)client;(void)title;(void)direction;(void)frame;return std::nullopt;
-#endif
 }
 std::optional<PrivateLanDiscoveryFrame> OpenPrivateLanDiscoveryFrame(
     const PrivateLanInvitation& invitation,uint64_t client,uint32_t title,
     PrivateLanDiscoveryDirection direction,std::span<const uint8_t> wire,std::optional<ArbitrationToken> outstanding) {
-#if REX_PLATFORM_GNU_LINUX
   try {
-    if(!Role(invitation,direction,false)||wire.size()!=kPrivateLanDiscoveryWireBytes||std::memcmp(wire.data(),"HPLN",4)||
+    if(!crypto::Available()||!Role(invitation,direction,false)||wire.size()!=kPrivateLanDiscoveryWireBytes||std::memcmp(wire.data(),"HPLN",4)||
        wire[4]!=3||wire[5]!=(direction==PrivateLanDiscoveryDirection::kReply?1:0)||!Zero(wire.subspan(6,2))||
        !Zero(wire.subspan(38,2))||Number(wire.subspan(36,2))!=kBody||!Nonzero(wire.subspan(24,12))||
        (direction==PrivateLanDiscoveryDirection::kReply&&!outstanding))return std::nullopt;
     const auto selected=invitation.ClientForSelector(wire.subspan(8,16));
     if(!selected||(client&&client!=*selected)||(!client&&direction!=PrivateLanDiscoveryDirection::kRequest))return std::nullopt;
     client=*selected;auto key=invitation.DiscoveryKey(client,direction==PrivateLanDiscoveryDirection::kReply);if(!key)return std::nullopt;
-    struct CleanKey {std::array<uint8_t,32>& key;~CleanKey(){OPENSSL_cleanse(key.data(),key.size());}} cleanse{*key};
-    SensitiveBytes<kBody+16> plaintext;Cipher cipher(EVP_CIPHER_CTX_new(),EVP_CIPHER_CTX_free);int count=0,written=0;
-    if(!cipher||EVP_DecryptInit_ex(cipher.get(),EVP_aes_256_gcm(),nullptr,nullptr,nullptr)!=1||
-       EVP_CIPHER_CTX_ctrl(cipher.get(),EVP_CTRL_GCM_SET_IVLEN,12,nullptr)!=1||
-       EVP_DecryptInit_ex(cipher.get(),nullptr,nullptr,key->data(),wire.data()+24)!=1||
-       EVP_DecryptUpdate(cipher.get(),nullptr,&count,wire.data(),kHeader)!=1||
-       EVP_DecryptUpdate(cipher.get(),plaintext.bytes.data(),&written,wire.data()+kHeader,kBody)!=1||written!=int(kBody)||
-       EVP_CIPHER_CTX_ctrl(cipher.get(),EVP_CTRL_GCM_SET_TAG,16,const_cast<uint8_t*>(wire.data()+kHeader+kBody))!=1||
-       EVP_DecryptFinal_ex(cipher.get(),plaintext.bytes.data()+written,&count)!=1||count!=0)return std::nullopt;
+    CleanKey cleanse{*key};
+    SensitiveBytes<kBody+16> plaintext;std::array<uint8_t,12> iv{};std::copy_n(wire.begin()+24,12,iv.begin());
+    std::array<uint8_t,16> tag{};std::copy_n(wire.begin()+kHeader+kBody,16,tag.begin());
+    if(!crypto::AesGcmOpen(*key,iv,wire.first(kHeader),wire.subspan(kHeader,kBody),tag,plaintext.bytes.data()))return std::nullopt;
     const auto body=std::span(plaintext.bytes).first(kBody);
     if(!Shape(body,invitation.host_xuid(),client,title,direction)||
        (outstanding&&!std::equal(outstanding->begin(),outstanding->end(),body.begin()+kRequest)))return std::nullopt;
@@ -129,8 +106,5 @@ std::optional<PrivateLanDiscoveryFrame> OpenPrivateLanDiscoveryFrame(
     }
     return result;
   }catch(...){return std::nullopt;}
-#else
-  (void)invitation;(void)client;(void)title;(void)direction;(void)wire;(void)outstanding;return std::nullopt;
-#endif
 }
 } // namespace rex::system::xam

@@ -1,13 +1,39 @@
 // Included privately by the actual adapter after its checked staging helpers.
 // A bounded event-driven owner retains only host input; guest output is resolved
 // anew under a short memory pin/lease at completion. No queue lock spans I/O.
+#if REX_PLATFORM_GNU_LINUX
+using PendingMemoryControl = memory::GuestMemoryAccessControl;
+using PendingMemoryPin = memory::GuestMemoryAccessPin;
+using PendingMemoryLease = memory::MappingAccessLease;
+constexpr int kPendingSendFlags = MSG_DONTWAIT;
+inline std::shared_ptr<PendingMemoryControl> PendingMemoryControlOf(KernelState* state) {
+  return state->memory()->access_control();
+}
+#else
+// Windows has no cooperative mapping gate. The kernel state owns Memory for
+// the worker's lifetime (teardown joins the worker), so a pin carries the
+// pointer only. Winsock has no per-call MSG_DONTWAIT; the datagram send below
+// uses the socket's own mode.
+struct PendingMemoryControl { memory::Memory* memory; };
+struct PendingMemoryPin {
+  explicit PendingMemoryPin(const std::shared_ptr<PendingMemoryControl>& control)
+      : memory_(control ? control->memory : nullptr) {}
+  memory::Memory* memory() const { return memory_; }
+  memory::Memory* memory_;
+};
+struct PendingMemoryLease {};
+constexpr int kPendingSendFlags = 0;
+inline std::shared_ptr<PendingMemoryControl> PendingMemoryControlOf(KernelState* state) {
+  return std::make_shared<PendingMemoryControl>(PendingMemoryControl{state->memory()});
+}
+#endif
 struct PendingSocketSend {
   std::mutex mutex;
   object_ref<XSocket> socket;
   XSocket::NativeLease native;
   object_ref<XThread> owner;
   object_ref<XEvent> event;
-  std::shared_ptr<memory::GuestMemoryAccessControl> memory_control;
+  std::shared_ptr<PendingMemoryControl> memory_control;
   uint32_t socket_handle = 0, overlapped = 0, flags = 0;
   XWSAOVERLAPPED identity{};
   N_XSOCKADDR_IN destination{};
@@ -46,9 +72,9 @@ bool CompletePendingSend(PendingSocketSend& op, uint32_t error, uint32_t transfe
       thread::global_critical_region::mutex(), std::try_to_lock);
   if (!teardown && !global.owns_lock()) return false;
   if (!teardown) {
-    memory::GuestMemoryAccessPin pin(op.memory_control);
+    PendingMemoryPin pin(op.memory_control);
     if (auto* mem = pin.memory()) {
-      memory::MappingAccessLease lease;
+      PendingMemoryLease lease;
       auto* host = mem->TranslateVirtual(op.overlapped);
       XWSAOVERLAPPED now{};
       if (ReadSendGuest(mem, op.overlapped, host, &now, sizeof(now)) &&
@@ -111,7 +137,7 @@ void RunPendingSends(const std::shared_ptr<PendingSocketSendService>& service) {
         uint32_t error = 0;
         try {
           sent = op->socket->SendTo(op->payload.data(), uint32_t(op->payload.size()),
-              op->flags | MSG_DONTWAIT, op->has_destination ? &op->destination : nullptr,
+              op->flags | kPendingSendFlags, op->has_destination ? &op->destination : nullptr,
               op->has_destination ? sizeof(N_XSOCKADDR_IN) : 0);
           error = sent < 0 ? LastSocketError() : 0;
         } catch (const std::bad_alloc&) { error = kWsaNoBuffers; }
@@ -164,7 +190,7 @@ uint32_t QueuePendingSend(KernelState* state, uint32_t handle, object_ref<XSocke
   auto op = std::make_shared<PendingSocketSend>();
   op->owner = retain_object(XThread::GetCurrentThread());
   op->socket = std::move(socket); op->native = native;
-  op->memory_control = state->memory()->access_control();
+  op->memory_control = PendingMemoryControlOf(state);
   op->socket_handle = handle; op->overlapped = address; op->identity = identity;
   op->flags = flags; op->payload = std::move(payload); op->admitted_bytes = op->payload.size();
   op->has_destination = destination != nullptr; if (destination) op->destination = *destination;
@@ -177,9 +203,9 @@ uint32_t QueuePendingSend(KernelState* state, uint32_t handle, object_ref<XSocke
   if (!service) return 995;
   // The existing receive store and this queue share only this short admission
   // gate, so duplicate OVERLAPPED addresses cannot overwrite either operation.
-  memory::GuestMemoryAccessPin pin(op->memory_control);
+  PendingMemoryPin pin(op->memory_control);
   auto* mem = pin.memory(); if (!mem) return 995;
-  memory::MappingAccessLease mapping_gate;
+  PendingMemoryLease mapping_gate;
   std::lock_guard receive_gate(pending_recv_mutex);
   std::lock_guard queue_gate(service->mutex);
   if (!service->accepting || native.retired() || !op->owner->is_running()) return 995;
@@ -238,11 +264,11 @@ bool QueryPendingSend(KernelState* state, uint32_t handle, uint32_t address,
     operation_lock.unlock();
     if (error) XThread::SetLastError(error);
     else {
-      memory::GuestMemoryAccessPin pin(op->memory_control);
+      PendingMemoryPin pin(op->memory_control);
       auto* mem=pin.memory();
       bool written=false;
       if (mem) {
-        memory::MappingAccessLease lease;
+        PendingMemoryLease lease;
         if (SendGuestRange(mem,bytes.guest_address(),4,bytes.host_address(),true) &&
             (!flags || SendGuestRange(mem,flags.guest_address(),4,flags.host_address(),true))) {
           const be_u32 transferred{transferred_count}, zero{0};

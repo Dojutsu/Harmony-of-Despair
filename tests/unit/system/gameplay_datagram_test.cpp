@@ -7,7 +7,7 @@
 #include <thread>
 #include <type_traits>
 #include <vector>
-#if REX_PLATFORM_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
 namespace {
 using namespace rex::system::xam;
 GameplayTrafficKey TestKey() { GameplayTrafficKey key{};for(size_t i=0;i<key.size();++i)key[i]=uint8_t(i+1);return key; }

@@ -18,6 +18,13 @@
 namespace rex::system::xam {
 namespace {
 using Clock = std::chrono::steady_clock;
+// MSVC's hash containers allocate inside their move operations. Keeping both
+// tables behind one owning pointer keeps Scope moves nothrow on every
+// platform, which the noexcept publish path below relies on.
+struct ScopeTables {
+  std::unordered_map<std::string, std::shared_ptr<GameplayDatagramCipher>> ciphers;
+  std::unordered_set<std::string> retired_links;
+};
 struct Scope {
   std::weak_ptr<SessionRecord> session;
   uint64_t xuid = 0;
@@ -25,8 +32,11 @@ struct Scope {
   std::optional<uint64_t> socket;
   uint16_t guest_port = 0;
   bool closed = false;
-  std::unordered_map<std::string, std::shared_ptr<GameplayDatagramCipher>> ciphers;
-  std::unordered_set<std::string> retired_links;
+  std::unique_ptr<ScopeTables> tables = std::make_unique<ScopeTables>();
+  auto& ciphers() { return tables->ciphers; }
+  const auto& ciphers() const { return tables->ciphers; }
+  auto& retired_links() { return tables->retired_links; }
+  const auto& retired_links() const { return tables->retired_links; }
 };
 static_assert(std::is_nothrow_move_assignable_v<Scope>);
 static_assert(std::is_nothrow_move_constructible_v<Scope>);
@@ -308,13 +318,13 @@ bool InstallGameplayAuthorizationImpl(const std::shared_ptr<SessionRecord>& sess
   // Prepare all crypto state before changing authority or native routes.
   if (found != scopes.end()) {
     if (found->closed) return reject("scope_closed");
-    candidate.retired_links = found->retired_links;
+    candidate.retired_links() = found->retired_links();
     for (const auto& old : found->authorization.peers)
-      if (!links.contains(old.traversal.attempt_id)) candidate.retired_links.insert(old.traversal.attempt_id);
+      if (!links.contains(old.traversal.attempt_id)) candidate.retired_links().insert(old.traversal.attempt_id);
   }
-  if (candidate.retired_links.size() > 4096) return reject("retired_crypto_link_limit");
+  if (candidate.retired_links().size() > 4096) return reject("retired_crypto_link_limit");
   for (const auto& peer : authorization.peers) {
-    if (candidate.retired_links.contains(peer.traversal.attempt_id)) return reject("retired_crypto_link");
+    if (candidate.retired_links().contains(peer.traversal.attempt_id)) return reject("retired_crypto_link");
     const GameplayPeerAuthorization* previous = nullptr;
     if (found != scopes.end()) {
       for (const auto& old : found->authorization.peers)
@@ -328,14 +338,14 @@ bool InstallGameplayAuthorizationImpl(const std::shared_ptr<SessionRecord>& sess
           previous->traversal.participant != peer.traversal.participant ||
           previous->authenticated_lan_endpoint != peer.authenticated_lan_endpoint ||
           !SameTrafficKey(previous->traffic_key, peer.traffic_key)) return reject("crypto_link_changed");
-      const auto state = found->ciphers.find(peer.traversal.attempt_id);
-      if (state == found->ciphers.end()) return reject("missing_existing_crypto_state");
-      candidate.ciphers.emplace(peer.traversal.attempt_id, state->second);
+      const auto state = found->ciphers().find(peer.traversal.attempt_id);
+      if (state == found->ciphers().end()) return reject("missing_existing_crypto_state");
+      candidate.ciphers().emplace(peer.traversal.attempt_id, state->second);
     } else {
       auto cipher = GameplayDatagramCipher::Create(peer.traffic_key, *ParseLink(peer.traversal.attempt_id),
                                                    peer.traversal.participant);
       if (!cipher) return reject("crypto_provider_unavailable");
-      candidate.ciphers.emplace(peer.traversal.attempt_id, std::move(cipher));
+      candidate.ciphers().emplace(peer.traversal.attempt_id, std::move(cipher));
     }
   }
   if(proposed_members) {
@@ -393,7 +403,7 @@ bool InstallGameplayAuthorizationImpl(const std::shared_ptr<SessionRecord>& sess
     if (found->socket)
       for (const auto& old : found->authorization.peers)
         if (!links.contains(old.traversal.attempt_id)) {
-          candidate.retired_links.insert(old.traversal.attempt_id);
+          candidate.retired_links().insert(old.traversal.attempt_id);
           NatProbeRemoveGameplayIdentity(*found->socket, old.traversal.attempt_id);
         }
     *found = std::move(candidate);
@@ -485,7 +495,7 @@ void CloseGameplaySocket(uint64_t socket) {
           !scope.authorization.member_nonce.empty());
       RemoveRoutes(scope);
       scope.closed = true;  // A recycled native handle cannot inherit this ticket.
-      scope.ciphers.clear();
+      scope.ciphers().clear();
       scope.socket.reset();
     }
   if (!associated)
@@ -498,7 +508,7 @@ void RevokeGameplayAuthorization(const std::shared_ptr<SessionRecord>& session, 
     if (scope.session.lock() == session && scope.xuid == local_xuid) {
       RemoveRoutes(scope);
       scope.closed = true;
-      scope.ciphers.clear();
+      scope.ciphers().clear();
     }
 }
 
@@ -565,8 +575,8 @@ std::optional<std::vector<uint8_t>> SealGameplayDatagram(
     if (scope.socket != socket || !Current(scope)) continue;
     for (const auto& peer : scope.authorization.peers) {
       if (peer.logical.ipv4 != logical.ipv4 || logical.port != scope.guest_port || !PeerCurrent(scope, peer)) continue;
-      const auto found = scope.ciphers.find(peer.traversal.attempt_id);
-      if (found != scope.ciphers.end()) return found->second->Seal(plaintext);
+      const auto found = scope.ciphers().find(peer.traversal.attempt_id);
+      if (found != scope.ciphers().end()) return found->second->Seal(plaintext);
     }
   }
   return std::nullopt;
@@ -579,8 +589,8 @@ bool OpenGameplayDatagram(uint64_t socket, LanAddress logical,
     if (scope.socket != socket || !Current(scope)) continue;
     for (const auto& peer : scope.authorization.peers) {
       if (peer.logical.ipv4 != logical.ipv4 || logical.port != scope.guest_port || !PeerCurrent(scope, peer)) continue;
-      const auto found = scope.ciphers.find(peer.traversal.attempt_id);
-      if (found != scope.ciphers.end()) return found->second->Open(packet, plaintext, consume);
+      const auto found = scope.ciphers().find(peer.traversal.attempt_id);
+      if (found != scope.ciphers().end()) return found->second->Open(packet, plaintext, consume);
     }
   }
   return false;

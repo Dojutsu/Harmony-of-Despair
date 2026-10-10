@@ -24,6 +24,7 @@ add_executable(unit_tests
     system/function_dispatcher_test.cpp
     system/gameplay_traversal_test.cpp
     system/gameplay_datagram_test.cpp
+    system/private_lan_crypto_test.cpp
     system/private_lan_invitation_test.cpp
     system/private_lan_payload_test.cpp
     system/private_lan_authority_test.cpp

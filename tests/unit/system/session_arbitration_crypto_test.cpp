@@ -26,7 +26,7 @@ static_assert(!std::is_copy_assignable_v<EphemeralArbitrationKey>);
 static_assert(std::is_nothrow_move_constructible_v<EphemeralArbitrationKey>);
 static_assert(std::is_nothrow_move_assignable_v<EphemeralArbitrationKey>);
 } // namespace
-#if REX_PLATFORM_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
 TEST_CASE("Arbitration credential envelope roundtrips through actual X25519 and AES256GCM",
           "[session][arbitration][crypto]") {
   const auto token=Credential();const auto aad=Aad();auto client=NewArbitrationKey();

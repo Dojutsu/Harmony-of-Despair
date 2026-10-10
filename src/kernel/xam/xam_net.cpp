@@ -839,7 +839,7 @@ bool SendLimit(const XSocket::NativeLease& operation, uint32_t* limit) {
     return false;
   }
   *limit = type == SOCK_DGRAM ? kMaximumUdpSendBytes : kMaximumStreamSendBytes;
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   if (type == SOCK_DGRAM && IsAuthorizedGameplaySocket(operation.handle()))
     *limit = kGameplayMaximumPlaintextBytes;
 #endif
@@ -871,7 +871,7 @@ bool StageSendDestination(memory::Memory* memory, ppc_ptr_t<XSOCKADDR_IN> to,
   *native = staged;
   return true;
 }
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
 #include "pending_socket_sends.h"
 #else
 bool PendingSendExists(KernelState*, uint32_t) { return false; }
@@ -880,7 +880,7 @@ bool QueryPendingSend(KernelState*, uint32_t, uint32_t, mapped_u32, bool,
 #endif
 }  // namespace
 
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
 void CancelPendingSocketSends(KernelState* state, XSocket* socket) {
   auto service = FindPendingSendService(state); if (!service) return;
   std::array<std::shared_ptr<PendingSocketSend>, PendingSocketSendService::kMaximumOperations> work{};
@@ -1009,7 +1009,7 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
   const uint32_t send_error = result < 0 ? LastSocketError() : 0;
   PumpPendingRecvFrom();
   if (result < 0) {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
     // WSA_IO_PENDING means this exact operation is retained, not merely that
     // authorization is outstanding. Ordinary synchronous sends still fail closed.
     if (send_error == 10035 && overlapped &&

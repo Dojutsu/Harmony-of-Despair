@@ -58,20 +58,53 @@ int ClosedNativeSocket() {
 #endif
   return -1;
 }
+// Report a POSIX-style failure through the platform's socket error channel.
+void FailSocket(int posix_error) {
+#if REX_PLATFORM_WIN32
+  int code = WSAEINVAL;
+  switch (posix_error) {
+    case EMSGSIZE: code = WSAEMSGSIZE; break;
+    case EWOULDBLOCK: code = WSAEWOULDBLOCK; break;
+    case EDESTADDRREQ: code = WSAEDESTADDRREQ; break;
+    case EFAULT: code = WSAEFAULT; break;
+    case EAFNOSUPPORT: code = WSAEAFNOSUPPORT; break;
+    default: break;
+  }
+  // Tests and POSIX-style callers read errno; Winsock callers read the WSA code.
+  errno = posix_error;
+  WSASetLastError(code);
+#else
+  errno = posix_error;
+#endif
+}
 #if REX_PLATFORM_GNU_LINUX
+constexpr int kNoSignal = MSG_NOSIGNAL;
+#else
+constexpr int kNoSignal = 0;
+#endif
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
 std::optional<std::vector<uint8_t>> ProtectedGameplayWire(uint64_t socket,
     xam::LanAddress logical, const uint8_t* guest_data, uint32_t length) {
-  if (length > xam::kGameplayMaximumPlaintextBytes) { errno = EMSGSIZE; return std::nullopt; }
+  if (length > xam::kGameplayMaximumPlaintextBytes) { FailSocket(EMSGSIZE); return std::nullopt; }
   std::vector<uint8_t> staged(length);
   if (length) {
+#if REX_PLATFORM_GNU_LINUX
     // Preserve a bad guest pointer as EFAULT; never dereference it in userspace.
     iovec local{staged.data(), length}, remote{const_cast<uint8_t*>(guest_data), length};
     if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) != ssize_t(length)) {
-      errno = EFAULT; return std::nullopt;
+      FailSocket(EFAULT); return std::nullopt;
     }
+#else
+    // Mirror process_vm_readv: a bad guest pointer fails as EFAULT, never faults.
+    SIZE_T copied = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), guest_data, staged.data(), length, &copied) ||
+        copied != length) {
+      FailSocket(EFAULT); return std::nullopt;
+    }
+#endif
   }
   auto wire = xam::SealGameplayDatagram(socket, logical, staged);
-  if (!wire) errno = EWOULDBLOCK;
+  if (!wire) FailSocket(EWOULDBLOCK);
   return wire;
 }
 #endif
@@ -662,7 +695,7 @@ int XSocket::RecvFromNative(const NativeLease& operation, uint8_t* buf, uint32_t
   // Stage ordinary UDP too: membership may become scoped during this receive.
   // Keep a complete56-byte NAT control frame plus one oversize byte, even
   // when the guest requests fewer bytes or only polls with a zero-length buffer.
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   // Membership may become scoped while a receive is blocked. Always retain
   // the complete bounded wire datagram so that a fitting plaintext is not lost.
   const uint32_t receive_capacity = type_ == X_SOCK_DGRAM ? 65536u : buf_len;
@@ -675,14 +708,21 @@ int XSocket::RecvFromNative(const NativeLease& operation, uint8_t* buf, uint32_t
 #endif
   std::vector<uint8_t> authenticated_plaintext;
   auto copy_received = [&](size_t count) {
-#if REX_PLATFORM_GNU_LINUX
     if (!count || type_ != X_SOCK_DGRAM) return true;
+#if REX_PLATFORM_GNU_LINUX
     // A userspace memcpy would turn a native EFAULT into a host crash or bypass
     // kernel partial-write semantics. Copy only within this exact process.
     iovec local{receive_data, count}, remote{buf, count};
     const auto written = process_vm_writev(getpid(), &local, 1, &remote, 1, 0);
     if (written == static_cast<ssize_t>(count)) return true;
-    errno = EFAULT;
+    FailSocket(EFAULT);
+    return false;
+#elif REX_PLATFORM_WIN32
+    // Mirror process_vm_writev: a bad guest pointer fails as EFAULT, never faults.
+    SIZE_T written = 0;
+    if (WriteProcessMemory(GetCurrentProcess(), buf, receive_data, count, &written) && written == count)
+      return true;
+    FailSocket(EFAULT);
     return false;
 #else
     return true;
@@ -714,7 +754,7 @@ int XSocket::RecvFromNative(const NativeLease& operation, uint8_t* buf, uint32_t
   };
 
 retry_native_receive:
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   if (type_ == X_SOCK_DGRAM) receive_data = receive_storage.data();
 #endif
   if (operation.retired()) return ClosedNativeSocket();
@@ -753,7 +793,7 @@ retry_native_receive:
       goto retry_native_receive;
     }
   }
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   if (scoped && type_ == X_SOCK_DGRAM) {
     if (!logical || uint32_t(ret) > receive_capacity ||
         !xam::OpenGameplayDatagram(handle, *logical,
@@ -770,7 +810,7 @@ retry_native_receive:
     // Preserve ordinary Winsock-style truncation, but scoped errors expose no bytes.
     if (type_ == X_SOCK_DGRAM && !scoped && buf_len &&
         !copy_received(std::min<uint32_t>(buf_len, uint32_t(ret)))) return -1;
-    errno = EMSGSIZE;
+    FailSocket(EMSGSIZE);
     return -1;
   }
 #endif
@@ -919,19 +959,19 @@ int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
   const auto handle = operation.handle();
   std::shared_lock connect_window(native_connect_window_mutex_);
   if (operation.retired()) return ClosedNativeSocket();
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   if (type_ == X_SOCK_DGRAM && xam::IsAuthorizedGameplaySocket(handle)) {
     sockaddr_in native{}; socklen_t length = sizeof(native);
-    if (getpeername(handle, reinterpret_cast<sockaddr*>(&native), &length) < 0) { errno = EDESTADDRREQ; return -1; }
+    if (getpeername(handle, reinterpret_cast<sockaddr*>(&native), &length) < 0) { FailSocket(EDESTADDRREQ); return -1; }
     const auto logical = xam::NatProbeNormalizeGameplaySource(handle,
         {native.sin_addr.s_addr, ntohs(native.sin_port)});
-    if (!logical) { errno = EWOULDBLOCK; return -1; }
+    if (!logical) { FailSocket(EWOULDBLOCK); return -1; }
     auto wire = ProtectedGameplayWire(handle, *logical, buf, buf_len);
     if (!wire) return -1;
     if (operation.retired()) return ClosedNativeSocket();
-    const int sent = send(handle, wire->data(), wire->size(), flags | MSG_NOSIGNAL);
+    const int sent = send(handle, reinterpret_cast<const char*>(wire->data()), int(wire->size()), flags | kNoSignal);
     if (sent < 0) return -1;
-    if (size_t(sent) != wire->size()) { errno = EMSGSIZE; return -1; }
+    if (size_t(sent) != wire->size()) { FailSocket(EMSGSIZE); return -1; }
     return int(buf_len);
   }
 #endif
@@ -949,22 +989,31 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
   const auto handle = operation.handle();
   std::shared_lock connect_window(native_connect_window_mutex_);
   if (operation.retired()) return ClosedNativeSocket();
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   // Validate the complete IPv4 destination before routing or burning a nonce.
   // Never pass an untrusted length for our fixed-size native stack object.
   N_XSOCKADDR_IN staged_to{};
   if ((!to && to_len != 0) || (to && to_len != sizeof(staged_to))) {
-    errno = EINVAL;
+    FailSocket(EINVAL);
     return -1;
   }
   if (to) {
+#if REX_PLATFORM_GNU_LINUX
     iovec local{&staged_to, sizeof(staged_to)}, remote{to, sizeof(staged_to)};
     if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) != ssize_t(sizeof(staged_to))) {
-      errno = EFAULT;
+      FailSocket(EFAULT);
       return -1;
     }
+#else
+    SIZE_T copied = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), to, &staged_to, sizeof(staged_to), &copied) ||
+        copied != sizeof(staged_to)) {
+      FailSocket(EFAULT);
+      return -1;
+    }
+#endif
     if (uint16_t(staged_to.sin_family) != AF_INET) {
-      errno = EAFNOSUPPORT;
+      FailSocket(EAFNOSUPPORT);
       return -1;
     }
     to = &staged_to;
@@ -1022,23 +1071,23 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
     }
   }
 
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   if (type_ == X_SOCK_DGRAM && xam::IsAuthorizedGameplaySocket(handle)) {
     if (!to) {
       socklen_t length = sizeof(nto);
-      if (getpeername(handle, reinterpret_cast<sockaddr*>(&nto), &length) < 0) { errno = EDESTADDRREQ; return -1; }
+      if (getpeername(handle, reinterpret_cast<sockaddr*>(&nto), &length) < 0) { FailSocket(EDESTADDRREQ); return -1; }
       protected_logical = xam::NatProbeNormalizeGameplaySource(handle,
           {nto.sin_addr.s_addr, ntohs(nto.sin_port)});
     }
-    if (!protected_logical) { errno = EWOULDBLOCK; return -1; }
+    if (!protected_logical) { FailSocket(EWOULDBLOCK); return -1; }
     auto wire = ProtectedGameplayWire(handle, *protected_logical, buf, buf_len);
     if (!wire) return -1;
     if (operation.retired()) return ClosedNativeSocket();
-    const int sent = sendto(handle, wire->data(), wire->size(), flags | MSG_NOSIGNAL,
+    const int sent = sendto(handle, reinterpret_cast<const char*>(wire->data()), int(wire->size()), flags | kNoSignal,
                            to ? reinterpret_cast<sockaddr*>(&nto) : nullptr,
-                           to ? sizeof(nto) : 0);
+                           to ? int(sizeof(nto)) : 0);
     if (sent < 0) return -1;
-    if (size_t(sent) != wire->size()) { errno = EMSGSIZE; return -1; }
+    if (size_t(sent) != wire->size()) { FailSocket(EMSGSIZE); return -1; }
     xam::NatProbeRecordGameplayTraffic(handle,
         {nto.sin_addr.s_addr, ntohs(nto.sin_port)}, buf_len, true);
     return int(buf_len);

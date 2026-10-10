@@ -7,17 +7,20 @@
 #include <mutex>
 #include <thread>
 #include <set>
+#include "private_lan_crypto.h"
 #if REX_PLATFORM_GNU_LINUX
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <openssl/crypto.h>
-#include <openssl/hmac.h>
+#elif REX_PLATFORM_WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #endif
 namespace rex::system::xam {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
 namespace {
+namespace crypto=lan_crypto;
 using Clock=std::chrono::steady_clock;
 constexpr uint8_t kQuery=1,kAdvertisement=2,kJoin=3,kLeave=4,kRegister=5,kRegisterReply=6;
 using Packet=PrivateLanDiscoveryPublic;
@@ -75,12 +78,11 @@ bool Sign(Packet& p,const ArbitrationToken& credential,std::string_view domain) 
   constexpr std::string_view prefix="ReXGlue private LAN continuity proof v1";
   std::vector<uint8_t> transcript(prefix.begin(),prefix.end());transcript.push_back(uint8_t(domain.size()));
   transcript.insert(transcript.end(),domain.begin(),domain.end());transcript.insert(transcript.end(),p.begin(),p.end());
-  std::array<uint8_t,32> proof{};struct Clean {std::array<uint8_t,32>& bytes;~Clean(){OPENSSL_cleanse(bytes.data(),bytes.size());}} clean{proof};
-  unsigned size=0;if(!HMAC(EVP_sha256(),credential.data(),int(credential.size()),transcript.data(),transcript.size(),proof.data(),&size)||size!=32)return false;
-  std::copy_n(proof.begin(),16,p.begin()+500);return true;
+  crypto::SensitiveArray<32> proof;if(!crypto::HmacSha256(credential,{transcript},proof.bytes))return false;
+  std::copy_n(proof.bytes.begin(),16,p.begin()+500);return true;
 }
 bool Verify(const Packet& p,const ArbitrationToken& credential,std::string_view domain) {
-  auto copy=p;return Sign(copy,credential,domain)&&CRYPTO_memcmp(copy.data()+500,p.data()+500,16)==0;
+  auto copy=p;return Sign(copy,credential,domain)&&crypto::Equal(copy.data()+500,p.data()+500,16);
 }
 void EnvelopeMetadata(Packet& p,const PrivateLanPayloadEnvelope& envelope) {
   Write(p,564,envelope.payload.server_public_key);Write(p,596,envelope.payload.iv);Write(p,608,envelope.payload.tag);
@@ -104,37 +106,71 @@ bool Bindings(SessionRecord& s,const GameplayAuthorization& auth,uint64_t local)
         auth.directory_session,peer->admission_attempt,peer->admission_generation});}}
   return std::any_of(s.members.begin(),s.members.end(),[&](const auto& m){return m.xuid==local&&m.local;});
 }
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_WIN32
+using SocketHandle=SOCKET;constexpr SocketHandle kNoSocket=INVALID_SOCKET;
+#else
+using SocketHandle=int;constexpr SocketHandle kNoSocket=-1;
+#endif
 struct Socket {
-  int fd=-1;~Socket(){if(fd>=0)::close(fd);}
-  bool Open(uint16_t port=0) {fd=::socket(AF_INET,SOCK_DGRAM|SOCK_CLOEXEC,IPPROTO_UDP);if(fd<0)return false;
+  SocketHandle fd=kNoSocket;
+#if REX_PLATFORM_WIN32
+  // Balanced per socket; Winsock reference-counts startup and cleanup.
+  bool started=false;
+  ~Socket(){if(fd!=kNoSocket)::closesocket(fd);if(started)WSACleanup();}
+#else
+  ~Socket(){if(fd!=kNoSocket)::close(fd);}
+#endif
+  bool Open(uint16_t port=0) {
+#if REX_PLATFORM_WIN32
+    WSADATA data{};if(WSAStartup(MAKEWORD(2,2),&data)!=0)return false;started=true;
+    fd=::WSASocketW(AF_INET,SOCK_DGRAM,IPPROTO_UDP,nullptr,0,WSA_FLAG_NO_HANDLE_INHERIT);
+#else
+    fd=::socket(AF_INET,SOCK_DGRAM|SOCK_CLOEXEC,IPPROTO_UDP);
+#endif
+    if(fd==kNoSocket)return false;
     sockaddr_in a{};a.sin_family=AF_INET;a.sin_addr.s_addr=LanDiscoveryService::DetermineLanIpv4();a.sin_port=htons(port);
     const auto ip=ntohl(a.sin_addr.s_addr);if(!((ip>>24)==127||(ip>>24)==10||(ip>>20)==0xac1||(ip>>16)==0xc0a8))return false;
-    return ::bind(fd,reinterpret_cast<sockaddr*>(&a),sizeof(a))==0&&fcntl(fd,F_SETFL,fcntl(fd,F_GETFL,0)|O_NONBLOCK)==0;}
+    if(::bind(fd,reinterpret_cast<sockaddr*>(&a),sizeof(a))!=0)return false;
+#if REX_PLATFORM_WIN32
+    u_long enabled=1;return ::ioctlsocket(fd,FIONBIO,&enabled)==0;
+#else
+    return fcntl(fd,F_SETFL,fcntl(fd,F_GETFL,0)|O_NONBLOCK)==0;
+#endif
+  }
 };
-struct SecretBytes {std::vector<uint8_t>& bytes;~SecretBytes(){if(!bytes.empty())OPENSSL_cleanse(bytes.data(),bytes.size());}};
-bool Send(int fd,const PrivateLanDiscoveryWire& wire,LanAddress target) {
+struct SecretBytes {std::vector<uint8_t>& bytes;~SecretBytes(){crypto::Cleanse(bytes.data(),bytes.size());}};
+bool Send(SocketHandle fd,const PrivateLanDiscoveryWire& wire,LanAddress target) {
   if(!Private(target))return false;sockaddr_in a{};a.sin_family=AF_INET;a.sin_addr.s_addr=target.ipv4;a.sin_port=htons(target.port);
+#if REX_PLATFORM_WIN32
+  return ::sendto(fd,reinterpret_cast<const char*>(wire.data()),int(wire.size()),0,reinterpret_cast<sockaddr*>(&a),sizeof(a))==int(wire.size());
+#else
   return ::sendto(fd,wire.data(),wire.size(),0,reinterpret_cast<sockaddr*>(&a),sizeof(a))==ssize_t(wire.size());
+#endif
 }
-std::optional<PrivateLanDiscoveryFrame> Receive(int fd,const PrivateLanInvitation& invitation,uint64_t client,uint32_t title,
+std::optional<PrivateLanDiscoveryFrame> Receive(SocketHandle fd,const PrivateLanInvitation& invitation,uint64_t client,uint32_t title,
     PrivateLanDiscoveryDirection direction,LanAddress& source,std::optional<ArbitrationToken> request=std::nullopt) {
-  PrivateLanDiscoveryWire wire{};sockaddr_in a{};socklen_t length=sizeof(a);
+  PrivateLanDiscoveryWire wire{};sockaddr_in a{};
+#if REX_PLATFORM_WIN32
+  // Winsock fails an oversized datagram with WSAEMSGSIZE instead of
+  // returning a truncated prefix, so only an exact-size frame is accepted.
+  int length=sizeof(a);
+  const auto count=::recvfrom(fd,reinterpret_cast<char*>(wire.data()),int(wire.size()),0,reinterpret_cast<sockaddr*>(&a),&length);
+  if(count!=int(wire.size())||length!=int(sizeof(a))||a.sin_family!=AF_INET)return std::nullopt;
+#else
+  socklen_t length=sizeof(a);
   const auto count=::recvfrom(fd,wire.data(),wire.size(),MSG_TRUNC,reinterpret_cast<sockaddr*>(&a),&length);
   if(count!=ssize_t(wire.size())||length!=sizeof(a)||a.sin_family!=AF_INET)return std::nullopt;
+#endif
   source={a.sin_addr.s_addr,ntohs(a.sin_port)};if(!Private(source))return std::nullopt;
   return OpenPrivateLanDiscoveryFrame(invitation,client,title,direction,wire,request);
 }
-#endif
 } // namespace
 struct PrivateLanClientBinding::Impl {
   std::mutex mutex;ArbitrationIdentity identity;uint64_t xuid=0,machine=0,counter=0;
   ArbitrationToken challenge{},registration{},prefix{},credential{};std::optional<EphemeralArbitrationKey> key;
   std::atomic<bool> confirmed=false;LanAddress target;std::shared_ptr<const PrivateLanInvitation> invitation;
-#if REX_PLATFORM_GNU_LINUX
   Socket socket;
-  ~Impl(){OPENSSL_cleanse(credential.data(),credential.size());}
-#endif
+  ~Impl(){crypto::Cleanse(credential.data(),credential.size());}
   std::optional<ArbitrationToken> Request(){if(counter==UINT64_MAX)return std::nullopt;auto request=prefix;++counter;
     for(unsigned i=0;i<8;++i)request[8+i]=uint8_t(counter>>((7-i)*8));return request;}
 };
@@ -147,7 +183,7 @@ struct PrivateLanDiscoveryAdapter::Impl {
   uint32_t title;uint16_t port;uint64_t machine;std::shared_ptr<const PrivateLanInvitation> invitation;
   std::shared_ptr<SessionRecord> host;std::atomic<bool> running=false,client_running=false;std::thread thread,client_thread;
   std::weak_ptr<SessionRecord> client;uint64_t client_xuid=0;
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   std::unique_ptr<Socket> listener;
   struct DepartureReceipt {
     Packet request{};ArbitrationToken proof{};LanAddress source{};
@@ -155,7 +191,7 @@ struct PrivateLanDiscoveryAdapter::Impl {
   };
   std::array<DepartureReceipt,5> departure_receipts{};
   void ClearDepartureReceipts() noexcept {
-    OPENSSL_cleanse(departure_receipts.data(),sizeof(departure_receipts));
+    crypto::Cleanse(departure_receipts.data(),sizeof(departure_receipts));
   }
   std::optional<SessionRecord> Exchange(const SessionRecord& s,const SessionMember& member,uint8_t operation,
       const std::shared_ptr<PrivateLanClientBinding>& binding,uint32_t timeout) {
@@ -201,8 +237,8 @@ struct PrivateLanDiscoveryAdapter::Impl {
     if(PacketIdentity(p)!=IdentityOf(*host))return;
     if(p[6]==kLeave)for(const auto& receipt:departure_receipts)
       if(receipt.valid&&Clock::now()<receipt.deadline&&source==receipt.source&&
-         CRYPTO_memcmp(p.data(),receipt.request.data(),p.size())==0&&
-         CRYPTO_memcmp(frame.join_claim_proof.data(),receipt.proof.data(),receipt.proof.size())==0) {
+         crypto::Equal(p.data(),receipt.request.data(),p.size())&&
+         crypto::Equal(frame.join_claim_proof.data(),receipt.proof.data(),receipt.proof.size())) {
         Send(listener->fd,receipt.reply,source);return;
       }
     if(p[6]==kRegister){Register(p,source);return;}
@@ -265,7 +301,7 @@ struct PrivateLanDiscoveryAdapter::Impl {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));}}
 #endif
 };
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
 void PrivateLanDiscoveryAdapter::Impl::Register(const Packet& p,LanAddress source) {
   std::optional<PrivateLanDiscoveryWire> wire;
   {
@@ -344,7 +380,7 @@ bool PrivateLanDiscoveryAdapter::IsAdvertising() const noexcept{return impl_->ru
 void PrivateLanDiscoveryAdapter::SetTitle(uint32_t title){if(impl_->title==title)return;if(impl_->running||impl_->client_running)Stop();impl_->title=title;}
 void PrivateLanDiscoveryAdapter::SetMachine(uint64_t machine){if(impl_->machine==machine)return;if(impl_->running||impl_->client_running)Stop();impl_->machine=machine;}
 bool PrivateLanDiscoveryAdapter::Start(const std::shared_ptr<SessionRecord>& session) {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   try {
     if(impl_->running&&impl_->host==session)return true;Stop();
     if(!session||!impl_->invitation||!impl_->invitation->host()||!impl_->invitation->Current())return false;
@@ -373,7 +409,7 @@ bool PrivateLanDiscoveryAdapter::Start(const std::shared_ptr<SessionRecord>& ses
 void PrivateLanDiscoveryAdapter::StopClient(){impl_->client_running=false;if(impl_->client_thread.joinable())impl_->client_thread.join();impl_->client.reset();}
 void PrivateLanDiscoveryAdapter::Stop() {
   impl_->running=false;if(impl_->thread.joinable())impl_->thread.join();StopClient();
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   impl_->listener.reset();impl_->ClearDepartureReceipts();
 #endif
   if(impl_->host){RevokeGameplayAuthorization(impl_->host,impl_->host->host_xuid);std::lock_guard lock(*impl_->host->mutex);
@@ -382,7 +418,7 @@ void PrivateLanDiscoveryAdapter::Stop() {
 }
 std::vector<SessionRecord> PrivateLanDiscoveryAdapter::Search(uint32_t timeout,uint32_t max_results) {
   std::vector<SessionRecord> results;
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   try {
     if(!max_results||!impl_->invitation||impl_->invitation->host()||!impl_->invitation->Current())return results;
     Socket socket;if(!socket.Open())return results;LanAddress target;in_addr host{};
@@ -404,7 +440,7 @@ std::vector<SessionRecord> PrivateLanDiscoveryAdapter::Search(uint32_t timeout,u
   return results;
 }
 std::optional<SessionRecord> PrivateLanDiscoveryAdapter::Join(const SessionRecord& session,const SessionMember& member,uint32_t timeout) {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   try {
     if(!impl_->invitation||impl_->invitation->host()||!impl_->invitation->Current()||member.xuid!=impl_->invitation->clients().front()||
        session.private_lan_invitation!=impl_->invitation||session.host_xuid!=impl_->invitation->host_xuid())return std::nullopt;
@@ -427,7 +463,7 @@ std::optional<SessionRecord> PrivateLanDiscoveryAdapter::Join(const SessionRecor
 #endif
 }
 std::optional<SessionRecord> PrivateLanDiscoveryAdapter::Leave(const SessionRecord& session,uint64_t xuid,uint32_t timeout) {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   StopClient();auto binding=session.private_lan_client;if(!binding||binding->xuid()!=xuid||!binding->Confirmed())return std::nullopt;
   std::lock_guard lock(binding->impl_->mutex);SessionMember member;
   {std::lock_guard record_lock(*session.mutex);const auto found=std::find_if(session.members.begin(),session.members.end(),[&](const auto& m){return m.xuid==xuid;});if(found==session.members.end())return std::nullopt;member=*found;}
@@ -438,7 +474,7 @@ std::optional<SessionRecord> PrivateLanDiscoveryAdapter::Leave(const SessionReco
 }
 std::optional<ArbitrationSnapshot> PrivateLanDiscoveryAdapter::RegisterArbitration(
     const std::shared_ptr<SessionRecord>& session,uint64_t xuid,uint64_t nonce) {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   try {
     if(!session||!impl_->invitation||impl_->invitation->host()||!impl_->invitation->Current())return std::nullopt;
     std::shared_ptr<PrivateLanClientBinding> binding;Packet packet;
@@ -472,7 +508,7 @@ std::optional<ArbitrationSnapshot> PrivateLanDiscoveryAdapter::RegisterArbitrati
   return std::nullopt;
 }
 bool PrivateLanDiscoveryAdapter::Activate(const std::shared_ptr<SessionRecord>& session,uint64_t xuid) {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   if(!session||!impl_->invitation||impl_->invitation->host()||!impl_->invitation->Current())return false;
   {std::lock_guard lock(*session->mutex);if(session->state==SessionState::kDeleted||!session->private_lan_gameplay||
     session->private_lan_gameplay->xuid!=xuid||!session->private_lan_client||!session->private_lan_client->Confirmed())return false;}

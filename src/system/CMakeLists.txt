@@ -35,6 +35,7 @@ set(REXSYSTEM_SOURCES
     xam/nat_probe.cpp
     xam/gameplay_traversal.cpp
     xam/gameplay_datagram.cpp
+    xam/private_lan_crypto.cpp
     xam/private_lan_invitation.cpp
     xam/private_lan_payload.cpp
     xam/private_lan_authority.cpp

@@ -5,18 +5,20 @@
 #include <limits>
 #include <string>
 #include <unordered_set>
+#include "private_lan_crypto.h"
 #if REX_PLATFORM_GNU_LINUX
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <openssl/crypto.h>
-#include <openssl/hmac.h>
-#include <openssl/evp.h>
-#include <openssl/kdf.h>
+#elif REX_PLATFORM_WIN32
+#include <windows.h>
+#include <aclapi.h>
+#include <sddl.h>
 #endif
 
 namespace rex::system::xam {
 namespace {
+namespace crypto = lan_crypto;
 uint64_t Decode64(const uint8_t* bytes) {
   uint64_t result = 0;
   for (unsigned i = 0; i < 8; ++i) result = (result << 8) | bytes[i];
@@ -30,14 +32,14 @@ bool Nonzero(std::span<const uint8_t> bytes) {
   for (uint8_t byte : bytes) result |= byte;
   return result != 0;
 }
+struct SecretFileBytes {
+  std::array<uint8_t, PrivateLanInvitation::kMaximumFileBytes + 1> bytes{};
+  ~SecretFileBytes() { crypto::Cleanse(bytes.data(), bytes.size()); }
+};
 #if REX_PLATFORM_GNU_LINUX
 struct Descriptor {
   int value = -1;
   ~Descriptor() { if (value >= 0) ::close(value); }
-};
-struct SecretFileBytes {
-  std::array<uint8_t, PrivateLanInvitation::kMaximumFileBytes + 1> bytes{};
-  ~SecretFileBytes() { OPENSSL_cleanse(bytes.data(), bytes.size()); }
 };
 // Walk each component with openat and O_NOFOLLOW. A final-only check would
 // still allow an invitation path through a substituted symlink directory.
@@ -90,12 +92,135 @@ bool ReadPrivateFile(std::string_view path, SecretFileBytes& output, size_t& siz
   }
   return false;
 }
+#elif REX_PLATFORM_WIN32
+struct Handle {
+  HANDLE value = INVALID_HANDLE_VALUE;
+  ~Handle() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
+  Handle() = default;
+  Handle(Handle&& other) noexcept : value(other.value) { other.value = INVALID_HANDLE_VALUE; }
+  Handle(const Handle&) = delete;
+  Handle& operator=(const Handle&) = delete;
+};
+struct TokenSids {
+  std::vector<uint8_t> user, owner;
+  PSID User() { return reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid; }
+  PSID Owner() { return reinterpret_cast<TOKEN_OWNER*>(owner.data())->Owner; }
+};
+bool TokenInfo(HANDLE token, TOKEN_INFORMATION_CLASS type, std::vector<uint8_t>& output) {
+  DWORD size = 0;
+  GetTokenInformation(token, type, nullptr, 0, &size);
+  if (!size || size > 4096) return false;
+  output.resize(size);
+  return GetTokenInformation(token, type, output.data(), size, &size) != 0;
+}
+bool CurrentSids(TokenSids& sids) {
+  Handle token;
+  return OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token.value) &&
+         TokenInfo(token.value, TokenUser, sids.user) && TokenInfo(token.value, TokenOwner, sids.owner);
+}
+bool WellKnown(PSID sid, WELL_KNOWN_SID_TYPE type) {
+  std::array<uint8_t, SECURITY_MAX_SID_SIZE> buffer{};
+  DWORD size = DWORD(buffer.size());
+  return CreateWellKnownSid(type, nullptr, buffer.data(), &size) && EqualSid(sid, buffer.data());
+}
+// Windows equivalent of an owner-only 0700/0600 entry: owned by this user (or
+// the elevated default owner), and every allow ACE names only this user, the
+// default owner, LocalSystem or the local Administrators group.
+bool PrivateObject(HANDLE object, TokenSids& sids) {
+  PSID owner = nullptr;
+  PACL dacl = nullptr;
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  if (GetSecurityInfo(object, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                      &owner, nullptr, &dacl, nullptr, &descriptor) != ERROR_SUCCESS)
+    return false;
+  struct Free { PSECURITY_DESCRIPTOR value; ~Free() { LocalFree(value); } } free_descriptor{descriptor};
+  if (!owner || !dacl || !(EqualSid(owner, sids.User()) || EqualSid(owner, sids.Owner()))) return false;
+  ACL_SIZE_INFORMATION information{};
+  if (!GetAclInformation(dacl, &information, sizeof(information), AclSizeInformation)) return false;
+  for (DWORD i = 0; i < information.AceCount; ++i) {
+    void* entry = nullptr;
+    if (!GetAce(dacl, i, &entry)) return false;
+    const auto* header = static_cast<ACE_HEADER*>(entry);
+    if (header->AceType == ACCESS_DENIED_ACE_TYPE) continue;
+    if (header->AceType != ACCESS_ALLOWED_ACE_TYPE) return false;
+    if (header->AceFlags & INHERIT_ONLY_ACE) continue;
+    auto* sid = reinterpret_cast<PSID>(&static_cast<ACCESS_ALLOWED_ACE*>(entry)->SidStart);
+    if (!(EqualSid(sid, sids.User()) || EqualSid(sid, sids.Owner()) ||
+          WellKnown(sid, WinLocalSystemSid) || WellKnown(sid, WinBuiltinAdministratorsSid)))
+      return false;
+  }
+  return true;
+}
+// Hold every component open without delete sharing so no directory can be
+// renamed or replaced by a reparse point while the invitation is read.
+bool ReadPrivateFile(std::string_view path, SecretFileBytes& output, size_t& size) {
+  if (path.size() < 4 || path.size() > 4096 || path.find('\0') != std::string_view::npos ||
+      !((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) ||
+      path[1] != ':' || (path[2] != '\\' && path[2] != '/') ||
+      path.back() == '\\' || path.back() == '/' ||
+      path.find(':', 2) != std::string_view::npos)
+    return false;
+  const int wide_size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.data(), int(path.size()), nullptr, 0);
+  if (wide_size <= 0) return false;
+  std::wstring wide(size_t(wide_size), L'\0');
+  if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.data(), int(path.size()), wide.data(), wide_size) != wide_size)
+    return false;
+  for (auto& character : wide) if (character == L'/') character = L'\\';
+  TokenSids sids;
+  if (!CurrentSids(sids)) return false;
+  std::vector<Handle> held;
+  size_t position = 3;
+  while (position < wide.size()) {
+    const auto separator = wide.find(L'\\', position);
+    const auto end = separator == std::wstring::npos ? wide.size() : separator;
+    const auto component = std::wstring_view(wide).substr(position, end - position);
+    if (component.empty() || component == L"." || component == L".." || component.size() > 255) return false;
+    const bool last = end == wide.size();
+    Handle handle;
+    handle.value = CreateFileW(wide.substr(0, end).c_str(), GENERIC_READ | READ_CONTROL,
+                               last ? FILE_SHARE_READ : (FILE_SHARE_READ | FILE_SHARE_WRITE), nullptr,
+                               OPEN_EXISTING,
+                               FILE_FLAG_OPEN_REPARSE_POINT | (last ? 0 : FILE_FLAG_BACKUP_SEMANTICS), nullptr);
+    BY_HANDLE_FILE_INFORMATION information{};
+    if (handle.value == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(handle.value, &information) ||
+        (information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+      return false;
+    if (!last) {
+      if (!(information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return false;
+      held.push_back(std::move(handle));
+      position = end + 1;
+      continue;
+    }
+    const uint64_t bytes = (uint64_t(information.nFileSizeHigh) << 32) | information.nFileSizeLow;
+    if (held.empty() || !PrivateObject(held.back().value, sids) || !PrivateObject(handle.value, sids) ||
+        (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || information.nNumberOfLinks != 1 ||
+        bytes < 24 || bytes > PrivateLanInvitation::kMaximumFileBytes)
+      return false;
+    size = 0;
+    while (size < output.bytes.size()) {
+      DWORD count = 0;
+      if (!ReadFile(handle.value, output.bytes.data() + size, DWORD(output.bytes.size() - size), &count, nullptr))
+        return false;
+      if (!count) break;
+      size += count;
+    }
+    BY_HANDLE_FILE_INFORMATION after{};
+    return GetFileInformationByHandle(handle.value, &after) && size == bytes &&
+        after.dwVolumeSerialNumber == information.dwVolumeSerialNumber &&
+        after.nFileIndexHigh == information.nFileIndexHigh && after.nFileIndexLow == information.nFileIndexLow &&
+        after.nFileSizeHigh == information.nFileSizeHigh && after.nFileSizeLow == information.nFileSizeLow &&
+        after.ftLastWriteTime.dwLowDateTime == information.ftLastWriteTime.dwLowDateTime &&
+        after.ftLastWriteTime.dwHighDateTime == information.ftLastWriteTime.dwHighDateTime &&
+        after.nNumberOfLinks == 1;
+  }
+  return false;
+}
 #endif
 }  // namespace
 
 std::shared_ptr<const PrivateLanInvitation> PrivateLanInvitation::Load(
     std::string_view path, std::chrono::system_clock::time_point now) {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
   try {
     SecretFileBytes input;
     size_t size = 0;
@@ -123,14 +248,14 @@ std::shared_ptr<const PrivateLanInvitation> PrivateLanInvitation::Load(
       if (!grant.client || grant.client == result->host_xuid_ || !clients.insert(grant.client).second ||
           !Nonzero(grant.selector) || !Nonzero(grant.secret) ||
           std::any_of(result->grants_.begin(), result->grants_.end(), [&](const auto& old) {
-            return CRYPTO_memcmp(old.secret.data(), grant.secret.data(), grant.secret.size()) == 0;
+            return crypto::Equal(old.secret.data(), grant.secret.data(), grant.secret.size());
           }) ||
           !selectors.emplace(reinterpret_cast<const char*>(grant.selector.data()), grant.selector.size()).second) {
-        OPENSSL_cleanse(grant.secret.data(), grant.secret.size());
+        crypto::Cleanse(grant.secret.data(), grant.secret.size());
         return {};
       }
       result->grants_.push_back(grant);
-      OPENSSL_cleanse(grant.secret.data(), grant.secret.size());
+      crypto::Cleanse(grant.secret.data(), grant.secret.size());
     }
     return result;
   } catch (...) { return {}; }
@@ -141,14 +266,10 @@ std::shared_ptr<const PrivateLanInvitation> PrivateLanInvitation::Load(
 }
 
 PrivateLanInvitation::Grant::~Grant() {
-#if REX_PLATFORM_GNU_LINUX
-  OPENSSL_cleanse(secret.data(), secret.size());
-#endif
+  crypto::Cleanse(secret.data(), secret.size());
 }
 PrivateLanInvitation::~PrivateLanInvitation() {
-#if REX_PLATFORM_GNU_LINUX
-  for (auto& grant : grants_) OPENSSL_cleanse(grant.secret.data(), grant.secret.size());
-#endif
+  for (auto& grant : grants_) crypto::Cleanse(grant.secret.data(), grant.secret.size());
 }
 std::vector<uint64_t> PrivateLanInvitation::clients() const {
   std::vector<uint64_t> result;
@@ -161,8 +282,7 @@ bool PrivateLanInvitation::Current(std::chrono::system_clock::time_point now) co
 }
 std::optional<PrivateLanInvitation::Tag> PrivateLanInvitation::Proof(
     uint64_t client, std::string_view domain, std::span<const uint8_t> transcript) const {
-#if REX_PLATFORM_GNU_LINUX
-  if (!Current() || domain.empty() || domain.size() > 128 || domain.find('\0') != std::string_view::npos ||
+  if (!crypto::Available() || !Current() || domain.empty() || domain.size() > 128 || domain.find('\0') != std::string_view::npos ||
       transcript.empty() || transcript.size() > kMaximumProofPayload) return std::nullopt;
   const auto grant = std::find_if(grants_.begin(), grants_.end(),
                                  [&](const auto& value) { return value.client == client; });
@@ -177,19 +297,11 @@ std::optional<PrivateLanInvitation::Tag> PrivateLanInvitation::Proof(
     const auto size = uint32_t(transcript.size());
     for (int shift = 24; shift >= 0; shift -= 8) bytes.push_back(uint8_t(size >> shift));
     bytes.insert(bytes.end(), transcript.begin(), transcript.end());
-    std::array<uint8_t, EVP_MAX_MD_SIZE> digest{};
-    struct CleanDigest { decltype(digest)& bytes; ~CleanDigest() { OPENSSL_cleanse(bytes.data(), bytes.size()); } } cleanse{digest};
-    unsigned length = 0;
-    if (!HMAC(EVP_sha256(), grant->secret.data(), int(grant->secret.size()),
-              bytes.data(), bytes.size(), digest.data(), &length) || length != 32) return std::nullopt;
-    Tag result{}; std::copy_n(digest.begin(), result.size(), result.begin());
-    OPENSSL_cleanse(digest.data(), digest.size());
+    crypto::SensitiveArray<32> digest;
+    if (!crypto::HmacSha256(grant->secret, {bytes}, digest.bytes)) return std::nullopt;
+    Tag result{}; std::copy_n(digest.bytes.begin(), result.size(), result.begin());
     return result;
   } catch (...) { return std::nullopt; }
-#else
-  (void)client; (void)domain; (void)transcript;
-  return std::nullopt;
-#endif
 }
 std::optional<PrivateLanInvitation::Tag> PrivateLanInvitation::Selector(uint64_t client) const {
   if(!Current())return std::nullopt;
@@ -197,18 +309,13 @@ std::optional<PrivateLanInvitation::Tag> PrivateLanInvitation::Selector(uint64_t
   return std::nullopt;
 }
 std::optional<uint64_t> PrivateLanInvitation::ClientForSelector(std::span<const uint8_t> selector) const {
-#if REX_PLATFORM_GNU_LINUX
   if(!Current()||selector.size()!=16)return std::nullopt;
   std::optional<uint64_t> result;
-  for(const auto& grant:grants_)if(CRYPTO_memcmp(grant.selector.data(),selector.data(),16)==0)result=grant.client;
+  for(const auto& grant:grants_)if(crypto::Equal(grant.selector.data(),selector.data(),16))result=grant.client;
   return result;
-#else
-  (void)selector;return std::nullopt;
-#endif
 }
 std::optional<std::array<uint8_t,32>> PrivateLanInvitation::DiscoveryKey(uint64_t client,bool reply) const {
-#if REX_PLATFORM_GNU_LINUX
-  if(!Current())return std::nullopt;
+  if(!crypto::Available()||!Current())return std::nullopt;
   const auto grant=std::find_if(grants_.begin(),grants_.end(),[&](const auto& value){return value.client==client;});
   if(grant==grants_.end())return std::nullopt;
   try {
@@ -216,32 +323,16 @@ std::optional<std::array<uint8_t,32>> PrivateLanInvitation::DiscoveryKey(uint64_
     std::vector<uint8_t> info(domain.begin(),domain.end());info.push_back(reply?1:0);
     Append64(info,host_xuid_);Append64(info,client);Append64(info,expires_);
     info.insert(info.end(),grant->selector.begin(),grant->selector.end());
-    std::unique_ptr<EVP_PKEY_CTX,decltype(&EVP_PKEY_CTX_free)> context(EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF,nullptr),EVP_PKEY_CTX_free);
-    std::array<uint8_t,32> key{};
-    struct CleanKey {std::array<uint8_t,32>& key;~CleanKey(){OPENSSL_cleanse(key.data(),key.size());}} cleanse{key};
-    size_t size=key.size();
-    if(!context||EVP_PKEY_derive_init(context.get())!=1||
-       EVP_PKEY_CTX_set_hkdf_mode(context.get(),EVP_PKEY_HKDEF_MODE_EXTRACT_AND_EXPAND)!=1||
-       EVP_PKEY_CTX_set_hkdf_md(context.get(),EVP_sha256())!=1||
-       EVP_PKEY_CTX_set1_hkdf_salt(context.get(),grant->selector.data(),int(grant->selector.size()))!=1||
-       EVP_PKEY_CTX_set1_hkdf_key(context.get(),grant->secret.data(),int(grant->secret.size()))!=1||
-       EVP_PKEY_CTX_add1_hkdf_info(context.get(),info.data(),int(info.size()))!=1||
-       EVP_PKEY_derive(context.get(),key.data(),&size)!=1||size!=key.size()||!Nonzero(key))return std::nullopt;
-    return key;
+    crypto::SensitiveArray<32> key;
+    if(!crypto::HkdfSha256(grant->selector,grant->secret,{info},key.bytes)||!Nonzero(key.bytes))return std::nullopt;
+    return key.bytes;
   }catch(...){return std::nullopt;}
-#else
-  (void)client;(void)reply;return std::nullopt;
-#endif
 }
 bool PrivateLanInvitation::Verify(uint64_t client, std::string_view domain,
                                   std::span<const uint8_t> transcript,
                                   std::span<const uint8_t> tag) const {
   if (tag.size() != Tag{}.size()) return false;
   const auto expected = Proof(client, domain, transcript);
-#if REX_PLATFORM_GNU_LINUX
-  return expected && CRYPTO_memcmp(expected->data(), tag.data(), tag.size()) == 0;
-#else
-  return false;
-#endif
+  return expected && crypto::Equal(expected->data(), tag.data(), tag.size());
 }
 }  // namespace rex::system::xam

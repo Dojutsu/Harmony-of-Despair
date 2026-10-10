@@ -1,168 +1,96 @@
 #include <rex/system/xam/session_arbitration_crypto.h>
 #include <rex/platform.h>
-#if REX_PLATFORM_LINUX
-#include <openssl/crypto.h>
-#include <openssl/evp.h>
-#include <openssl/rand.h>
-#endif
+#include "private_lan_crypto.h"
 #include <algorithm>
 #include <utility>
 #include <string_view>
 
 namespace rex::system::xam {
 namespace {
+namespace crypto = lan_crypto;
 template<class T> bool Nonzero(const T& bytes) {
   uint8_t accumulated = 0;
   for (uint8_t byte : bytes) accumulated |= byte;
   return accumulated != 0;
 }
-[[maybe_unused]] bool ValidAAD(std::span<const uint8_t> aad) {
+bool ValidAAD(std::span<const uint8_t> aad) {
   return !aad.empty() && aad.size() <= kMaximumArbitrationAAD && Nonzero(aad);
 }
 const ArbitrationPublicKey kInvalidPublicKey{};
-#if REX_PLATFORM_LINUX
-template<class T, void (*Free)(T*)> using CryptoOwner = std::unique_ptr<T, decltype(Free)>;
-using KeyOwner = CryptoOwner<EVP_PKEY, EVP_PKEY_free>;
-using KeyContext = CryptoOwner<EVP_PKEY_CTX, EVP_PKEY_CTX_free>;
-using CipherContext = CryptoOwner<EVP_CIPHER_CTX, EVP_CIPHER_CTX_free>;
-using DigestContext = CryptoOwner<EVP_MD_CTX, EVP_MD_CTX_free>;
-template<size_t N> struct SensitiveBytes {
-  std::array<uint8_t, N> bytes{};
-  ~SensitiveBytes() { OPENSSL_cleanse(bytes.data(), bytes.size()); }
-  SensitiveBytes() = default;
-  SensitiveBytes(const SensitiveBytes&) = delete;
-  SensitiveBytes& operator=(const SensitiveBytes&) = delete;
-};
-bool DeriveKey(EVP_PKEY* own, const ArbitrationPublicKey& peer,
+template<size_t N> using SensitiveBytes = crypto::SensitiveArray<N>;
+bool DeriveKey(const crypto::X25519Key& own, const ArbitrationPublicKey& peer,
                const ArbitrationPublicKey& client, const ArbitrationPublicKey& server,
                std::span<const uint8_t> aad, SensitiveBytes<32>& output,
                std::string_view domain = "ReXGlue LAN arbitration credential envelope v2") {
-  if (!own || !Nonzero(peer) || !ValidAAD(aad)) return false;
-  KeyOwner peer_key(EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, nullptr, peer.data(), peer.size()), EVP_PKEY_free);
-  KeyContext context(EVP_PKEY_CTX_new(own, nullptr), EVP_PKEY_CTX_free);
+  if (!own.valid() || !Nonzero(peer) || !ValidAAD(aad)) return false;
   SensitiveBytes<32> shared;
-  size_t size = shared.bytes.size();
-  if (!peer_key || !context || EVP_PKEY_derive_init(context.get()) != 1 ||
-      EVP_PKEY_derive_set_peer(context.get(), peer_key.get()) != 1 ||
-      EVP_PKEY_derive(context.get(), shared.bytes.data(), &size) != 1 ||
-      size != shared.bytes.size() || !Nonzero(shared.bytes)) return false;
+  if (!own.Agree(peer, shared.bytes)) return false;
   // Full32 SHA256 output, with fixed domain, ordered raw public keys and an
   // explicit AAD length. Binding raw keys also covers X25519 encoding aliases.
   const auto aad_size = static_cast<uint32_t>(aad.size());
   const std::array<uint8_t, 4> encoded_size{
       static_cast<uint8_t>(aad_size >> 24), static_cast<uint8_t>(aad_size >> 16),
       static_cast<uint8_t>(aad_size >> 8), static_cast<uint8_t>(aad_size)};
-  DigestContext digest(EVP_MD_CTX_new(), EVP_MD_CTX_free); unsigned int written = 0;
-  return digest && EVP_DigestInit_ex(digest.get(), EVP_sha256(), nullptr) == 1 &&
-      EVP_DigestUpdate(digest.get(), shared.bytes.data(), shared.bytes.size()) == 1 &&
-      EVP_DigestUpdate(digest.get(), domain.data(), domain.size()) == 1 &&
-      EVP_DigestUpdate(digest.get(), client.data(), client.size()) == 1 &&
-      EVP_DigestUpdate(digest.get(), server.data(), server.size()) == 1 &&
-      EVP_DigestUpdate(digest.get(), encoded_size.data(), encoded_size.size()) == 1 &&
-      EVP_DigestUpdate(digest.get(), aad.data(), aad.size()) == 1 &&
-      EVP_DigestFinal_ex(digest.get(), output.bytes.data(), &written) == 1 &&
-      written == output.bytes.size() && Nonzero(output.bytes);
+  const auto* domain_bytes = reinterpret_cast<const uint8_t*>(domain.data());
+  return crypto::Sha256({shared.bytes, {domain_bytes, domain.size()}, client, server,
+                         encoded_size, aad}, output.bytes) &&
+         Nonzero(output.bytes);
 }
-#endif
 } // namespace
 struct EphemeralArbitrationKey::State {
-  ArbitrationPublicKey public_key{};
-#if REX_PLATFORM_LINUX
-  KeyOwner key{nullptr, EVP_PKEY_free};
-#endif
+  crypto::X25519Key key;
 };
 EphemeralArbitrationKey::EphemeralArbitrationKey() noexcept = default;
 EphemeralArbitrationKey::~EphemeralArbitrationKey() = default;
 EphemeralArbitrationKey::EphemeralArbitrationKey(EphemeralArbitrationKey&&) noexcept = default;
 EphemeralArbitrationKey& EphemeralArbitrationKey::operator=(EphemeralArbitrationKey&&) noexcept = default;
 bool EphemeralArbitrationKey::valid() const noexcept {
-#if REX_PLATFORM_LINUX
-  return state_ && state_->key && Nonzero(state_->public_key);
-#else
-  return false;
-#endif
+  return state_ && state_->key.valid();
 }
 const ArbitrationPublicKey& EphemeralArbitrationKey::public_key() const noexcept {
-  return valid() ? state_->public_key : kInvalidPublicKey;
+  return valid() ? state_->key.public_key() : kInvalidPublicKey;
 }
 std::optional<EphemeralArbitrationKey> NewArbitrationKey() {
-#if REX_PLATFORM_LINUX
-  KeyContext context(EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, nullptr), EVP_PKEY_CTX_free);
-  EVP_PKEY* raw = nullptr;
-  if (!context || EVP_PKEY_keygen_init(context.get()) != 1 || EVP_PKEY_keygen(context.get(), &raw) != 1) {
-    EVP_PKEY_free(raw); return std::nullopt;
-  }
-  KeyOwner generated(raw, EVP_PKEY_free);
+  auto generated = crypto::X25519Key::Generate();
+  if (!generated) return std::nullopt;
   EphemeralArbitrationKey result;
   result.state_ = std::make_unique<EphemeralArbitrationKey::State>();
-  result.state_->key = std::move(generated);
-  size_t size = result.state_->public_key.size();
-  if (EVP_PKEY_get_raw_public_key(raw, result.state_->public_key.data(), &size) != 1 ||
-      size != result.state_->public_key.size() || !result.valid()) return std::nullopt;
+  result.state_->key = std::move(*generated);
+  if (!result.valid()) return std::nullopt;
   return result;
-#else
-  return std::nullopt;
-#endif
 }
 std::optional<ArbitrationCredentialEnvelope> SealArbitrationCredential(
     const ArbitrationPublicKey& peer, const ArbitrationToken& credential, std::span<const uint8_t> aad) {
-#if REX_PLATFORM_LINUX
   if (!Nonzero(peer) || !Nonzero(credential) || !ValidAAD(aad)) return std::nullopt;
   auto server = NewArbitrationKey(); if (!server) return std::nullopt;
   ArbitrationCredentialEnvelope envelope; envelope.server_public_key = server->public_key();
   SensitiveBytes<32> key;
-  if (!DeriveKey(server->state_->key.get(), peer, peer, envelope.server_public_key, aad, key)) return std::nullopt;
+  if (!DeriveKey(server->state_->key, peer, peer, envelope.server_public_key, aad, key)) return std::nullopt;
   unsigned tries = 0;
-  do { if (RAND_bytes(envelope.iv.data(), static_cast<int>(envelope.iv.size())) != 1) return std::nullopt; }
+  do { if (!crypto::Random(envelope.iv)) return std::nullopt; }
   while (!Nonzero(envelope.iv) && ++tries < 8);
   if (!Nonzero(envelope.iv)) return std::nullopt;
-  CipherContext cipher(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free); int size = 0, final_size = 0;
-  std::array<uint8_t, 16> final{};
-  if (!cipher || EVP_EncryptInit_ex(cipher.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
-      EVP_CIPHER_CTX_ctrl(cipher.get(), EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(envelope.iv.size()), nullptr) != 1 ||
-      EVP_EncryptInit_ex(cipher.get(), nullptr, nullptr, key.bytes.data(), envelope.iv.data()) != 1 ||
-      EVP_EncryptUpdate(cipher.get(), nullptr, &size, aad.data(), static_cast<int>(aad.size())) != 1 ||
-      EVP_EncryptUpdate(cipher.get(), envelope.ciphertext.data(), &size, credential.data(), static_cast<int>(credential.size())) != 1 ||
-      size != static_cast<int>(credential.size()) || EVP_EncryptFinal_ex(cipher.get(), final.data(), &final_size) != 1 ||
-      final_size != 0 || EVP_CIPHER_CTX_ctrl(cipher.get(), EVP_CTRL_GCM_GET_TAG, static_cast<int>(envelope.tag.size()), envelope.tag.data()) != 1 ||
+  if (!crypto::AesGcmSeal(key.bytes, envelope.iv, aad, credential, envelope.ciphertext.data(),
+                          envelope.tag) ||
       !Nonzero(envelope.ciphertext) || !Nonzero(envelope.tag)) return std::nullopt;
   return envelope;
-#else
-  (void)peer; (void)credential; (void)aad; return std::nullopt;
-#endif
 }
 std::optional<ArbitrationToken> OpenArbitrationCredential(
     const EphemeralArbitrationKey& client, const ArbitrationCredentialEnvelope& envelope,
     std::span<const uint8_t> aad) {
-#if REX_PLATFORM_LINUX
   if (!client.valid() || !ValidAAD(aad) || !Nonzero(envelope.server_public_key) ||
       !Nonzero(envelope.iv) || !Nonzero(envelope.ciphertext) || !Nonzero(envelope.tag)) return std::nullopt;
-  SensitiveBytes<32> key; SensitiveBytes<16> token; SensitiveBytes<16> final;
-  if (!DeriveKey(client.state_->key.get(), envelope.server_public_key, client.public_key(),
+  SensitiveBytes<32> key; SensitiveBytes<16> token;
+  if (!DeriveKey(client.state_->key, envelope.server_public_key, client.public_key(),
       envelope.server_public_key, aad, key)) return std::nullopt;
-  auto tag = envelope.tag;
-  CipherContext cipher(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free); int size = 0, final_size = 0;
-  if (!cipher || EVP_DecryptInit_ex(cipher.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
-      EVP_CIPHER_CTX_ctrl(cipher.get(), EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(envelope.iv.size()), nullptr) != 1 ||
-      EVP_DecryptInit_ex(cipher.get(), nullptr, nullptr, key.bytes.data(), envelope.iv.data()) != 1 ||
-      EVP_DecryptUpdate(cipher.get(), nullptr, &size, aad.data(), static_cast<int>(aad.size())) != 1 ||
-      EVP_DecryptUpdate(cipher.get(), token.bytes.data(), &size, envelope.ciphertext.data(), static_cast<int>(envelope.ciphertext.size())) != 1 ||
-      size != static_cast<int>(token.bytes.size()) ||
-      EVP_CIPHER_CTX_ctrl(cipher.get(), EVP_CTRL_GCM_SET_TAG, static_cast<int>(tag.size()), tag.data()) != 1 ||
-      EVP_DecryptFinal_ex(cipher.get(), final.bytes.data(), &final_size) != 1 ||
-      final_size != 0 || !Nonzero(token.bytes)) return std::nullopt;
+  if (!crypto::AesGcmOpen(key.bytes, envelope.iv, aad, envelope.ciphertext, envelope.tag,
+                          token.bytes.data()) ||
+      !Nonzero(token.bytes)) return std::nullopt;
   return token.bytes;
-#else
-  (void)client; (void)envelope; (void)aad; return std::nullopt;
-#endif
 }
 struct SensitiveArbitrationPayload::State {
   std::vector<uint8_t> bytes;
-  ~State() {
-#if REX_PLATFORM_LINUX
-    OPENSSL_cleanse(bytes.data(), bytes.size());
-#endif
-  }
+  ~State() { crypto::Cleanse(bytes.data(), bytes.size()); }
 };
 SensitiveArbitrationPayload::SensitiveArbitrationPayload() noexcept = default;
 SensitiveArbitrationPayload::~SensitiveArbitrationPayload() = default;
@@ -175,7 +103,6 @@ std::span<const uint8_t> SensitiveArbitrationPayload::bytes() const noexcept {
 std::optional<ArbitrationPayloadEnvelope> SealArbitrationPayload(
     const ArbitrationPublicKey& peer, std::span<const uint8_t> plaintext,
     std::span<const uint8_t> aad) {
-#if REX_PLATFORM_LINUX
   if (!Nonzero(peer) || !ValidAAD(aad) || plaintext.empty() ||
       plaintext.size() > kMaximumArbitrationPayload) return std::nullopt;
   try {
@@ -183,61 +110,33 @@ std::optional<ArbitrationPayloadEnvelope> SealArbitrationPayload(
     ArbitrationPayloadEnvelope result;
     result.server_public_key = server->public_key(); result.ciphertext.resize(plaintext.size());
     SensitiveBytes<32> key;
-    if (!DeriveKey(server->state_->key.get(), peer, peer, result.server_public_key, aad, key,
+    if (!DeriveKey(server->state_->key, peer, peer, result.server_public_key, aad, key,
                    "ReXGlue private LAN payload envelope v1")) return std::nullopt;
-    if (RAND_bytes(result.iv.data(), int(result.iv.size())) != 1 || !Nonzero(result.iv)) return std::nullopt;
-    CipherContext cipher(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
-    int written = 0, final_size = 0; SensitiveBytes<16> final;
-    if (!cipher || EVP_EncryptInit_ex(cipher.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
-        EVP_CIPHER_CTX_ctrl(cipher.get(), EVP_CTRL_GCM_SET_IVLEN, int(result.iv.size()), nullptr) != 1 ||
-        EVP_EncryptInit_ex(cipher.get(), nullptr, nullptr, key.bytes.data(), result.iv.data()) != 1 ||
-        EVP_EncryptUpdate(cipher.get(), nullptr, &written, aad.data(), int(aad.size())) != 1 ||
-        EVP_EncryptUpdate(cipher.get(), result.ciphertext.data(), &written, plaintext.data(), int(plaintext.size())) != 1 ||
-        written != int(plaintext.size()) ||
-        EVP_EncryptFinal_ex(cipher.get(), final.bytes.data(), &final_size) != 1 || final_size != 0 ||
-        EVP_CIPHER_CTX_ctrl(cipher.get(), EVP_CTRL_GCM_GET_TAG, int(result.tag.size()), result.tag.data()) != 1)
-      return std::nullopt;
+    if (!crypto::Random(result.iv) || !Nonzero(result.iv)) return std::nullopt;
+    if (!crypto::AesGcmSeal(key.bytes, result.iv, aad, plaintext, result.ciphertext.data(),
+                            result.tag)) return std::nullopt;
     return result;
   } catch (...) { return std::nullopt; }
-#else
-  (void)peer; (void)plaintext; (void)aad;
-  return std::nullopt;
-#endif
 }
 
 std::optional<SensitiveArbitrationPayload> OpenArbitrationPayload(
     const EphemeralArbitrationKey& client, const ArbitrationPayloadEnvelope& envelope,
     std::span<const uint8_t> aad) {
-#if REX_PLATFORM_LINUX
   if (!client.valid() || !ValidAAD(aad) || !Nonzero(envelope.server_public_key) ||
       !Nonzero(envelope.iv) || envelope.ciphertext.empty() ||
       envelope.ciphertext.size() > kMaximumArbitrationPayload || !Nonzero(envelope.tag)) return std::nullopt;
   try {
-    SensitiveBytes<32> key; SensitiveBytes<16> final;
-    if (!DeriveKey(client.state_->key.get(), envelope.server_public_key, client.public_key(),
+    SensitiveBytes<32> key;
+    if (!DeriveKey(client.state_->key, envelope.server_public_key, client.public_key(),
                    envelope.server_public_key, aad, key,
                    "ReXGlue private LAN payload envelope v1")) return std::nullopt;
     SensitiveArbitrationPayload result;
     result.state_ = std::make_unique<SensitiveArbitrationPayload::State>();
     result.state_->bytes.resize(envelope.ciphertext.size());
-    auto tag = envelope.tag;
-    CipherContext cipher(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
-    int written = 0, final_size = 0;
-    if (!cipher || EVP_DecryptInit_ex(cipher.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
-        EVP_CIPHER_CTX_ctrl(cipher.get(), EVP_CTRL_GCM_SET_IVLEN, int(envelope.iv.size()), nullptr) != 1 ||
-        EVP_DecryptInit_ex(cipher.get(), nullptr, nullptr, key.bytes.data(), envelope.iv.data()) != 1 ||
-        EVP_DecryptUpdate(cipher.get(), nullptr, &written, aad.data(), int(aad.size())) != 1 ||
-        EVP_DecryptUpdate(cipher.get(), result.state_->bytes.data(), &written,
-                          envelope.ciphertext.data(), int(envelope.ciphertext.size())) != 1 ||
-        written != int(envelope.ciphertext.size()) ||
-        EVP_CIPHER_CTX_ctrl(cipher.get(), EVP_CTRL_GCM_SET_TAG, int(tag.size()), tag.data()) != 1 ||
-        EVP_DecryptFinal_ex(cipher.get(), final.bytes.data(), &final_size) != 1 || final_size != 0)
-      return std::nullopt;
+    // A failed tag check returns nullopt; State cleanses any staged bytes.
+    if (!crypto::AesGcmOpen(key.bytes, envelope.iv, aad, envelope.ciphertext, envelope.tag,
+                            result.state_->bytes.data())) return std::nullopt;
     return result;
   } catch (...) { return std::nullopt; }
-#else
-  (void)client; (void)envelope; (void)aad;
-  return std::nullopt;
-#endif
 }
 } // namespace rex::system::xam
