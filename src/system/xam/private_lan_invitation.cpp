@@ -134,7 +134,10 @@ bool PrivateObject(HANDLE object, TokenSids& sids) {
                       &owner, nullptr, &dacl, nullptr, &descriptor) != ERROR_SUCCESS)
     return false;
   struct Free { PSECURITY_DESCRIPTOR value; ~Free() { LocalFree(value); } } free_descriptor{descriptor};
-  if (!owner || !dacl || !(EqualSid(owner, sids.User()) || EqualSid(owner, sids.Owner()))) return false;
+  // Elevated processes create files owned by Administrators; accept that
+  // default owner alongside this user and the token's own default owner.
+  if (!owner || !dacl || !(EqualSid(owner, sids.User()) || EqualSid(owner, sids.Owner()) ||
+                           WellKnown(owner, WinBuiltinAdministratorsSid))) return false;
   ACL_SIZE_INFORMATION information{};
   if (!GetAclInformation(dacl, &information, sizeof(information), AclSizeInformation)) return false;
   for (DWORD i = 0; i < information.AceCount; ++i) {
