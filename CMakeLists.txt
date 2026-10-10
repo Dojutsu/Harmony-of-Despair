@@ -14,6 +14,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
     option(REXGLUE_FUNCTION_MEMORY_CONSUMER
         "Reuse checked consumers in the qualified Harmony generated functions" ON)
+    # Generated guest code uses native loads/stores as on Windows; MMIO and
+    # write-watch faults are serviced by the runtime exception handler chain.
+    # This supersedes the checked consumer above for generated code.
+    option(REXGLUE_LINUX_DIRECT_GUEST_MEMORY
+        "Use native generated guest memory access on Linux x86-64" ON)
 endif()
 
 include(generated/rexglue.cmake)
