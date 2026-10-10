@@ -6,6 +6,11 @@
 #include <rex/platform/guest_fault_state.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#if !REX_LINUX_CHECKED_GUEST_MEMORY
+#include <signal.h>
+#include <sys/wait.h>
+#include <ucontext.h>
+#endif
 
 #include <algorithm>
 #include <cstring>
@@ -38,8 +43,9 @@ struct Mapping {
     const long native_page = sysconf(_SC_PAGESIZE);
     if (native_page < 1024) throw std::runtime_error("unsupported native page size");
     page = static_cast<size_t>(native_page);
+    // Shared so a direct-memory child's committed writes remain observable.
     base = static_cast<uint8_t*>(mmap(nullptr, page * 3, PROT_READ | PROT_WRITE,
-                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+                                    MAP_SHARED | MAP_ANONYMOUS, -1, 0));
     if (base == MAP_FAILED) throw std::runtime_error("mmap failed");
     if (mprotect(base, page, PROT_NONE)) {
       munmap(base, page * 3); throw std::runtime_error("guard-page mprotect failed");
@@ -59,6 +65,62 @@ struct Outcome {
   uintptr_t address = 0;
   uintptr_t intent = 99;
 };
+#if !REX_LINUX_CHECKED_GUEST_MEMORY
+// Direct generated memory faults natively, as on Windows; nothing converts the
+// signal into a C++ exception. Each block runs in a child sharing the guest
+// mapping and context; the child's own SIGSEGV handler records the exact
+// hardware address and read/write intent for the parent.
+struct ChildShared {
+  PPCContext ctx;
+  volatile uintptr_t address;
+  volatile uintptr_t intent;
+};
+ChildShared* child_shared = nullptr;
+constexpr int kChildFaultExit = 77;
+void ChildFault(int, siginfo_t* info, void* context) {
+  child_shared->address = reinterpret_cast<uintptr_t>(info->si_addr);
+  child_shared->intent =
+      (static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_ERR] & 2) ? 1 : 0;
+  _exit(kChildFaultExit);
+}
+Outcome Execute(Block block, PPCContext& ctx, uint8_t* base) {
+  if (!child_shared) {
+    void* shared = mmap(nullptr, sizeof(ChildShared), PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (shared == MAP_FAILED) throw std::runtime_error("shared context mmap failed");
+    child_shared = static_cast<ChildShared*>(shared);
+  }
+  child_shared->ctx = ctx;
+  child_shared->address = 0;
+  child_shared->intent = 99;
+  std::cout.flush(); std::cerr.flush();
+  const pid_t child = fork();
+  if (child < 0) throw std::runtime_error("fork failed");
+  if (child == 0) {
+    struct sigaction action {};
+    action.sa_sigaction = ChildFault;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGSEGV, &action, nullptr)) _exit(2);
+    block(child_shared->ctx, base);
+    _exit(0);
+  }
+  int status = 0;
+  if (waitpid(child, &status, 0) != child) throw std::runtime_error("waitpid failed");
+  ctx = child_shared->ctx;
+  Outcome outcome;
+  const bool exited = WIFEXITED(status);
+  outcome.returned = exited && WEXITSTATUS(status) == 0;
+  outcome.fault = exited && WEXITSTATUS(status) == kChildFaultExit;
+  Check(outcome.returned || outcome.fault, "emitted block returns or takes one native fault");
+  if (outcome.fault) {
+    outcome.code = rex::SehException::ACCESS_VIOLATION;
+    outcome.address = child_shared->address;
+    outcome.intent = child_shared->intent;
+  }
+  return outcome;
+}
+#else
 Outcome Execute(Block block, PPCContext& ctx, uint8_t* base) {
   rex::guest::ExecutionActivation activation;
   rex::SehGuard guard;
@@ -75,6 +137,7 @@ Outcome Execute(Block block, PPCContext& ctx, uint8_t* base) {
         "emitted block delivers each hardware fault exactly once");
   return outcome;
 }
+#endif
 PPCContext Context(uint64_t scene) {
   PPCContext ctx{};
   ctx.r9.u64 = scene;
