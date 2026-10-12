@@ -304,3 +304,26 @@ std::vector<FileInfo> ListFiles(const std::filesystem::path& path) {
 
 }  // namespace filesystem
 }  // namespace rex
+
+#if REX_PLATFORM_ANDROID
+namespace rex {
+namespace filesystem {
+
+// Content URIs (content://...) need the Java ContentResolver; the game reads
+// plain paths on shared storage, so the bridge is not wired yet.
+void AndroidInitialize() {}
+void AndroidShutdown() {}
+
+bool IsAndroidContentUri(const std::string_view source) {
+  return source.rfind("content:", 0) == 0;
+}
+
+int OpenAndroidContentFileDescriptor(const std::string_view uri, const char* mode) {
+  (void)uri;
+  (void)mode;
+  return -1;
+}
+
+}  // namespace filesystem
+}  // namespace rex
+#endif  // REX_PLATFORM_ANDROID

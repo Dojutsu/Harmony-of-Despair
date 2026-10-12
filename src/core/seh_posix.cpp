@@ -45,21 +45,29 @@ int seh_filter(uint32_t /*code*/, void* /*ep*/) {
 /// Signal handler for SIGSEGV/SIGBUS/SIGFPE/SIGILL
 static void signal_handler(int sig, siginfo_t* info, void* ucontext) {
 #if REX_PLATFORM_LINUX
+#if REX_ARCH_AMD64
+  // The registered-leaf fault capture is the x86-64 backend's; other Linux
+  // architectures go straight to the exception handler chain.
   guest::EnterSignalContext();
   if (guest::CaptureOwnedSignal(sig, info, ucontext)) {
     guest::LeaveSignalContext();
     return;
   }
   guest::LeaveSignalContext();
+#endif
   // Direct generated guest memory: MMIO and physical write-watch faults are
   // serviced here by the installed callbacks, as on Windows. Otherwise never
   // throw or run a runtime callback from this signal context.
   if (arch::ExceptionHandler::DispatchSignal(sig, info, ucontext)) {
     return;
   }
+#if REX_ARCH_AMD64
   guest::EnterSignalContext();
   ForwardSignal(sig, info, ucontext, previous_handlers[sig]);
   guest::LeaveSignalContext();
+#else
+  ForwardSignal(sig, info, ucontext, previous_handlers[sig]);
+#endif
 #else
   // Only handle if we're in SEH-protected code
   if (!tls_seh_active) {

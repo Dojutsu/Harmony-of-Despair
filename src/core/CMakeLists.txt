@@ -74,8 +74,13 @@ elseif(UNIX)
         threading_posix.cpp
     )
     if(ANDROID)
-        # Bionic lacks ucontext fibers; see fiber_android.cpp.
-        target_sources(rexcore PRIVATE fiber_android.cpp main_android.cpp)
+        # Bionic lacks ucontext fibers; see fiber_android.cpp. The portable
+        # fault-state bookkeeping is shared with the x86-64 Linux backend; the
+        # x86-64 signal leaf capture itself is not built here.
+        target_sources(rexcore PRIVATE fiber_android.cpp main_android.cpp guest_fault_state.cpp guest_access_android.cpp)
+        # Generated code uses native guest loads/stores (as on Windows) and the
+        # signal handler services MMIO and write-watch faults.
+        target_compile_definitions(rexcore PUBLIC REXGLUE_DIRECT_GUEST_MEMORY=1)
     else()
         target_sources(rexcore PRIVATE fiber_posix.cpp)
     endif()
