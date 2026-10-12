@@ -134,6 +134,9 @@ REXCVAR_DEFINE_STRING(
 namespace {
 constexpr uint32_t kDiscoveryMagic = 0x5245584Cu;
 constexpr uint16_t kDiscoveryVersion = 2;
+// A by-code joiner waits this long (plus the NAT grace) for the host to answer
+// its discovery; the host answers only after a directory poll grants the attempt.
+constexpr uint32_t kConfiguredInviteDiscoveryMs = 5000;
 constexpr uint8_t kQuery = 1;
 constexpr uint8_t kAdvertisement = 2;
 constexpr uint8_t kJoin = 3;
@@ -1414,15 +1417,25 @@ class LanDiscoveryService::Impl {
           const auto source_bytes = InviteLanSourceBytes(remote);
           const auto request_proof =
               InviteLanMac(attempt_id, "invite-lan-request-v1", source_bytes);
-          const std::array acknowledged{attempt_id};
-          const auto hosted_session=admission_grants->hosted_directory_session();
-          if (!legacy_diagnostics&&(!hosted_session||!admission_grants->HasCurrentPrivateDiscoveryGrant(*hosted_session,acknowledged)))
-            continue;
           if (!selector || !request_proof ||
               !InviteLanEqual(invite_packet.selector, selector->data(), selector->size()) ||
               !InviteLanEqual(invite_packet.proof, request_proof->data(),
                               request_proof->size()))
             continue;
+          const std::array acknowledged{attempt_id};
+          const auto hosted_session=admission_grants->hosted_directory_session();
+          if (!legacy_diagnostics&&(!hosted_session||!admission_grants->HasCurrentPrivateDiscoveryGrant(*hosted_session,acknowledged))) {
+            // The proof shows the joiner holds this server-issued attempt. Record
+            // the LAN peer so the directory poll acknowledges it and prepares the
+            // grant; a joiner behind the same public address never completes the
+            // public punch, so waiting for that acknowledgement would deadlock.
+            // No response is sent until the grant is current.
+            if (NatProbeRegisterInviteLanPeer(uint64_t(socket), attempt_id, remote))
+              REXSYS_INFO("INVITE_LAN_REQUEST_AWAITING_GRANT attempt_ref={} peer={:08X}:{}",
+                          attempt_id.substr(0, 8), remote.ipv4, remote.port);
+            matched = true;
+            break;
+          }
           DiscoveryPacket hosted_packet = Encode(*advertised, title_id);
           const auto tuple = InviteLanTupleBytes(hosted_packet);
           const auto response_proof =
@@ -3468,8 +3481,10 @@ void SessionManager::RunConfiguredInviteOperation(
     return;
   }
 
+  // The host only answers once the directory has granted this attempt, which
+  // takes a poll round trip after it first hears from us; allow for that.
   auto discovered = configured_invite_discovery_(
-      discovery_, *issued, 250, current, observe);
+      discovery_, *issued, kConfiguredInviteDiscoveryMs, current, observe);
   if (!discovered || !current()) {
     fail(ConfiguredInviteLifecycleState::kFailed);
     cleanup();
