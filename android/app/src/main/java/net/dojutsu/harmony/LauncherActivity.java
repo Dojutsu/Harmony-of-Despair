@@ -78,6 +78,7 @@ public class LauncherActivity extends Activity {
         nameField.setText(prefs.getString(PREF_NAME, "Thor"));
         nameField.setTextColor(Color.WHITE);
         nameField.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        styleBox(nameField);
         column.addView(nameField);
 
         Button offline = button("Play offline");
@@ -105,9 +106,19 @@ public class LauncherActivity extends Activity {
         codeField.setTextColor(Color.WHITE);
         codeField.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
         codeField.setTypeface(Typeface.MONOSPACE);
+        styleBox(codeField);
+        codeField.setMinWidth(dp(200));
         LinearLayout.LayoutParams grow = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        grow.gravity = Gravity.CENTER_VERTICAL;
         codeRow.addView(codeField, grow);
         Button paste = button("Paste");
+        // button() sizes for the vertical column (full width); in this row that would push the code box
+        // down to zero width, so size the Paste button to its text and let the code box take the rest.
+        LinearLayout.LayoutParams pasteParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        pasteParams.leftMargin = dp(12);
+        pasteParams.gravity = Gravity.CENTER_VERTICAL;
+        paste.setLayoutParams(pasteParams);
         paste.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
@@ -238,6 +249,12 @@ public class LauncherActivity extends Activity {
         view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         view.setPadding(0, dp(16), 0, dp(4));
         return view;
+    }
+
+    /** Visible text box on the dark background (the stock EditText only draws a thin underline). */
+    private void styleBox(EditText field) {
+        field.setBackgroundColor(Color.rgb(44, 38, 64));
+        field.setPadding(dp(12), dp(10), dp(12), dp(10));
     }
 
     private Button button(String text) {
