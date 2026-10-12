@@ -323,6 +323,11 @@ bool InstallGameplayAuthorizationImpl(const std::shared_ptr<SessionRecord>& sess
   if (found != scopes.end()) {
     if (found->closed) return reject("scope_closed");
     candidate.retired_links() = found->retired_links();
+    // Keep learned guest source aliases across authorization refreshes; the
+    // scope is replaced about once a second and the alias is otherwise only
+    // re-learned on the guest's next send, so host bursts would surface from
+    // the logical address and be discarded by the title.
+    candidate.tables->guest_aliases = found->tables->guest_aliases;
     for (const auto& old : found->authorization.peers)
       if (!links.contains(old.traversal.attempt_id)) candidate.retired_links().insert(old.traversal.attempt_id);
   }
