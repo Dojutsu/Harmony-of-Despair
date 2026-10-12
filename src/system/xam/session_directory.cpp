@@ -708,6 +708,15 @@ constexpr auto kListCacheLifetime = std::chrono::seconds(5);
 constexpr std::string_view kInviteCodeAlphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 constexpr size_t kInviteCodeLength = 6;
 
+// Directory error responses are {"error": "<reason>"}; keep a short printable
+// excerpt for logs. Success bodies (which carry capabilities) never reach this.
+std::string DirectoryErrorSummary(std::string_view body) {
+  std::string summary;
+  for (unsigned char ch : body.substr(0, 160))
+    summary.push_back(ch >= 0x20 && ch < 0x7f ? char(ch) : '?');
+  return summary;
+}
+
 bool IsSafeDirectoryUrl(std::string_view value) {
   if (value.empty()) return true;
   if (value.size() > 512 || std::any_of(value.begin(), value.end(), [](unsigned char ch) {
@@ -1957,7 +1966,13 @@ class SessionDirectoryClient::Impl {
                 id, payload["members"].size(), response.has_value(),
                 response ? response->status : 0);
     if (!response) return false;
-    if (response->status != 200) return false;
+    if (response->status != 200) {
+      // The directory answers a rejected roster with a short reason; without it
+      // a persistent 409 is undiagnosable from the host log.
+      REXSYS_WARN("GAMEPLAY_HOST_SYNC_REJECT reason=http_{} session={} body={}",
+                  response->status, id, DirectoryErrorSummary(response->body));
+      return false;
+    }
     auto authorization = ParseGameplayAuthorization(response->body, started);
     if (!authorization) {
       REXSYS_WARN("GAMEPLAY_HOST_SYNC_REJECT reason=invalid_authorization session={}", id);
@@ -2039,6 +2054,9 @@ class SessionDirectoryClient::Impl {
         REXSYS_INFO("GAMEPLAY_CLAIM_RESPONSE action={} session={} transport={} status={}",
                     action, context->attempt.session_id, response.has_value(),
                     response ? response->status : 0);
+        if (response && response->status != 200)
+          REXSYS_INFO("GAMEPLAY_CLAIM_REJECT action={} status={} body={}", action,
+                      response->status, DirectoryErrorSummary(response->body));
         if (current && response && response->status == 200 && !context->cancelled) {
           auto authorization = ParseGameplayAuthorization(response->body, now);
           if (!authorization) {
@@ -2428,6 +2446,9 @@ class SessionDirectoryClient::Impl {
         auto snapshot = pending && pending->status == 200
                             ? ParseDirectoryHostPollSnapshot(pending->body, session_id)
                             : std::nullopt;
+        REXSYS_DEBUG("Session directory: host poll acknowledged={} transport={} status={} attempts={}",
+                     acknowledged_ids.size(), pending.has_value(), pending ? pending->status : 0,
+                     snapshot ? int(snapshot->size()) : -1);
         if (snapshot) {
           for (const auto& attempt : *snapshot)
             if (attempt.host_ready && logged_preparations.contains(attempt.attempt_id) &&
