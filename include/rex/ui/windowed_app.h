@@ -24,10 +24,8 @@
 #include <rex/platform.h>
 #include <rex/ui/windowed_app_context.h>
 
-#if REX_PLATFORM_ANDROID
-// Multiple apps in a single library instead of separate executables.
-#define XE_UI_WINDOWED_APPS_IN_LIBRARY 1
-#endif
+// Each host application is its own native library on Android (SDL's
+// libmain.so), so the single-app creator path is used on every platform.
 
 namespace rex {
 namespace ui {
