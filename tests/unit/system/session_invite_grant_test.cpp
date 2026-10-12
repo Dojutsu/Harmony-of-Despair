@@ -1210,4 +1210,82 @@ TEST_CASE("Discovery grant checks are read-only current unique and invalidation-
   CHECK_FALSE(ambiguous.HasCurrentPrivateDiscoveryGrant("session-a",both,now));CHECK(ambiguous.HasCurrentPrivateDiscoveryGrant("session-a",one,now));
 }
 
+
+TEST_CASE("Gameplay traversal moves to the home network behind one shared router",
+          "[session][nat]") {
+  constexpr std::string_view kSameHouse = "3142536475869708a9bacbdcedfe0f10";
+  constexpr std::string_view kOtherHouse = "4152637485960718a9bacbdcedfe0f10";
+  const LanAddress logical{htonl(0xF0000002u), 1000};
+  const LanAddress lan_peer{htonl(0x0A00003Cu), 30742};
+  const auto expires = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  NatFixture fixture;
+
+  SECTION("same public address") {
+    const uint64_t socket = 0x6101;
+    fixture.Attach(socket, NatProbeRole::kGameplay);
+    REQUIRE(NatProbeInstallGameplayIdentity(
+        {std::string(kSameHouse), std::string(kCapability), "127.0.0.1", 30740, 0}, socket,
+        logical, expires));
+    // The joiner's public mapping shares the host's observed public address.
+    auto registered = Registered(kSameHouse, {htonl(0xCB007109u), 40000}, NatProbeRole::kGameplay);
+    REQUIRE(NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&registered),
+                            sizeof(registered), htonl(0x7F000001u), 30740));
+    auto punch = Punch(kSameHouse, NatProbeRole::kGameplay);
+    REQUIRE(NatProbeIsControlPacket(socket, reinterpret_cast<const uint8_t*>(&punch),
+                                    sizeof(punch), lan_peer.ipv4, lan_peer.port));
+    REQUIRE(NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&punch), sizeof(punch),
+                            lan_peer.ipv4, lan_peer.port));
+    CHECK_FALSE(NatProbeGameplayDestination(socket, logical).has_value());
+    auto ack = Ack(kSameHouse, NatProbeRole::kGameplay);
+    REQUIRE(NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&ack), sizeof(ack),
+                            lan_peer.ipv4, lan_peer.port));
+    REQUIRE(NatProbeGameplayDestination(socket, logical) == lan_peer);
+    // Later rendezvous refreshes keep reporting the public mapping; the
+    // working home-network route must survive them.
+    REQUIRE(NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&registered),
+                            sizeof(registered), htonl(0x7F000001u), 30740));
+    CHECK(NatProbeGameplayDestination(socket, logical) == lan_peer);
+    CHECK(NatProbeNormalizeGameplaySource(socket, lan_peer) == logical);
+    NatProbeRemoveGameplayIdentity(socket, kSameHouse);
+  }
+
+  SECTION("joiner learns the host from its acknowledgement") {
+    const uint64_t socket = 0x6102;
+    fixture.Attach(socket, NatProbeRole::kGameplay);
+    REQUIRE(NatProbeInstallGameplayIdentity(
+        {std::string(kSameHouse), std::string(kCapability), "127.0.0.1", 30740, 0}, socket,
+        logical, expires));
+    auto registered = Registered(kSameHouse, {htonl(0xCB007109u), 40000}, NatProbeRole::kGameplay);
+    REQUIRE(NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&registered),
+                            sizeof(registered), htonl(0x7F000001u), 30740));
+    auto ack = Ack(kSameHouse, NatProbeRole::kGameplay);
+    REQUIRE(NatProbeIsControlPacket(socket, reinterpret_cast<const uint8_t*>(&ack), sizeof(ack),
+                                    lan_peer.ipv4, lan_peer.port));
+    REQUIRE(NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&ack), sizeof(ack),
+                            lan_peer.ipv4, lan_peer.port));
+    CHECK(NatProbeGameplayDestination(socket, logical) == lan_peer);
+    NatProbeRemoveGameplayIdentity(socket, kSameHouse);
+  }
+
+  SECTION("different houses never accept a private source") {
+    const uint64_t socket = 0x6103;
+    fixture.Attach(socket, NatProbeRole::kGameplay);
+    REQUIRE(NatProbeInstallGameplayIdentity(
+        {std::string(kOtherHouse), std::string(kCapability), "127.0.0.1", 30740, 0}, socket,
+        logical, expires));
+    auto registered = Registered(kOtherHouse, {htonl(0x5DB8D822u), 40000}, NatProbeRole::kGameplay);
+    REQUIRE(NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&registered),
+                            sizeof(registered), htonl(0x7F000001u), 30740));
+    auto punch = Punch(kOtherHouse, NatProbeRole::kGameplay);
+    CHECK_FALSE(NatProbeIsControlPacket(socket, reinterpret_cast<const uint8_t*>(&punch),
+                                        sizeof(punch), lan_peer.ipv4, lan_peer.port));
+    NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&punch), sizeof(punch),
+                    lan_peer.ipv4, lan_peer.port);
+    auto ack = Ack(kOtherHouse, NatProbeRole::kGameplay);
+    CHECK_FALSE(NatProbeConsume(socket, reinterpret_cast<const uint8_t*>(&ack), sizeof(ack),
+                                lan_peer.ipv4, lan_peer.port));
+    CHECK_FALSE(NatProbeGameplayDestination(socket, logical).has_value());
+    NatProbeRemoveGameplayIdentity(socket, kOtherHouse);
+  }
+}
 } // namespace rex::system::xam

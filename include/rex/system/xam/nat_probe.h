@@ -114,6 +114,9 @@ bool NatProbeRendezvousAttemptActive(uint64_t socket,
 // LAN invite correlation is separate from the server-observed public endpoint.
 // It never creates private admission authority; the host grant still does that.
 std::vector<std::string> NatProbeHostedInviteAttempts(uint64_t socket);
+// Remembers a host gameplay endpoint reached directly on the home network so
+// gameplay traversal can use it when both sides share one public address.
+void NatProbeAddSameNetworkGameplayCandidate(LanAddress endpoint);
 bool NatProbeRegisterInviteLanPeer(uint64_t socket, std::string_view attempt_id,
                                    LanAddress peer);
 bool NatProbeSelectInviteDiscoveryPeer(uint64_t socket, std::string_view attempt_id,
