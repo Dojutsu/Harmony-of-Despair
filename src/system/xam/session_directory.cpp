@@ -686,6 +686,17 @@ bool HostAdmissionGrantStore::HasCurrentPrivateDiscoveryGrant(std::string_view s
   return matches==1;
 }
 
+bool HostAdmissionGrantStore::HasPrivateDiscoveryGrantRecord(std::string_view session,
+    std::span<const std::string> acknowledged) const {
+  std::lock_guard lock(mutex_);
+  if(session.empty()||session!=hosted_directory_session_)return true;
+  for(const auto& [attempt,grant]:grants_)
+    if(grant.directory_session_id==session&&
+       std::find(acknowledged.begin(),acknowledged.end(),attempt)!=acknowledged.end())
+      return true;
+  return false;
+}
+
 namespace {
 constexpr uint32_t kDirectoryProtocolVersion = 1;
 constexpr uint32_t kNoSessionIndex = 0xFFFFFFFFu;

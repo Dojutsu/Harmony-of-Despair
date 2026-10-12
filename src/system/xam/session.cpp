@@ -1508,7 +1508,19 @@ class LanDiscoveryService::Impl {
       if (valid && query.type == kQuery && !legacy_diagnostics) {
         const auto matches=NatProbeMatchAcknowledgedDiscoveryAttempts(socket,{source.sin_addr.s_addr,ntohs(source.sin_port)});
         const auto hosted_session=admission_grants->hosted_directory_session();
-        valid=hosted_session&&admission_grants->HasCurrentPrivateDiscoveryGrant(*hosted_session,matches);
+        // Answer a source that completed this host's server-issued attempt
+        // (acknowledged punch or proven LAN request) while its grant is current,
+        // or before any grant exists: the directory issues the grant only after
+        // the joiner arms admission, which the joiner does after this answer.
+        // A consumed, expired or invalidated grant still ends discovery, and
+        // joining still needs the current grant.
+        valid=hosted_session&&!matches.empty();
+        if(valid&&!admission_grants->HasCurrentPrivateDiscoveryGrant(*hosted_session,matches)) {
+          valid=!admission_grants->HasPrivateDiscoveryGrantRecord(*hosted_session,matches);
+          if(valid)
+            REXSYS_INFO("LAN discovery: answering authenticated attempt before grant from {:08X}:{}",
+                        source.sin_addr.s_addr,ntohs(source.sin_port));
+        }
       }
       if (valid && query.type == kQuery) {
         REXSYS_INFO("LAN discovery: received search query from {:08X}:{}", source.sin_addr.s_addr,

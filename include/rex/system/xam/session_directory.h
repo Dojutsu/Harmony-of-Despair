@@ -330,6 +330,10 @@ class HostAdmissionGrantStore {
   // This read-only check discloses no grant data and spends no admission.
   bool HasCurrentPrivateDiscoveryGrant(std::string_view directory_session_id,
       std::span<const std::string> acknowledged_attempt_ids,Clock::time_point now=Clock::now()) const;
+  // True once any grant (current, consumed, expired or invalidated) exists for
+  // one of these attempts; before that, the attempt is still awaiting its grant.
+  bool HasPrivateDiscoveryGrantRecord(std::string_view directory_session_id,
+      std::span<const std::string> acknowledged_attempt_ids) const;
 
  private:
   struct Grant {
