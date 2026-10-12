@@ -1424,18 +1424,15 @@ class LanDiscoveryService::Impl {
             continue;
           const std::array acknowledged{attempt_id};
           const auto hosted_session=admission_grants->hosted_directory_session();
-          if (!legacy_diagnostics&&(!hosted_session||!admission_grants->HasCurrentPrivateDiscoveryGrant(*hosted_session,acknowledged))) {
-            // The proof shows the joiner holds this server-issued attempt. Record
-            // the LAN peer so the directory poll acknowledges it and prepares the
-            // grant; a joiner behind the same public address never completes the
-            // public punch, so waiting for that acknowledgement would deadlock.
-            // No response is sent until the grant is current.
-            if (NatProbeRegisterInviteLanPeer(uint64_t(socket), attempt_id, remote))
-              REXSYS_INFO("INVITE_LAN_REQUEST_AWAITING_GRANT attempt_ref={} peer={:08X}:{}",
-                          attempt_id.substr(0, 8), remote.ipv4, remote.port);
-            matched = true;
-            break;
-          }
+          // The proof shows the joiner holds this server-issued attempt, the same
+          // evidence an acknowledged public punch carries, so answer it before the
+          // directory grant exists, as the public path does. Waiting for the grant
+          // deadlocked: the server issues it only after the joiner arms admission,
+          // which needs this answer first. A joiner behind the host's public
+          // address (no hairpin NAT) has only this route.
+          if (!legacy_diagnostics&&(!hosted_session||!admission_grants->HasCurrentPrivateDiscoveryGrant(*hosted_session,acknowledged)))
+            REXSYS_INFO("INVITE_LAN_REQUEST_BEFORE_GRANT attempt_ref={} peer={:08X}:{}",
+                        attempt_id.substr(0, 8), remote.ipv4, remote.port);
           DiscoveryPacket hosted_packet = Encode(*advertised, title_id);
           const auto tuple = InviteLanTupleBytes(hosted_packet);
           const auto response_proof =
