@@ -2140,6 +2140,8 @@ LanDiscoveryService::DiscoverConfiguredInvite(
       decoded->traversal_capability = attempt.capability;
       NatProbeSetLogicalGameplayPeer(attempt.attempt_id,
                                      decoded->info.host_address);
+      if (candidate->lan)
+        NatProbeAddSameNetworkGameplayCandidate(decoded->info.host_address);
       REXSYS_INFO("INVITE_ROUTE_SELECTED_{} attempt_ref={} discovery={:08X}:{} gameplay={:08X}:{}",
                   candidate->lan ? "LAN" : "PUBLIC", attempt.attempt_id.substr(0, 8),
                   responding.ipv4, responding.port, decoded->info.host_address.ipv4,

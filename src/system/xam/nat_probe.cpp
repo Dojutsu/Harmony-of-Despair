@@ -104,6 +104,9 @@ struct AttemptState {
   // already authenticated and acknowledged discovery correlation. Private
   // authority still requires a separately live host admission grant.
   bool rendezvous_expired = false;
+  // Set once the opposite participant was reached on the home network instead
+  // of through the shared public address (see SameNetworkPeerEligible).
+  bool same_network_peer = false;
   uint32_t registrations_sent = 0;
   bool gameplay_sent_logged = false;
   bool gameplay_received_logged = false;
@@ -125,6 +128,10 @@ std::unordered_map<std::string, Identity> automatic_identities;
 std::unordered_map<std::string, LanAddress> automatic_logical_gameplay_peers;
 std::unordered_set<std::string> expired_discovery_attempts;
 std::unordered_set<std::string> expired_gameplay_attempts;
+// Gameplay endpoints of hosts this machine already reached directly on the
+// home network during invite discovery. Used only when both participants share
+// one public address, where most home routers drop hairpinned traffic.
+std::vector<LanAddress> same_network_gameplay_candidates;
 std::mutex gameplay_pump_mutex;
 std::condition_variable gameplay_pump_cv;
 bool gameplay_pump_running = false;
@@ -246,6 +253,23 @@ std::optional<Identity> ParseIdentity(const NatProbeIdentity& value) {
   }
   identity.server.ipv4 = address.s_addr;
   return identity;
+}
+
+bool PrivateNetworkIpv4(uint32_t network_address) {
+  const auto ip = ntohl(network_address);
+  return (ip >> 24) == 10 || (ip >> 20) == 0xac1 || (ip >> 16) == 0xc0a8;
+}
+
+// Both participants registered from the same public address, so they sit
+// behind one router. A punch or acknowledgement carrying the unguessable link
+// ID from a private address is then the opposite participant on the home
+// network, which works where the router will not loop public traffic back.
+bool SameNetworkPeerEligible(const AttemptState& attempt, LanAddress source) {
+  const auto peer = attempt.endpoint.peer();
+  return attempt.identity.gameplay_authorized && !attempt.identity.direct_lan &&
+         !attempt.same_network_peer && !attempt.endpoint.acknowledged() &&
+         PrivateNetworkIpv4(source.ipv4) && source.port && attempt.observed.ipv4 &&
+         peer.port && peer.ipv4 == attempt.observed.ipv4;
 }
 
 bool GameplayAttemptPendingLocked(const State& state,
@@ -762,6 +786,16 @@ void NatProbeTickLocked(uint64_t socket, State& state,
       packet.role = uint8_t(state.role);
       std::memset(packet.credential, 0, sizeof(packet.credential));
       Send(socket, packet, peer);
+      if (state.role == NatProbeRole::kGameplay && attempt.identity.gameplay_authorized &&
+          !attempt.same_network_peer && attempt.observed.ipv4 &&
+          peer.ipv4 == attempt.observed.ipv4) {
+        for (const auto& candidate : same_network_gameplay_candidates) {
+          if (candidate == state.local) continue;
+          Send(socket, packet, candidate);
+          REXSYS_INFO("NAT traversal: gameplay same-network punch sent socket={} candidate={:08X}:{}",
+                      socket, candidate.ipv4, candidate.port);
+        }
+      }
       attempt.last_punch = now;
       REXSYS_INFO("NAT traversal: {} punch sent socket={} peer={:08X}:{}",
                   state.role == NatProbeRole::kDiscovery ? "discovery" : "gameplay", socket,
@@ -813,8 +847,10 @@ bool NatProbeIsControlPacket(uint64_t socket, const uint8_t* data, size_t size,
   if (packet.participant == attempt_state.identity.participant) return false;
   const LanAddress source{source_ipv4, source_port};
   if (packet.type == kPunch)
-    return !attempt_state.endpoint.peer().port || attempt_state.endpoint.peer() == source;
-  if (packet.type == kAck) return attempt_state.endpoint.peer() == source;
+    return !attempt_state.endpoint.peer().port || attempt_state.endpoint.peer() == source ||
+           SameNetworkPeerEligible(attempt_state, source);
+  if (packet.type == kAck)
+    return attempt_state.endpoint.peer() == source || SameNetworkPeerEligible(attempt_state, source);
   return false;
 }
 
@@ -883,7 +919,7 @@ bool NatProbeConsume(uint64_t socket, const uint8_t* data, size_t size, uint32_t
                   observed.ipv4, observed.port);
     }
     const auto old_peer = attempt_state.endpoint.peer();
-    if (attempt_state.endpoint.UpdatePeer(peer)) {
+    if (!attempt_state.same_network_peer && attempt_state.endpoint.UpdatePeer(peer)) {
       if (old_peer.port) {
         REXSYS_INFO(
             "NAT traversal: role={} peer endpoint changed old={:08X}:{} new={:08X}:{}; "
@@ -909,6 +945,15 @@ bool NatProbeConsume(uint64_t socket, const uint8_t* data, size_t size, uint32_t
       if (attempt_state.identity.gameplay_authorized) return true;
       attempt_state.endpoint.UpdatePeer(source);
     }
+    if (attempt_state.endpoint.peer() != source &&
+        SameNetworkPeerEligible(attempt_state, source)) {
+      REXSYS_INFO("NAT traversal: gameplay peer moved to home network old={:08X}:{} new={:08X}:{}",
+                  attempt_state.endpoint.peer().ipv4, attempt_state.endpoint.peer().port,
+                  source.ipv4, source.port);
+      attempt_state.endpoint.UpdatePeer(source);
+      attempt_state.same_network_peer = true;
+      attempt_state.last_punch = {};
+    }
     if (attempt_state.endpoint.peer() != source) {
       REXSYS_WARN("NAT_DIAG punch rejected socket={} reason=source_mismatch expected={:08X}:{} actual={:08X}:{}",
                   socket, attempt_state.endpoint.peer().ipv4,
@@ -924,6 +969,14 @@ bool NatProbeConsume(uint64_t socket, const uint8_t* data, size_t size, uint32_t
     REXSYS_INFO("NAT traversal: role={} punch received and acknowledged from {:08X}:{}",
                 uint8_t(state.role), source_ipv4, source_port);
     return true;
+  }
+  if (packet.type == kAck && attempt_state.endpoint.peer() != LanAddress{source_ipv4, source_port} &&
+      SameNetworkPeerEligible(attempt_state, LanAddress{source_ipv4, source_port})) {
+    REXSYS_INFO("NAT traversal: gameplay peer moved to home network old={:08X}:{} new={:08X}:{}",
+                attempt_state.endpoint.peer().ipv4, attempt_state.endpoint.peer().port,
+                source_ipv4, source_port);
+    attempt_state.endpoint.UpdatePeer(LanAddress{source_ipv4, source_port});
+    attempt_state.same_network_peer = true;
   }
   if (packet.type == kAck &&
       attempt_state.endpoint.Acknowledge(LanAddress{source_ipv4, source_port})) {
@@ -1032,6 +1085,19 @@ std::vector<std::string> NatProbeHostedInviteAttempts(uint64_t socket) {
         attempt.identity.participant == 0 && !attempt.rendezvous_expired)
       result.push_back(key);
   return result;
+}
+
+void NatProbeAddSameNetworkGameplayCandidate(LanAddress endpoint) {
+  if (!PrivateNetworkIpv4(endpoint.ipv4) || !endpoint.port) return;
+  std::lock_guard lock(state_mutex);
+  if (std::find(same_network_gameplay_candidates.begin(), same_network_gameplay_candidates.end(),
+                endpoint) != same_network_gameplay_candidates.end())
+    return;
+  if (same_network_gameplay_candidates.size() >= 8)
+    same_network_gameplay_candidates.erase(same_network_gameplay_candidates.begin());
+  same_network_gameplay_candidates.push_back(endpoint);
+  REXSYS_INFO("NAT traversal: same-network gameplay candidate {:08X}:{}", endpoint.ipv4,
+              endpoint.port);
 }
 
 bool NatProbeRegisterInviteLanPeer(uint64_t socket, std::string_view attempt_id,
