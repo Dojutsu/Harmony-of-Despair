@@ -63,7 +63,6 @@ elseif(UNIX)
         dynlib_posix.cpp
         exception_handler_posix.cpp
         filesystem_posix.cpp
-        fiber_posix.cpp
         mapped_memory_posix.cpp
         math_gcc.cpp
         memory_posix.cpp
@@ -74,6 +73,12 @@ elseif(UNIX)
         system_posix.cpp
         threading_posix.cpp
     )
+    if(ANDROID)
+        # Bionic lacks ucontext fibers; see fiber_android.cpp.
+        target_sources(rexcore PRIVATE fiber_android.cpp main_android.cpp)
+    else()
+        target_sources(rexcore PRIVATE fiber_posix.cpp)
+    endif()
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -127,6 +132,10 @@ target_include_directories(rexcore PRIVATE
 
 if(APPLE)
     target_link_libraries(rexcore PRIVATE pthread)
+elseif(ANDROID)
+    # Bionic folds pthread/rt/dl into libc; android provides ASharedMemory and
+    # ANativeWindow, log provides __android_log_write.
+    target_link_libraries(rexcore PRIVATE android log)
 elseif(UNIX)
     target_link_libraries(rexcore PRIVATE pthread rt dl)
 endif()

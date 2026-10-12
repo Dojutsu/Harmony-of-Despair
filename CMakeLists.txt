@@ -131,6 +131,12 @@ if(NOT WIN32)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
 
+if(ANDROID)
+    # The NDK's libc++ gates std::jthread/std::stop_token behind the
+    # experimental-library flag; the runtime and consumers use them in headers.
+    add_compile_options(-fexperimental-library)
+endif()
+
 # Global compile options
 add_compile_options(
     -fno-strict-aliasing
@@ -264,8 +270,15 @@ add_subdirectory(src/audio)
 add_subdirectory(src/graphics)
 add_subdirectory(src/system)
 add_subdirectory(src/kernel)
-add_subdirectory(src/codegen)
-add_subdirectory(src/rexglue)
+if(ANDROID)
+    # Host tools (codegen, the rexglue CLI) are not built for the device; the
+    # consuming project compiles its committed generated sources instead
+    # (REXGLUE_USE_PREGENERATED).
+    message(STATUS "Android target: skipping host tools (codegen, rexglue CLI)")
+else()
+    add_subdirectory(src/codegen)
+    add_subdirectory(src/rexglue)
+endif()
 
 # Add tests subdirectory if tests are enabled
 if(REXGLUE_BUILD_TESTS)
@@ -291,7 +304,7 @@ message(STATUS "  Perf Counters: ${REXGLUE_ENABLE_PERF_COUNTERS}")
 message(STATUS "===========================================")
 
 # SDK install/export rules (skipped when consumed as a subdirectory)
-if(PROJECT_IS_TOP_LEVEL)
+if(PROJECT_IS_TOP_LEVEL AND NOT ANDROID)
     include(cmake/rexglue_devenv.cmake)
     include(cmake/rexglue_install.cmake)
 else()

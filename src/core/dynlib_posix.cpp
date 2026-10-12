@@ -1,6 +1,9 @@
 #include <rex/filesystem.h>
 #include <rex/platform.h>
 #include <rex/platform/dynlib.h>
+#if REX_PLATFORM_ANDROID
+#include <rex/main_android.h>
+#endif
 
 static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only");
 
@@ -18,7 +21,12 @@ std::filesystem::path ResolveModuleLibraryPath(const std::filesystem::path& path
       path != "..") {
     // Module CMake targets colocate with the host. Use that explicit location:
     // a dlopen call in rexruntime does not inherit the host's ELF RUNPATH.
+#if REX_PLATFORM_ANDROID
+    // The APK's native library directory holds every module library.
+    return rex::GetAndroidNativeLibraryDir() / ("lib" + path.string() + ".so");
+#else
     return rex::filesystem::GetExecutableFolder() / ("lib" + path.string() + ".so");
+#endif
   }
 #endif
   return path;

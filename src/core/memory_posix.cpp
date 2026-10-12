@@ -51,6 +51,8 @@
 #include <string.h>
 
 #include <dlfcn.h>
+
+#include <rex/main_android.h>
 #include <sys/ioctl.h>
 
 #include <linux/ashmem.h>

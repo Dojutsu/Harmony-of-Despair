@@ -430,7 +430,30 @@ class XSession final : public XObject {
   void set_record(std::shared_ptr<SessionRecord> record);
 
  private:
+#if defined(__ANDROID__)
+  // The NDK's libc++ has no std::atomic<std::shared_ptr>; a lock gives the
+  // same load/exchange contract.
+  class LockedRecordPtr {
+   public:
+    std::shared_ptr<SessionRecord> load(std::memory_order = std::memory_order_seq_cst) const {
+      std::lock_guard<std::mutex> lock(mutex_);
+      return value_;
+    }
+    std::shared_ptr<SessionRecord> exchange(std::shared_ptr<SessionRecord> value,
+                                            std::memory_order = std::memory_order_seq_cst) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      std::swap(value_, value);
+      return value;
+    }
+
+   private:
+    mutable std::mutex mutex_;
+    std::shared_ptr<SessionRecord> value_;
+  };
+  LockedRecordPtr record_;
+#else
   std::atomic<std::shared_ptr<SessionRecord>> record_;
+#endif
 };
 
 enum class RuntimeInviteUpdateResult {

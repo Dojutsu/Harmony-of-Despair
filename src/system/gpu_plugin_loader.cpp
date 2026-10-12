@@ -10,6 +10,9 @@
  */
 
 #include <rex/system/gpu_plugin.h>
+#if REX_PLATFORM_ANDROID
+#include <rex/main_android.h>
+#endif
 
 #include <filesystem>
 #include <string>
@@ -55,7 +58,13 @@ std::vector<platform::DynamicLibrary>& LoadedPlugins() {
 }  // namespace
 
 std::unique_ptr<IGraphicsSystem> LoadGpuPlugin(std::string_view name, std::string_view backend) {
+#if REX_PLATFORM_ANDROID
+  // The APK stages every native library in one directory; /proc/self/exe is
+  // the Android app process, not the game.
+  auto path = rex::GetAndroidNativeLibraryDir() / PluginFileName(name);
+#else
   auto path = rex::filesystem::GetExecutableFolder() / PluginFileName(name);
+#endif
   if (!std::filesystem::exists(path)) {
     REXSYS_ERROR(
         "GPU plugin '{}' not found at {}. Stage it next to the executable "
