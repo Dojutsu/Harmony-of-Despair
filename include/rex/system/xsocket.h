@@ -81,6 +81,8 @@ class XSocket : public XObject {
     NativeLease() = default;
     uint64_t handle() const noexcept;
     int cancellation_handle() const noexcept;
+    // Windows: loopback datagram socket Close pokes to wake select waiters.
+    uint64_t wake_handle() const noexcept;
     bool retired() const noexcept;
     explicit operator bool() const noexcept { return !retired(); }
    private:

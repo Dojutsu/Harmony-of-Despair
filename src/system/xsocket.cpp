@@ -115,6 +115,29 @@ struct XSocket::NativeSocketState {
 #if REX_PLATFORM_GNU_LINUX
     cancellation = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 #endif
+#if REX_PLATFORM_WIN32
+    // Winsock shutdown does not wake a select blocked on an unconnected UDP
+    // socket, and closesocket is deferred while a lease is held. Mirror the
+    // Linux eventfd with a loopback datagram socket that Close pokes.
+    const SOCKET pipe = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (pipe != INVALID_SOCKET) {
+      sockaddr_in local{};
+      local.sin_family = AF_INET;
+      local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+      int length = sizeof(local);
+      u_long nonblocking = 1;
+      if (::bind(pipe, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) == 0 &&
+          ::getsockname(pipe, reinterpret_cast<sockaddr*>(&local), &length) == 0 &&
+          ::ioctlsocket(pipe, FIONBIO, &nonblocking) == 0) {
+        wake = pipe;
+        wake_address = local;
+      } else {
+        ::closesocket(pipe);
+      }
+    }
+    if (wake == uint64_t(-1))
+      REXSYS_ERROR("XSocket: wake socket unavailable socket={} error={}", handle, WSAGetLastError());
+#endif
   }
   ~NativeSocketState() {
 #if REX_PLATFORM_WIN32
@@ -127,6 +150,7 @@ struct XSocket::NativeSocketState {
     if (cancellation >= 0) ::close(cancellation);
 #endif
 #if REX_PLATFORM_WIN32
+    if (wake != uint64_t(-1)) ::closesocket(static_cast<SOCKET>(wake));
     WSASetLastError(error);
 #else
     errno = error;
@@ -152,6 +176,10 @@ struct XSocket::NativeSocketState {
   std::atomic<bool> retired{false};
   std::atomic<bool> finalized{false};
   int cancellation = -1;
+#if REX_PLATFORM_WIN32
+  uint64_t wake = uint64_t(-1);
+  sockaddr_in wake_address{};
+#endif
 };
 
 uint64_t XSocket::NativeLease::handle() const noexcept {
@@ -159,6 +187,13 @@ uint64_t XSocket::NativeLease::handle() const noexcept {
 }
 int XSocket::NativeLease::cancellation_handle() const noexcept {
   return state_ ? state_->cancellation : -1;
+}
+uint64_t XSocket::NativeLease::wake_handle() const noexcept {
+#if REX_PLATFORM_WIN32
+  return state_ ? state_->wake : uint64_t(-1);
+#else
+  return uint64_t(-1);
+#endif
 }
 bool XSocket::NativeLease::retired() const noexcept {
   return !state_ || state_->retired.load(std::memory_order_acquire);
@@ -235,6 +270,16 @@ X_STATUS XSocket::Close() {
   while (written < 0 && errno == EINTR);
   if (written != static_cast<ssize_t>(sizeof(wake)) && errno != EAGAIN)
     REXSYS_ERROR("XSocket: cancellation wake failed socket={}", state->handle);
+#endif
+#if REX_PLATFORM_WIN32
+  // One datagram to itself; it is never drained, so the wake stays sticky
+  // for any later wait on this retired state, like the Linux eventfd.
+  if (state->wake != uint64_t(-1) &&
+      ::sendto(static_cast<SOCKET>(state->wake), "", 1, 0,
+               reinterpret_cast<const sockaddr*>(&state->wake_address),
+               sizeof(state->wake_address)) != 1)
+    REXSYS_ERROR("XSocket: wake socket poke failed socket={} error={}", state->handle,
+                 WSAGetLastError());
 #endif
   // Never acquire native_receive_mutex_: a blocking receive may own it.
   // Linux shutdown wakes even an unconnected UDP receive (ENOTCONN is benign).
@@ -920,6 +965,10 @@ bool XSocket::WaitReadableNative(const NativeLease& operation, uint32_t timeout_
   auto native_socket = static_cast<int>(handle);
 #endif
   FD_SET(native_socket, &read_set);
+#if REX_PLATFORM_WIN32
+  const auto wake_socket = static_cast<SOCKET>(operation.wake_handle());
+  if (wake_socket != INVALID_SOCKET) FD_SET(wake_socket, &read_set);
+#endif
   timeval timeout{static_cast<long>(timeout_ms / 1000),
                   static_cast<long>((timeout_ms % 1000) * 1000)};
   int result = select(
@@ -949,6 +998,9 @@ bool XSocket::WaitReadableNative(const NativeLease& operation, uint32_t timeout_
 #endif
     );
   }
+#if REX_PLATFORM_WIN32
+  if (wake_socket != INVALID_SOCKET && result > 0 && FD_ISSET(wake_socket, &read_set)) return false;
+#endif
   return !operation.retired() && result > 0 && FD_ISSET(native_socket, &read_set);
 #endif
 }

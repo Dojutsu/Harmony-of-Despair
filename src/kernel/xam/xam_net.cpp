@@ -1853,12 +1853,48 @@ i32 NetDll_select_entry(i32 caller, i32 nfds, ppc_ptr_t<x_fd_set> readfds,
   if (writefds) host_writefds.Store(&native_writefds);
   if (exceptfds) host_exceptfds.Store(&native_exceptfds);
   timeval timeout{seconds, microseconds};
+#if REX_PLATFORM_WIN32
+  // Winsock shutdown does not wake a select blocked on an unconnected UDP
+  // socket, so Close pokes a per-socket loopback wake socket; watch those too.
+  bool wake_watched = false;
+  auto append_wake = [&](const host_set& set) {
+    for (uint32_t i = 0; i < set.count; ++i) {
+      const auto wake = static_cast<SOCKET>(set.operations[i].wake_handle());
+      if (wake == INVALID_SOCKET || FD_ISSET(wake, &native_readfds)) continue;
+      if (native_readfds.fd_count >= FD_SETSIZE) {
+        REXKRNL_ERROR("NetDll_select: no room for wake socket of native={}", set.operations[i].handle());
+        continue;
+      }
+      FD_SET(wake, &native_readfds);
+      wake_watched = true;
+    }
+  };
+  append_wake(host_readfds);
+  append_wake(host_writefds);
+  append_wake(host_exceptfds);
+  int ret = select(nfds, (readfds || wake_watched) ? &native_readfds : nullptr,
+                   writefds ? &native_writefds : nullptr,
+#else
   int ret = select(nfds, readfds ? &native_readfds : nullptr, writefds ? &native_writefds : nullptr,
+#endif
                    exceptfds ? &native_exceptfds : nullptr, timeout_ptr ? &timeout : nullptr);
   if (ret < 0) {
     XThread::SetLastError(LastSocketError());
     return -1;
   }
+#if REX_PLATFORM_WIN32
+  auto wake_ready = [&](const host_set& set) {
+    for (uint32_t i = 0; i < set.count; ++i) {
+      const auto wake = static_cast<SOCKET>(set.operations[i].wake_handle());
+      if (wake != INVALID_SOCKET && FD_ISSET(wake, &native_readfds)) return true;
+    }
+    return false;
+  };
+  if (ret > 0 && (wake_ready(host_readfds) || wake_ready(host_writefds) || wake_ready(host_exceptfds))) {
+    XThread::SetLastError(10038);
+    return -1;
+  }
+#endif
   if (host_readfds.Retired() || host_writefds.Retired() || host_exceptfds.Retired()) {
     XThread::SetLastError(10038);
     return -1;
