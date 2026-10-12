@@ -24,6 +24,10 @@ using Clock = std::chrono::steady_clock;
 struct ScopeTables {
   std::unordered_map<std::string, std::shared_ptr<GameplayDatagramCipher>> ciphers;
   std::unordered_set<std::string> retired_links;
+  // Logical peer address -> the address the guest last sent to for that peer.
+  // The title may address the host by its serialized session endpoint before
+  // the logical alias exists; replies must then appear from that same address.
+  std::unordered_map<uint32_t, uint32_t> guest_aliases;
 };
 struct Scope {
   std::weak_ptr<SessionRecord> session;
@@ -539,7 +543,7 @@ bool IsAuthorizedGameplaySocket(uint64_t socket) {
 std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress requested) {
   std::lock_guard lock(gameplay_mutex);
   Reap();
-  for (const auto& scope : scopes) {
+  for (auto& scope : scopes) {
     if (scope.socket != socket) continue;
     auto session = scope.session.lock();
     if (!session) return std::nullopt;
@@ -561,8 +565,20 @@ std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress
       const bool initial_host = scope.xuid != scope.authorization.host_xuid &&
           peer.xuid == scope.authorization.host_xuid && requested.ipv4 == original_host.ipv4 &&
           (requested.port == scope.guest_port || requested.port == original_host.port);
+      if (exact_alias) scope.tables->guest_aliases.erase(peer.logical.ipv4);
+      else if (initial_host) scope.tables->guest_aliases[peer.logical.ipv4] = requested.ipv4;
       if (exact_alias || initial_host) return LanAddress{peer.logical.ipv4, scope.guest_port};
     }
+  }
+  return std::nullopt;
+}
+
+std::optional<uint32_t> GameplayGuestSourceAlias(uint64_t socket, LanAddress logical) {
+  std::lock_guard lock(gameplay_mutex);
+  for (const auto& scope : scopes) {
+    if (scope.socket != socket || !Current(scope)) continue;
+    const auto found = scope.tables->guest_aliases.find(logical.ipv4);
+    if (found != scope.tables->guest_aliases.end()) return found->second;
   }
   return std::nullopt;
 }

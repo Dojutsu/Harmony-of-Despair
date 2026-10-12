@@ -865,13 +865,16 @@ retry_native_receive:
     from->sin_family = nfrom.sin_family;
     if (logical) {
       xam::NatProbeRecordGameplayTraffic(handle, native_source, size_t(ret), false);
-      from->sin_addr = ntohl(logical->ipv4);
+      // Present the peer by the address the guest addressed it with, so a
+      // title that keyed the host by its session endpoint accepts the reply.
+      const auto alias = xam::GameplayGuestSourceAlias(handle, *logical);
+      from->sin_addr = ntohl(alias.value_or(logical->ipv4));
       from->sin_port = logical->port;
       if (last_normalized_source_ipv4_ != native_source.ipv4 ||
           last_normalized_source_port_ != native_source.port) {
         REXSYS_INFO(
-            "NAT traversal: inbound gameplay source normalized native={:08X}:{} guest={:08X}:{}",
-            native_source.ipv4, native_source.port, logical->ipv4, logical->port);
+            "NAT traversal: inbound gameplay source normalized native={:08X}:{} guest={:08X}:{} alias={:08X}",
+            native_source.ipv4, native_source.port, logical->ipv4, logical->port, alias.value_or(0));
         last_normalized_source_ipv4_ = native_source.ipv4;
         last_normalized_source_port_ = native_source.port;
       }

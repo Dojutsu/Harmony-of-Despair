@@ -63,6 +63,8 @@ bool GameplayAuthorizationCurrent(const std::shared_ptr<SessionRecord>& session,
 bool IsAuthorizedGameplaySocket(uint64_t socket);
 // Returns an exact peer alias; an unknown/expired scoped destination has no route.
 std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress requested);
+// The address the guest last used to reach this logical peer, when it differs.
+std::optional<uint32_t> GameplayGuestSourceAlias(uint64_t socket, LanAddress logical);
 
 // Protected transport admits an exact live peer under the same authority lock.
 // There is no raw scoped fallback. Cipher state survives ordinary ticket renewal.
