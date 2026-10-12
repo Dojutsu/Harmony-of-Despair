@@ -44,6 +44,10 @@
 #include <sys/random.h>
 #include <unistd.h>
 #else
+// Android and macOS: bionic does not pull the socket headers in transitively.
+// The libcurl-based directory client is GNU/Linux only for now.
+#include <arpa/inet.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #endif
 
