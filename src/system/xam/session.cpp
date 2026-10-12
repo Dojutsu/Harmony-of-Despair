@@ -3494,6 +3494,8 @@ void SessionManager::RunConfiguredInviteOperation(
   auto issued = discovery_.IssueConfiguredInviteAttempt(
       operation->identity.invite_code, operation->identity.title_id);
   if (!issued) {
+    REXSYS_WARN("INVITE_DIAG op={} gen={} BY_CODE_ATTEMPT_FAILED (unknown or expired code, or directory unreachable)",
+                operation->identity.operation_token, operation->identity.title_generation);
     fail(ConfiguredInviteLifecycleState::kFailed);
     cleanup();
     return;

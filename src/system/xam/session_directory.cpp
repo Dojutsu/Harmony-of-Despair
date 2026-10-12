@@ -1729,10 +1729,13 @@ class SessionDirectoryClient::Impl {
           Request(url, L"POST", "/sessions/by-code/" + *normalized + "/join-attempts", body);
       if (!response)
         continue;
-      if (response->status != 200 && response->status != 201)
+      if (response->status != 200 && response->status != 201) {
+        REXSYS_WARN("INVITE_DIAG BY_CODE_LOOKUP_REJECTED status={}", response->status);
         return std::nullopt;
+      }
       return ParseInviteCodeJoinAttemptResponse(response->body, value_title_id, build_id);
     }
+    REXSYS_WARN("INVITE_DIAG BY_CODE_LOOKUP_UNREACHABLE tries=2");
     return std::nullopt;
   }
 
