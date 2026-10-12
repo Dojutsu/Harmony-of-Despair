@@ -804,6 +804,12 @@ bool ReadSendGuest(memory::Memory* memory, uint32_t address, const void* host,
 #if REX_PLATFORM_GNU_LINUX
   iovec local{staged, length}, remote{const_cast<void*>(host), length};
   return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == ssize_t(length);
+#elif REX_PLATFORM_WIN32
+  // Mirror process_vm_readv: a page unmapped after the range check fails
+  // closed instead of faulting the host (Windows has no mapping gate here).
+  SIZE_T copied = 0;
+  return ReadProcessMemory(GetCurrentProcess(), host, staged, length, &copied) &&
+         copied == length;
 #else
   std::memcpy(staged, host, length);
   return true;
@@ -817,6 +823,11 @@ bool WriteSendGuest(memory::Memory* memory, uint32_t address, void* host,
 #if REX_PLATFORM_GNU_LINUX
   iovec local{const_cast<void*>(staged), length}, remote{host, length};
   return process_vm_writev(getpid(), &local, 1, &remote, 1, 0) == ssize_t(length);
+#elif REX_PLATFORM_WIN32
+  // Mirror process_vm_writev for the same reason as ReadSendGuest.
+  SIZE_T written = 0;
+  return WriteProcessMemory(GetCurrentProcess(), host, staged, length, &written) &&
+         written == length;
 #else
   std::memcpy(host, staged, length);
   return true;
