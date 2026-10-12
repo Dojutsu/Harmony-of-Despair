@@ -32,6 +32,18 @@ const std::filesystem::path& GetAndroidNativeLibraryDir();
 void SetAndroidApplicationPaths(std::filesystem::path files_dir,
                                 std::filesystem::path native_library_dir);
 
+/// The process JavaVM* (opaque here so this header needs no <jni.h>), recorded
+/// by the host library's JNI_OnLoad. Null until then.
+void SetAndroidJavaVM(void* vm);
+void* GetAndroidJavaVM();
+
+/// Global reference to the host app's HTTP bridge class (a Java class with
+/// `static byte[] request(String url, String method, String bearer, byte[]
+/// body, int[] status)`), used by the session-directory client. Null when the
+/// host app does not provide one; the directory is then unreachable.
+void SetAndroidHttpBridgeClass(void* global_class_reference);
+void* GetAndroidHttpBridgeClass();
+
 }  // namespace rex
 
 #endif  // REX_PLATFORM_ANDROID

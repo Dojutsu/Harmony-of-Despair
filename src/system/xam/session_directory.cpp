@@ -41,9 +41,18 @@
 #include <curl/curl.h>
 #include <sys/random.h>
 #include <unistd.h>
+#elif REX_PLATFORM_ANDROID
+// The directory client goes through the host app's Java HTTP stack (JNI); the
+// socket helpers are plain POSIX.
+#include <arpa/inet.h>
+#include <jni.h>
+#include <sys/random.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <rex/main_android.h>
 #else
-// Android and macOS: bionic does not pull the socket headers in transitively.
-// The libcurl-based directory client is GNU/Linux only for now.
+// macOS: bionic-style fallbacks; no directory transport yet.
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -745,7 +754,7 @@ bool IsSafeDirectoryUrl(std::string_view value) {
       if (suffix.front() != ':') return false;
       explicit_port = true; port = suffix.substr(1);
     }
-#if REX_PLATFORM_WIN32 || REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_WIN32 || REX_PLATFORM_GNU_LINUX || REX_PLATFORM_ANDROID
     std::array<uint8_t, 16> address{};
     const std::string text(host);
     if (inet_pton(AF_INET6, text.c_str(), address.data()) != 1) return false;
@@ -796,7 +805,7 @@ bool IsSafeDirectoryUrl(std::string_view value) {
 bool IsIpv4(std::string_view value) {
   if (value.empty())
     return true;
-#if REX_PLATFORM_WIN32 || REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_WIN32 || REX_PLATFORM_GNU_LINUX || REX_PLATFORM_ANDROID
   in_addr address{};
   std::string text(value);
   return inet_pton(AF_INET, text.c_str(), &address) == 1 && address.s_addr != htonl(INADDR_ANY) &&
@@ -973,7 +982,7 @@ std::optional<std::string> RandomUrlToken(size_t byte_count) {
   if (BCryptGenRandom(nullptr, bytes.data(), ULONG(bytes.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG) <
       0)
     return std::nullopt;
-#elif REX_PLATFORM_GNU_LINUX
+#elif REX_PLATFORM_GNU_LINUX || REX_PLATFORM_ANDROID
   size_t offset = 0;
   while (offset < bytes.size()) {
     const ssize_t count = ::getrandom(bytes.data() + offset, bytes.size() - offset, 0);
@@ -1195,6 +1204,107 @@ std::optional<HttpResult> Request(std::string_view base_url, std::wstring_view m
       response_status < 0 || response_status > UINT32_MAX)
     return std::nullopt;
   result.status = static_cast<uint32_t>(response_status);
+  return result;
+}
+#elif REX_PLATFORM_ANDROID
+// Runs the request on the Java side (HttpsURLConnection in HarmonyHttp), so the
+// system trust store and proxy settings apply. The host app registers the
+// bridge class from JNI_OnLoad; without it the directory stays unreachable.
+class AttachedJniEnv {
+ public:
+  explicit AttachedJniEnv(JavaVM* vm) : vm_(vm) {
+    if (!vm_) return;
+    void* env = nullptr;
+    const jint state = vm_->GetEnv(&env, JNI_VERSION_1_6);
+    if (state == JNI_OK) {
+      env_ = static_cast<JNIEnv*>(env);
+    } else if (state == JNI_EDETACHED) {
+      JNIEnv* attached = nullptr;
+      if (vm_->AttachCurrentThread(&attached, nullptr) == JNI_OK) {
+        env_ = attached;
+        detach_ = true;
+      }
+    }
+    if (env_ && env_->PushLocalFrame(16) != JNI_OK) env_ = nullptr;
+  }
+  ~AttachedJniEnv() {
+    if (env_) env_->PopLocalFrame(nullptr);
+    if (detach_) vm_->DetachCurrentThread();
+  }
+  JNIEnv* get() const { return env_; }
+
+ private:
+  JavaVM* vm_ = nullptr;
+  JNIEnv* env_ = nullptr;
+  bool detach_ = false;
+};
+
+std::optional<HttpResult> Request(std::string_view base_url, std::wstring_view method,
+                                  std::string_view relative_path, std::string_view body,
+                                  std::string_view bearer = {}) {
+  if (base_url.empty() || !IsSafeDirectoryUrl(base_url)) return std::nullopt;
+  auto* vm = static_cast<JavaVM*>(rex::GetAndroidJavaVM());
+  auto bridge = static_cast<jclass>(rex::GetAndroidHttpBridgeClass());
+  if (!vm || !bridge) return std::nullopt;
+
+  auto full_url = std::string(base_url);
+  while (full_url.ends_with('/'))
+    full_url.pop_back();
+  if (!relative_path.starts_with('/'))
+    full_url.push_back('/');
+  full_url.append(relative_path);
+  const std::string method_ascii(method.begin(), method.end());
+  if (method_ascii.empty() ||
+      !std::all_of(method_ascii.begin(), method_ascii.end(), [](unsigned char ch) {
+        return ch >= 'A' && ch <= 'Z';
+      }))
+    return std::nullopt;
+  if (body.size() > INT32_MAX || bearer.find_first_of("\r\n") != std::string_view::npos)
+    return std::nullopt;
+
+  AttachedJniEnv scope(vm);
+  JNIEnv* env = scope.get();
+  if (!env) return std::nullopt;
+  const jmethodID request = env->GetStaticMethodID(
+      bridge, "request",
+      "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[B[I)[B");
+  if (!request) {
+    env->ExceptionClear();
+    return std::nullopt;
+  }
+  const std::string bearer_text(bearer);
+  jstring url_string = env->NewStringUTF(full_url.c_str());
+  jstring method_string = env->NewStringUTF(method_ascii.c_str());
+  jstring bearer_string = env->NewStringUTF(bearer_text.c_str());
+  jbyteArray body_array = env->NewByteArray(jsize(body.size()));
+  jintArray status_array = env->NewIntArray(1);
+  if (!url_string || !method_string || !bearer_string || !body_array || !status_array) {
+    env->ExceptionClear();
+    return std::nullopt;
+  }
+  if (!body.empty())
+    env->SetByteArrayRegion(body_array, 0, jsize(body.size()),
+                            reinterpret_cast<const jbyte*>(body.data()));
+  auto response = static_cast<jbyteArray>(env->CallStaticObjectMethod(
+      bridge, request, url_string, method_string, bearer_string, body_array, status_array));
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+    return std::nullopt;
+  }
+  if (!response) return std::nullopt;
+  jint status = 0;
+  env->GetIntArrayRegion(status_array, 0, 1, &status);
+  const jsize length = env->GetArrayLength(response);
+  if (status <= 0 || length < 0 || size_t(length) > kMaxResponseBytes) return std::nullopt;
+  HttpResult result;
+  result.status = static_cast<uint32_t>(status);
+  result.body.resize(size_t(length));
+  if (length)
+    env->GetByteArrayRegion(response, 0, length, reinterpret_cast<jbyte*>(result.body.data()));
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+    return std::nullopt;
+  }
   return result;
 }
 #else

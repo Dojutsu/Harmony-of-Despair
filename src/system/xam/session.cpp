@@ -20,6 +20,8 @@
 #if REX_PLATFORM_GNU_LINUX
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#elif REX_PLATFORM_ANDROID
+#include "private_lan_crypto.h"
 #endif
 
 #if REX_PLATFORM_WIN32
@@ -368,6 +370,23 @@ std::optional<std::array<uint8_t, 16>> InviteLanMac(
   if (!HMAC(EVP_sha256(), attempt_id.data(), static_cast<int>(attempt_id.size()), input.data(),
             input.size(), digest.data(), &digest_size) ||
       digest_size < 16)
+    return std::nullopt;
+  std::array<uint8_t, 16> result{};
+  std::copy_n(digest.begin(), result.size(), result.begin());
+  return result;
+#elif REX_PLATFORM_ANDROID
+  if (attempt_id.size() != 32 ||
+      !std::all_of(attempt_id.begin(), attempt_id.end(), [](char value) {
+        return (value >= '0' && value <= '9') ||
+               (value >= 'a' && value <= 'f');
+      }))
+    return std::nullopt;
+  std::vector<uint8_t> input(domain.begin(), domain.end());
+  input.insert(input.end(), payload.begin(), payload.end());
+  std::array<uint8_t, 32> digest{};
+  if (!lan_crypto::HmacSha256(
+          lan_crypto::Bytes(reinterpret_cast<const uint8_t*>(attempt_id.data()), attempt_id.size()),
+          {lan_crypto::Bytes(input)}, digest))
     return std::nullopt;
   std::array<uint8_t, 16> result{};
   std::copy_n(digest.begin(), result.size(), result.begin());

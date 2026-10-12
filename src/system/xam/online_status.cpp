@@ -9,7 +9,7 @@
 #include <inja/third_party/include/nlohmann/json.hpp>
 #if REX_PLATFORM_WIN32
 #include <windows.h>
-#elif REX_PLATFORM_GNU_LINUX
+#elif REX_PLATFORM_GNU_LINUX || REX_PLATFORM_ANDROID
 #include <unistd.h>
 #endif
 
@@ -85,7 +85,7 @@ OnlineStatus::OnlineStatus(uint64_t xuid, std::string name, std::filesystem::pat
     path_ = directory / ("online-status-" + std::to_string(process_id_) + ".json");
     worker_ = std::thread([this] { Run(); });
   }
-#elif REX_PLATFORM_GNU_LINUX
+#elif REX_PLATFORM_GNU_LINUX || REX_PLATFORM_ANDROID
   if (!directory.empty()) {
     // Linux field 22 is the process start time in boot-relative clock ticks.
     // Parse after the final ')' because the process name may contain spaces

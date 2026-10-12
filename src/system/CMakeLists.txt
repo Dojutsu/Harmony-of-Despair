@@ -36,6 +36,7 @@ set(REXSYSTEM_SOURCES
     xam/gameplay_traversal.cpp
     xam/gameplay_datagram.cpp
     xam/private_lan_crypto.cpp
+    $<$<BOOL:${ANDROID}>:xam/portable_crypto.cpp>
     xam/private_lan_invitation.cpp
     xam/private_lan_payload.cpp
     xam/private_lan_authority.cpp

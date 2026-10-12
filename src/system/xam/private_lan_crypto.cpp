@@ -16,6 +16,10 @@
 #elif REX_PLATFORM_WIN32
 #include <windows.h>
 #include <bcrypt.h>
+#elif REX_PLATFORM_ANDROID
+#include <sys/random.h>
+#include <cerrno>
+#include "portable_crypto.h"
 #endif
 
 namespace rex::system::xam::lan_crypto {
@@ -106,7 +110,7 @@ bool Gcm(std::span<const uint8_t, 32> key, std::span<const uint8_t, 12> iv, Byte
 }  // namespace
 
 bool Available() noexcept {
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32 || REX_PLATFORM_ANDROID
   return true;
 #else
   return false;
@@ -146,6 +150,18 @@ bool Random(std::span<uint8_t> output) noexcept {
   return FitsUlong(output.size()) &&
          Ok(BCryptGenRandom(nullptr, output.data(), ULONG(output.size()),
                             BCRYPT_USE_SYSTEM_PREFERRED_RNG));
+#elif REX_PLATFORM_ANDROID
+  size_t offset = 0;
+  while (offset < output.size()) {
+    const ssize_t count = ::getrandom(output.data() + offset, output.size() - offset, 0);
+    if (count < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    if (!count) return false;
+    offset += static_cast<size_t>(count);
+  }
+  return true;
 #else
   return false;
 #endif
@@ -161,6 +177,9 @@ bool Sha256(std::initializer_list<Bytes> parts, std::span<uint8_t, 32> output) n
   return EVP_DigestFinal_ex(digest.get(), output.data(), &written) == 1 && written == output.size();
 #elif REX_PLATFORM_WIN32
   return Digest({}, false, parts, output);
+#elif REX_PLATFORM_ANDROID
+  portable_crypto::Sha256Digest(parts, output);
+  return true;
 #else
   (void)parts; (void)output; return false;
 #endif
@@ -181,6 +200,9 @@ bool HmacSha256(Bytes key, std::initializer_list<Bytes> parts,
   } catch (...) { return false; }
 #elif REX_PLATFORM_WIN32
   return Digest(key, true, parts, output);
+#elif REX_PLATFORM_ANDROID
+  portable_crypto::HmacSha256(key, parts, output);
+  return true;
 #else
   (void)parts; (void)output; return false;
 #endif
@@ -227,6 +249,8 @@ bool HkdfSha256(Bytes salt, Bytes key, std::initializer_list<Bytes> info,
     produced += count;
   }
   return true;
+#elif REX_PLATFORM_ANDROID
+  return portable_crypto::HkdfSha256(salt, key, info, output);
 #else
   (void)salt; (void)info; return false;
 #endif
@@ -251,6 +275,9 @@ bool AesGcmSeal(std::span<const uint8_t, 32> key, std::span<const uint8_t, 12> i
       EVP_CIPHER_CTX_ctrl(cipher.get(), EVP_CTRL_GCM_GET_TAG, int(tag.size()), tag.data()) == 1;
 #elif REX_PLATFORM_WIN32
   return Gcm(key, iv, aad, plaintext, ciphertext, tag.data(), true);
+#elif REX_PLATFORM_ANDROID
+  portable_crypto::AesGcmSeal(key, iv, aad, plaintext, ciphertext, tag);
+  return true;
 #else
   (void)key; (void)iv; (void)aad; (void)tag; return false;
 #endif
@@ -279,6 +306,8 @@ bool AesGcmOpen(std::span<const uint8_t, 32> key, std::span<const uint8_t, 12> i
   std::array<uint8_t, 16> expected{};
   std::copy(tag.begin(), tag.end(), expected.begin());
   return Gcm(key, iv, aad, ciphertext, plaintext, expected.data(), false);
+#elif REX_PLATFORM_ANDROID
+  return portable_crypto::AesGcmOpen(key, iv, aad, ciphertext, tag, plaintext);
 #else
   (void)key; (void)iv; (void)aad; (void)tag; return false;
 #endif
@@ -291,6 +320,8 @@ struct X25519Key::State {
 #elif REX_PLATFORM_WIN32
   Algorithm algorithm;
   Key key;
+#elif REX_PLATFORM_ANDROID
+  SensitiveArray<32> private_key;
 #endif
 };
 X25519Key::X25519Key() noexcept = default;
@@ -340,6 +371,9 @@ std::optional<X25519Key> X25519Key::Generate() noexcept {
     std::memcpy(&header, blob.data(), sizeof(header));
     if (header.dwMagic != BCRYPT_ECDH_PUBLIC_GENERIC_MAGIC || header.cbKey != 32) return std::nullopt;
     std::copy_n(blob.begin() + sizeof(header), 32, state.public_key.begin());
+#elif REX_PLATFORM_ANDROID
+    if (!Random(state.private_key.bytes)) return std::nullopt;
+    portable_crypto::X25519BasePoint(state.public_key, state.private_key.bytes);
 #else
     return std::nullopt;
 #endif
@@ -381,6 +415,8 @@ bool X25519Key::Agree(std::span<const uint8_t, 32> peer, std::span<uint8_t, 32> 
     return false;
   // CNG returns the raw Curve25519 secret byte-reversed relative to RFC 7748.
   std::reverse_copy(raw.bytes.begin(), raw.bytes.end(), shared.begin());
+#elif REX_PLATFORM_ANDROID
+  portable_crypto::X25519(shared, state_->private_key.bytes, peer);
 #else
   (void)peer; (void)shared; return false;
 #endif
