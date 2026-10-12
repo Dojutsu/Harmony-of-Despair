@@ -28,7 +28,7 @@ trap 'rm -rf "$WORK"' EXIT
 echo "[1/5] Java"
 mkdir -p "$WORK/classes"
 find "$SDL_JAVA" "$APP/java" -name '*.java' > "$WORK/sources.txt"
-javac -source 17 -target 17 -nowarn -bootclasspath "$ANDROID_JAR" -classpath "$ANDROID_JAR" \
+javac -source 1.8 -target 1.8 -nowarn -Xlint:-options -bootclasspath "$ANDROID_JAR" -classpath "$ANDROID_JAR" \
     -d "$WORK/classes" @"$WORK/sources.txt"
 "$BT/d8" --release --min-api 29 --lib "$ANDROID_JAR" --output "$WORK" \
     $(find "$WORK/classes" -name '*.class')
