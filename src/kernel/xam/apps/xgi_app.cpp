@@ -465,6 +465,32 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
           return X_E_INVALIDARG;
         members.push_back(std::move(member));
       }
+      if (is_local && session->host_xuid != kernel_state_->user_profile()->xuid() &&
+          members.size() == 1) {
+        // A directory-admitted client that re-registers its own slot type
+        // (leave, then join-local after reading the host's lobby data) keeps
+        // its admission: the host already holds this member in the pool it
+        // chose, and no second discovery exchange can reach the host through
+        // the traversed path once the invite admission has completed.
+        std::lock_guard session_lock(*session->mutex);
+        const auto& request = members.front();
+        auto existing = std::find_if(session->members.begin(), session->members.end(),
+            [&](const auto& current) { return current.local && current.xuid == request.xuid; });
+        if (existing != session->members.end() && existing->gameplay_admission) {
+          const bool previous = existing->private_slot;
+          existing->private_slot = request.private_slot;
+          const auto private_count = uint64_t(std::count_if(
+              session->members.begin(), session->members.end(),
+              [](const auto& current) { return current.private_slot; }));
+          if (private_count > session->max_private_slots ||
+              session->members.size() - private_count > session->max_public_slots)
+            existing->private_slot = previous;
+          existing->user_index = request.user_index;
+          REXKRNL_INFO("INVITE_DIAG XGI_JOIN_RESULT=SUCCESS private_request={} members={} reslot=1 private_slot={}",
+                       request.private_slot, session->members.size(), existing->private_slot);
+          return X_E_SUCCESS;
+        }
+      }
       if (!is_local ||
           session->host_xuid == kernel_state_->user_profile()->xuid())
         return kernel_state_->session_manager()->registry().JoinBatch(session,
@@ -533,6 +559,23 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                                  : memory::load_and_swap<uint64_t>(
                                        memory_->TranslateVirtual(xuid_array_ptr + i * 8));
         if (is_local && session->host_xuid != xuid) {
+          bool admitted_client = false;
+          {
+            std::lock_guard session_lock(*session->mutex);
+            admitted_client = !session->private_lan_invitation &&
+                std::any_of(session->members.begin(), session->members.end(),
+                    [&](const auto& member) {
+                      return member.local && member.xuid == xuid && bool(member.gameplay_admission);
+                    });
+          }
+          if (admitted_client) {
+            // The title re-registers its slot type with leave + join-local.
+            // A directory-admitted membership stays in place: the host learns
+            // of a real departure through the directory when the gameplay
+            // claim is revoked, and a discovery leave cannot traverse NAT.
+            REXKRNL_INFO("XGISessionLeaveLocal: keeping directory-admitted membership xuid={:016X}", xuid);
+            continue;
+          }
           auto updated = kernel_state_->session_manager()->discovery().Leave(*session, xuid, 500);
           if (updated) {
             kernel_state_->session_manager()->registry().UpsertDiscovered(std::move(*updated));
