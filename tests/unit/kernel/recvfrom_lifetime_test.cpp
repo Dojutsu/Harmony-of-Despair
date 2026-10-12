@@ -998,6 +998,66 @@ static void RunPendingProtectedSends(KernelState* kernel) {
 }
 #endif
 
+#if REX_PLATFORM_WIN32
+// Windows counterpart of RunLinuxSelectRetirement: a guest select blocked on a
+// socket must return WSAENOTSOCK when another guest thread closes that socket.
+static void RunWindowsSelectRetirement(KernelState* kernel) {
+  auto receiver = make_object<XSocket>(kernel);
+  Check(receiver->Initialize(XSocket::X_AF_INET, XSocket::X_SOCK_DGRAM,
+                             XSocket::X_IPPROTO_UDP) == X_STATUS_SUCCESS, "windows select retire receiver");
+  N_XSOCKADDR_IN address{}; address.sin_port = 0; address.sin_family = AF_INET; address.sin_addr = INADDR_LOOPBACK;
+  Check(receiver->Bind(&address, sizeof(address)) == X_STATUS_SUCCESS, "windows select retire loopback");
+  auto operation = receiver->AcquireNativeLease();
+  const auto descriptor = static_cast<SOCKET>(operation.handle());
+  sockaddr_in bound{}; int bound_size = sizeof(bound);
+  Check(getsockname(descriptor, reinterpret_cast<sockaddr*>(&bound), &bound_size) == 0,
+        "windows select retire bound port");
+  const auto handle = receiver->handle();
+  x_fd_set reads{}; reads.fd_count = 1; reads.fd_array[0] = handle;
+  const auto before = reads;
+  std::promise<void> started;
+  int result = 777; uint32_t error = 0;
+  auto waiter = object_ref<XHostThread>(new XHostThread(kernel, 128 * 1024, 0, [&] {
+    started.set_value();
+    result = NetDll_select_entry(1, 0, ppc_ptr_t<x_fd_set>::from_host(&reads),
+                                 nullptr, nullptr, nullptr);
+    error = XThread::GetLastError();
+    return 0;
+  }));
+  Check(XSUCCEEDED(waiter->Create()), "windows select retire thread");
+  started.get_future().wait();
+  // Windows exposes no per-thread syscall state; give the waiter time to block.
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  const bool waiting_before_close = result == 777;
+  Check(NetDll_closesocket_entry(1, handle) == 0, "windows guest close");
+  uint64_t timeout = static_cast<uint64_t>(-30000000ll);  // 3 s relative
+  const bool woke = waiter->Wait(0, 0, 0, &timeout) == 0;
+  if (!woke) {
+    // Release a stranded waiter with one datagram so a failure cannot hang teardown.
+    const SOCKET poke = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    ::sendto(poke, "x", 1, 0, reinterpret_cast<const sockaddr*>(&bound), sizeof(bound));
+    ::closesocket(poke);
+    uint64_t drain = static_cast<uint64_t>(-30000000ll);
+    waiter->Wait(0, 0, 0, &drain);
+  }
+  Check(waiting_before_close, "windows guest select was blocked before close");
+  Check(woke, "guest close wakes a blocked Windows select");
+  Check(result == -1 && error == 10038, "retired Windows select returns WSAENOTSOCK");
+  Check(std::memcmp(&reads, &before, sizeof(reads)) == 0, "retired Windows select guest set unchanged");
+  int type = 0, type_size = sizeof(type);
+  Check(operation.retired() &&
+            getsockopt(descriptor, SOL_SOCKET, SO_TYPE, reinterpret_cast<char*>(&type), &type_size) == 0,
+        "windows select native socket retained while leased");
+  operation = {};
+  type_size = sizeof(type);
+  Check(getsockopt(descriptor, SOL_SOCKET, SO_TYPE, reinterpret_cast<char*>(&type), &type_size) ==
+                SOCKET_ERROR && WSAGetLastError() == WSAENOTSOCK,
+        "windows select native socket closed after last lease");
+  waiter.reset(); receiver.reset();
+  std::cout << "Windows blocked guest select retirement checks passed\n";
+}
+#endif
+
 int main(int argc, char** argv) {
   std::cout.setf(std::ios::unitbuf);
 #if REX_PLATFORM_WIN32
@@ -1030,6 +1090,9 @@ int main(int argc, char** argv) {
         RunLinuxSelectGuestIdentity(runtime.kernel_state());
         RunLinuxSelectRetirement(runtime.kernel_state());
       }
+#endif
+#if REX_PLATFORM_WIN32
+      if (!stale) RunWindowsSelectRetirement(runtime.kernel_state());
 #endif
     } catch (const std::exception& e) {
       std::cerr << e.what() << '\n';
