@@ -44,6 +44,24 @@ void SetAndroidApplicationPaths(std::filesystem::path files_dir,
   NativeLibraryDirStorage() = std::move(native_library_dir);
 }
 
+namespace {
+void*& JavaVMStorage() {
+  static void* vm = nullptr;
+  return vm;
+}
+void*& HttpBridgeClassStorage() {
+  static void* cls = nullptr;
+  return cls;
+}
+}  // namespace
+
+void SetAndroidJavaVM(void* vm) { JavaVMStorage() = vm; }
+void* GetAndroidJavaVM() { return JavaVMStorage(); }
+void SetAndroidHttpBridgeClass(void* global_class_reference) {
+  HttpBridgeClassStorage() = global_class_reference;
+}
+void* GetAndroidHttpBridgeClass() { return HttpBridgeClassStorage(); }
+
 }  // namespace rex
 
 #endif  // REX_PLATFORM_ANDROID
