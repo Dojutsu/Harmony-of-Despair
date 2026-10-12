@@ -38,6 +38,10 @@ static constexpr SOCKET kInvalidSocket = INVALID_SOCKET;
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#if REX_PLATFORM_ANDROID
+#include <ifaddrs.h>
+#include <net/if.h>
+#endif
 using SOCKET = int;
 using socket_len_t = socklen_t;
 static constexpr SOCKET kInvalidSocket = -1;
@@ -2770,6 +2774,45 @@ uint32_t LanDiscoveryService::DetermineLanIpv4() {
     REXSYS_ERROR("Invalid configured LAN bind address '{}'", configured);
     return htonl(INADDR_LOOPBACK);
   }
+#if REX_PLATFORM_ANDROID
+  // Android reports its host name as "localhost", so the resolver path below
+  // always yields the loopback address. Advertising that as the LAN endpoint
+  // made every peer reject the response (tuple mismatch) and binding the join
+  // socket to it dropped all outgoing traversal traffic. Prefer the interface
+  // the default route uses; a connected UDP socket sends nothing.
+  {
+    SOCKET probe = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (probe != kInvalidSocket) {
+      sockaddr_in target{};
+      target.sin_family = AF_INET;
+      target.sin_port = htons(53);
+      inet_pton(AF_INET, "1.1.1.1", &target.sin_addr);
+      sockaddr_in local{};
+      socket_len_t local_length = sizeof(local);
+      const bool routed =
+          connect(probe, reinterpret_cast<sockaddr*>(&target), sizeof(target)) == 0 &&
+          getsockname(probe, reinterpret_cast<sockaddr*>(&local), &local_length) == 0;
+      CloseSocket(probe);
+      if (routed && local.sin_addr.s_addr && local.sin_addr.s_addr != htonl(INADDR_LOOPBACK))
+        return local.sin_addr.s_addr;
+    }
+    ifaddrs* interfaces = nullptr;
+    if (getifaddrs(&interfaces) == 0) {
+      uint32_t found = 0;
+      for (auto* item = interfaces; item; item = item->ifa_next) {
+        if (!item->ifa_addr || item->ifa_addr->sa_family != AF_INET ||
+            (item->ifa_flags & IFF_LOOPBACK) || !(item->ifa_flags & IFF_UP) ||
+            !(item->ifa_flags & IFF_RUNNING))
+          continue;
+        const auto candidate = reinterpret_cast<sockaddr_in*>(item->ifa_addr)->sin_addr.s_addr;
+        if (!found) found = candidate;
+        if (IsPrivateLanIpv4(candidate)) { found = candidate; break; }
+      }
+      freeifaddrs(interfaces);
+      if (found) return found;
+    }
+  }
+#endif
   char hostname[256]{};
   if (gethostname(hostname, sizeof(hostname)) != 0)
     return htonl(INADDR_LOOPBACK);
