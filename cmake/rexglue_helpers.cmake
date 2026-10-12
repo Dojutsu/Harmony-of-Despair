@@ -45,6 +45,11 @@ endfunction()
 # runtime DLL staging is the host's job (see rexglue_configure_target).
 #==========================================================
 function(rexglue_apply_target_settings target_name)
+    if(ANDROID)
+        # The NDK's libc++ gates std::jthread/std::stop_token behind this flag;
+        # the runtime's public headers use them, so every consumer needs it.
+        target_compile_options(${target_name} PRIVATE -fexperimental-library)
+    endif()
     if(UNIX AND NOT APPLE)
         # Large executable support
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
