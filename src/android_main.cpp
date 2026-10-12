@@ -119,9 +119,9 @@ int main(int argc, char** argv) {
     if (argv[i] && *argv[i]) java_args.emplace_back(argv[i]);
   }
   std::vector<std::string> args = BuildArguments(java_args);
-  std::vector<char*> argv;
-  argv.reserve(args.size() + 1);
-  for (auto& a : args) argv.push_back(a.data());
-  argv.push_back(nullptr);
-  return rex::ui::RunWindowedApp(int(args.size()), argv.data());
+  std::vector<char*> native_argv;
+  native_argv.reserve(args.size() + 1);
+  for (auto& a : args) native_argv.push_back(a.data());
+  native_argv.push_back(nullptr);
+  return rex::ui::RunWindowedApp(int(args.size()), native_argv.data());
 }
