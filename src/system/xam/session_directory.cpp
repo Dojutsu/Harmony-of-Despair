@@ -2591,8 +2591,25 @@ class SessionDirectoryClient::Impl {
 
     for (const auto& cancellation : cancellations) {
       ClientAdmissionTransportRequest request;
-      request.action = cancellation.admission_armed ? ClientAdmissionTransportAction::kRevoke
-                                                    : ClientAdmissionTransportAction::kDelete;
+      // An armed admission the title has already joined with (a gameplay client
+      // context tracks its attempt) is finished, not abandoned. Complete it:
+      // the directory still attests a completed attempt for the host's roster
+      // sync, whereas a revoked one makes that sync fail with 409 forever when
+      // the host had not synced the new member yet.
+      bool joined_with = false;
+      {
+        std::lock_guard gameplay_lock(gameplay_clients_mutex);
+        joined_with = std::any_of(gameplay_clients.begin(), gameplay_clients.end(),
+            [&](const auto& context) {
+              return !context->cancelled && context->attempt.attempt_id == cancellation.attempt_id;
+            });
+      }
+      if (cancellation.admission_armed && joined_with)
+        REXSYS_INFO("Session directory: completing joined admission attempt={} instead of revoking",
+                    cancellation.attempt_id.substr(0, 8));
+      request.action = cancellation.admission_armed && !joined_with
+                           ? ClientAdmissionTransportAction::kRevoke
+                           : ClientAdmissionTransportAction::kDelete;
       request.local_user_index = cancellation.local_user_index;
       request.lifecycle_token = cancellation.lifecycle_token;
       request.directory_session_id = cancellation.directory_session_id;
