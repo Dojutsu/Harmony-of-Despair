@@ -44,7 +44,7 @@
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
 #include <sys/uio.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
@@ -145,18 +145,18 @@ void FailSocket(int posix_error) {
   errno = posix_error;
 #endif
 }
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
 constexpr int kNoSignal = MSG_NOSIGNAL;
 #else
 constexpr int kNoSignal = 0;
 #endif
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_LINUX || REX_PLATFORM_WIN32
 std::optional<std::vector<uint8_t>> ProtectedGameplayWire(uint64_t socket,
     xam::LanAddress logical, const uint8_t* guest_data, uint32_t length) {
   if (length > xam::kGameplayMaximumPlaintextBytes) { FailSocket(EMSGSIZE); return std::nullopt; }
   std::vector<uint8_t> staged(length);
   if (length) {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
     // Preserve a bad guest pointer as EFAULT; never dereference it in userspace.
     iovec local{staged.data(), length}, remote{const_cast<uint8_t*>(guest_data), length};
     if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) != ssize_t(length)) {
@@ -181,7 +181,7 @@ std::optional<std::vector<uint8_t>> ProtectedGameplayWire(uint64_t socket,
 
 struct XSocket::NativeSocketState {
   explicit NativeSocketState(uint64_t value) : handle(value) {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
     cancellation = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 #endif
 #if REX_PLATFORM_WIN32
@@ -215,7 +215,7 @@ struct XSocket::NativeSocketState {
     const int error = errno;
 #endif
     Finalize();
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
     if (cancellation >= 0) ::close(cancellation);
 #endif
 #if REX_PLATFORM_WIN32
@@ -226,7 +226,7 @@ struct XSocket::NativeSocketState {
 #endif
   }
   bool valid() const {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
     return cancellation >= 0;
 #else
     return true;
@@ -294,7 +294,7 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
     return X_STATUS_UNSUCCESSFUL;
   }
   const auto handle = socket(af, type
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
       | SOCK_CLOEXEC
 #endif
       , proto == Protocol::X_IPPROTO_VDP ? Protocol::X_IPPROTO_UDP : proto);
@@ -332,7 +332,7 @@ X_STATUS XSocket::Close() {
     state->retired.store(true, std::memory_order_release);
   }
   REXSYS_INFO("XSocket::Close: native={}", state->handle);
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
   const uint64_t wake = 1;
   ssize_t written;
   do { written = ::write(state->cancellation, &wake, sizeof(wake)); }
@@ -520,7 +520,7 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
   if (!operation) return X_STATUS_UNSUCCESSFUL;
   const auto handle = operation.handle();
   int ret;
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
   // UDP only associates an address: no handshake or blocking connect wait,
   // and no native mode change. Connected/listening TCP also needs no handshake.
   sockaddr_storage peer{}; socklen_t peer_length = sizeof(peer);
@@ -682,7 +682,7 @@ object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
   sockaddr n_sockaddr;
   socklen_t n_name_len = sizeof(sockaddr);
   uintptr_t ret =
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
       accept4(handle, &n_sockaddr, &n_name_len, SOCK_CLOEXEC);
 #else
       accept(handle, &n_sockaddr, &n_name_len);
@@ -754,7 +754,7 @@ int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
   const auto handle = operation.handle();
   std::shared_lock connect_window(native_connect_window_mutex_);
   if (operation.retired()) return ClosedNativeSocket();
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
   const int result = recv(handle, reinterpret_cast<char*>(buf), buf_len,
                            flags | (type_ == X_SOCK_DGRAM ? MSG_TRUNC : 0));
   if (operation.retired()) return ClosedNativeSocket();
@@ -809,7 +809,7 @@ int XSocket::RecvFromNative(const NativeLease& operation, uint8_t* buf, uint32_t
   // Stage ordinary UDP too: membership may become scoped during this receive.
   // Keep a complete56-byte NAT control frame plus one oversize byte, even
   // when the guest requests fewer bytes or only polls with a zero-length buffer.
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_LINUX || REX_PLATFORM_WIN32
   // Membership may become scoped while a receive is blocked. Always retain
   // the complete bounded wire datagram so that a fitting plaintext is not lost.
   const uint32_t receive_capacity = type_ == X_SOCK_DGRAM ? 65536u : buf_len;
@@ -823,7 +823,7 @@ int XSocket::RecvFromNative(const NativeLease& operation, uint8_t* buf, uint32_t
   std::vector<uint8_t> authenticated_plaintext;
   auto copy_received = [&](size_t count) {
     if (!count || type_ != X_SOCK_DGRAM) return true;
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
     // A userspace memcpy would turn a native EFAULT into a host crash or bypass
     // kernel partial-write semantics. Copy only within this exact process.
     iovec local{receive_data, count}, remote{buf, count};
@@ -868,7 +868,7 @@ int XSocket::RecvFromNative(const NativeLease& operation, uint8_t* buf, uint32_t
   };
 
 retry_native_receive:
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_LINUX || REX_PLATFORM_WIN32
   if (type_ == X_SOCK_DGRAM) receive_data = receive_storage.data();
 #endif
   if (operation.retired()) return ClosedNativeSocket();
@@ -876,7 +876,7 @@ retry_native_receive:
   sockaddr_in nfrom{};
   socklen_t nfromlen = sizeof(sockaddr_in);
   int ret = recvfrom(handle, reinterpret_cast<char*>(receive_data), receive_capacity,
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
                      flags | (type_ == X_SOCK_DGRAM ? MSG_TRUNC : 0),
 #else
                      flags,
@@ -910,7 +910,7 @@ retry_native_receive:
       goto retry_native_receive;
     }
   }
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_LINUX || REX_PLATFORM_WIN32
   if (scoped && type_ == X_SOCK_DGRAM) {
     if (!logical || uint32_t(ret) > receive_capacity ||
         !xam::OpenGameplayDatagram(handle, *logical,
@@ -991,7 +991,7 @@ bool XSocket::PumpNatControl() {
   socklen_t source_length = sizeof(source);
   const int peeked = recvfrom(handle, reinterpret_cast<char*>(packet.data()),
                               int(packet.size()), MSG_PEEK
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
                               | MSG_DONTWAIT
 #endif
                               ,
@@ -1004,7 +1004,7 @@ bool XSocket::PumpNatControl() {
   source_length = sizeof(source);
   const int received = recvfrom(handle, reinterpret_cast<char*>(packet.data()),
                                 int(packet.size()),
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
                                 MSG_DONTWAIT,
 #else
                                 0,
@@ -1098,7 +1098,7 @@ int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
   const auto handle = operation.handle();
   std::shared_lock connect_window(native_connect_window_mutex_);
   if (operation.retired()) return ClosedNativeSocket();
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_LINUX || REX_PLATFORM_WIN32
   if (type_ == X_SOCK_DGRAM && xam::IsAuthorizedGameplaySocket(handle)) {
     sockaddr_in native{}; socklen_t length = sizeof(native);
     if (getpeername(handle, reinterpret_cast<sockaddr*>(&native), &length) < 0) { FailSocket(EDESTADDRREQ); return -1; }
@@ -1115,7 +1115,7 @@ int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
   }
 #endif
   return send(handle, reinterpret_cast<const char*>(buf), buf_len, flags
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
               | MSG_NOSIGNAL
 #endif
               );
@@ -1153,7 +1153,7 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
   const auto handle = operation.handle();
   std::shared_lock connect_window(native_connect_window_mutex_);
   if (operation.retired()) return ClosedNativeSocket();
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_LINUX || REX_PLATFORM_WIN32
   // Validate the complete IPv4 destination before routing or burning a nonce.
   // Never pass an untrusted length for our fixed-size native stack object.
   N_XSOCKADDR_IN staged_to{};
@@ -1162,7 +1162,7 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
     return -1;
   }
   if (to) {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
     iovec local{&staged_to, sizeof(staged_to)}, remote{to, sizeof(staged_to)};
     if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) != ssize_t(sizeof(staged_to))) {
       FailSocket(EFAULT);
@@ -1238,7 +1238,7 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
     }
   }
 
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_LINUX || REX_PLATFORM_WIN32
   if (type_ == X_SOCK_DGRAM && xam::IsAuthorizedGameplaySocket(handle)) {
     if (!to) {
       socklen_t length = sizeof(nto);
@@ -1265,11 +1265,11 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
   }
 #endif
   const int result = sendto(handle, reinterpret_cast<char*>(buf), buf_len, flags
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
                 | MSG_NOSIGNAL
 #endif
                 , to ? (sockaddr*)&nto : nullptr,
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
                   to ? sizeof(nto) : 0);
 #else
                   to_len);

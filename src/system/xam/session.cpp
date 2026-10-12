@@ -561,7 +561,7 @@ void CloseSocket(SOCKET value) {
 }
 int ReceiveDatagram(SOCKET socket, char* buffer, size_t size, int flags,
                     sockaddr* source, socket_len_t* source_length) {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
   // Linux otherwise reports the copied prefix length for oversized UDP. That
   // prefix can look exactly like a valid discovery packet. Preserve Winsock's
   // rejection of an oversized datagram instead of parsing a truncated frame.
