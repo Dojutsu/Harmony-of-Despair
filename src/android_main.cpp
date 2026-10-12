@@ -10,6 +10,7 @@
 #include <SDL3/SDL_main.h>
 
 #include <dlfcn.h>
+#include <jni.h>
 
 #include <cstdlib>
 #include <filesystem>
@@ -27,7 +28,7 @@ namespace {
 // "All files access" (MANAGE_EXTERNAL_STORAGE).
 constexpr const char* kDefaultGameRoot = "/sdcard/HoD";
 
-std::vector<std::string> BuildArguments() {
+std::vector<std::string> BuildArguments(const std::vector<std::string>& java_args) {
   std::vector<std::string> args;
   args.emplace_back("harmonyrecomp");
 
@@ -36,8 +37,10 @@ std::vector<std::string> BuildArguments() {
     game_root = env_root;
   }
 
+  // Flags from the Java launcher (player name, online mode, invite code) and
+  // from the optional text file next to the game data.
   const std::filesystem::path extra_args_file = game_root / "android-args.txt";
-  std::vector<std::string> extra;
+  std::vector<std::string> extra(java_args);
   if (std::ifstream in(extra_args_file); in) {
     std::string line;
     while (std::getline(in, line)) {
@@ -73,7 +76,24 @@ std::vector<std::string> BuildArguments() {
 
 }  // namespace
 
-int main(int, char**) {
+// Called by the Java VM when SDLActivity loads libmain.so. Records the VM and
+// the app's HTTP bridge class so the runtime's session-directory client can
+// call into Java from any native thread.
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
+  JNIEnv* env = nullptr;
+  if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
+  rex::SetAndroidJavaVM(vm);
+  jclass bridge = env->FindClass("net/dojutsu/harmony/HarmonyHttp");
+  if (bridge) {
+    rex::SetAndroidHttpBridgeClass(env->NewGlobalRef(bridge));
+    env->DeleteLocalRef(bridge);
+  } else {
+    env->ExceptionClear();
+  }
+  return JNI_VERSION_1_6;
+}
+
+int main(int argc, char** argv) {
   // SDL's Java side knows the app's private directories; the game stores its
   // config, saves and cache there unless flags say otherwise.
   const char* internal = SDL_GetAndroidInternalStoragePath();
@@ -93,7 +113,12 @@ int main(int, char**) {
   }
   rex::SetAndroidApplicationPaths(files_dir, native_dir);
 
-  std::vector<std::string> args = BuildArguments();
+  // SDL passes the Java activity's getArguments() after its own argv[0].
+  std::vector<std::string> java_args;
+  for (int i = 1; i < argc; ++i) {
+    if (argv[i] && *argv[i]) java_args.emplace_back(argv[i]);
+  }
+  std::vector<std::string> args = BuildArguments(java_args);
   std::vector<char*> argv;
   argv.reserve(args.size() + 1);
   for (auto& a : args) argv.push_back(a.data());

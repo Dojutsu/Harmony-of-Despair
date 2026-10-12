@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="net.dojutsu.harmony"
-    android:versionCode="1"
-    android:versionName="0.1"
+    android:versionCode="2"
+    android:versionName="0.2"
     android:installLocation="internalOnly">
 
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33" />
@@ -30,12 +30,8 @@
         android:extractNativeLibs="true"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
 
-        <activity android:name=".HarmonyActivity"
+        <activity android:name=".LauncherActivity"
             android:label="Harmony of Despair"
-            android:alwaysRetainTaskState="true"
-            android:launchMode="singleInstance"
-            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
-            android:preferMinimalPostProcessing="true"
             android:screenOrientation="sensorLandscape"
             android:exported="true">
             <intent-filter>
@@ -43,5 +39,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity android:name=".HarmonyActivity"
+            android:label="Harmony of Despair"
+            android:alwaysRetainTaskState="true"
+            android:launchMode="singleInstance"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
+            android:preferMinimalPostProcessing="true"
+            android:screenOrientation="sensorLandscape"
+            android:exported="true" />
     </application>
 </manifest>
