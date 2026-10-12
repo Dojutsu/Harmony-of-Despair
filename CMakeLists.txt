@@ -21,6 +21,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
         "Use native generated guest memory access on Linux x86-64" ON)
 endif()
 
+if(ANDROID)
+    # Every shared library the APK ships (the game as libmain.so and the
+    # per-module libraries) lands in one folder for packaging.
+    set(HARMONY_ANDROID_LIB_DIR "${CMAKE_BINARY_DIR}/android-libs/arm64-v8a")
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${HARMONY_ANDROID_LIB_DIR}")
+endif()
+
 include(generated/rexglue.cmake)
 
 # rexruntime exposes public UI headers that include imgui.h, but its build-tree
@@ -44,6 +51,10 @@ set(HARMONYRECOMP_SOURCES
 
 if(WIN32)
     add_executable(harmonyrecomp WIN32 ${HARMONYRECOMP_SOURCES})
+elseif(ANDROID)
+    # SDLActivity loads the game as libmain.so and enters through SDL_main.
+    add_library(harmonyrecomp SHARED ${HARMONYRECOMP_SOURCES})
+    set_target_properties(harmonyrecomp PROPERTIES OUTPUT_NAME main)
 else()
     add_executable(harmonyrecomp ${HARMONYRECOMP_SOURCES})
 endif()
@@ -54,8 +65,28 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(harmonyrecomp PRIVATE src/linux_startup.cpp src/linux_graphics.cpp src/linux_title_capture.cpp)
     # The opt-in Vulkan diagnostic includes the SDK's RenderDoc API header.
     target_link_libraries(harmonyrecomp PRIVATE renderdoc)
+elseif(ANDROID)
+    rexglue_setup_target(harmonyrecomp GPU_PLUGINS xenos
+        ENTRYPOINT "${CMAKE_CURRENT_SOURCE_DIR}/src/android_main.cpp")
+    target_link_libraries(harmonyrecomp PRIVATE SDL3::SDL3 android log)
+    # The SDK's shared pieces (runtime, SDL, GPU plugin) join the game and its
+    # module libraries in the packaging folder.
+    add_custom_target(harmonyrecomp_android_libs ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${HARMONY_ANDROID_LIB_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:rex::runtime>
+            $<TARGET_FILE:SDL3::SDL3>
+            $<TARGET_FILE:rex::gpu-xenos>
+            "${HARMONY_ANDROID_LIB_DIR}"
+        VERBATIM)
+    add_dependencies(harmonyrecomp_android_libs harmonyrecomp)
 else()
     rexglue_setup_target(harmonyrecomp GPU_PLUGINS xenos)
+endif()
+
+if(ANDROID)
+    # Host-side tools and tests are not built for the device.
+    return()
 endif()
 
 add_executable(harmonyrecomp-import

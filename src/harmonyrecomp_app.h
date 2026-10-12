@@ -15,20 +15,23 @@
 #include <string>
 
 #include "game_data.h"
-#if defined(__linux__)
+#if defined(__ANDROID__)
+#include <rex/main_android.h>
+#endif
+#if defined(__linux__) && !defined(__ANDROID__)
 #include "linux_user_paths.h"
 #include "linux_title_capture.h"
 REXCVAR_DECLARE(std::string, harmony_config_root);
 #endif
 
 class HarmonyrecompApp : public rex::ReXApp {
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
   std::jthread title_capture_;
 #endif
  public:
   using rex::ReXApp::ReXApp;
 
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
   void OnPostLaunchModule(rex::system::XThread*) override {
     if (runtime() && runtime()->graphics_system()) {
       title_capture_ = harmony::StartLinuxTitleCapture(runtime()->graphics_system()->presenter());
@@ -50,12 +53,27 @@ class HarmonyrecompApp : public rex::ReXApp {
   }
 
   void OnConfigurePaths(rex::PathConfig& paths) override {
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
     const char* xdg = std::getenv("XDG_CONFIG_HOME");
     const char* home = std::getenv("HOME");
     paths.config_path = harmony::LinuxConfigPath(REXCVAR_GET(harmony_config_root),
         xdg ? xdg : "", home ? home : "");
     std::filesystem::create_directories(paths.config_path.parent_path());
+#elif defined(__ANDROID__)
+    // /proc/self/exe is the Android app process, so the engine's defaults next
+    // to "the executable" are unusable; keep everything in the app's own
+    // files directory, which needs no permission.
+    const std::filesystem::path& files_dir = rex::GetAndroidFilesDir();
+    if (!files_dir.empty()) {
+      paths.config_path = files_dir / "harmonyrecomp.toml";
+      if (paths.user_data_root.empty() || !std::filesystem::exists(paths.user_data_root)) {
+        paths.user_data_root = files_dir / "user";
+      }
+      if (paths.cache_root.empty() || !std::filesystem::exists(paths.cache_root.parent_path())) {
+        paths.cache_root = paths.user_data_root / "cache";
+      }
+      std::filesystem::create_directories(paths.user_data_root);
+    }
 #endif
     // An explicit --game_data_root remains authoritative for developers and
     // advanced users. Normal launches use the private per-user import.
