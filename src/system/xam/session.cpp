@@ -1540,6 +1540,9 @@ class LanDiscoveryService::Impl {
                       query.session_id[6], query.session_id[7],
                       (flags & 2) != 0, flags);
         bool existing = false;
+        // A relaunched client arrives with a fresh machine id and no credential
+        // while its silent previous incarnation is still on the roster.
+        bool stale_member = false;
         std::optional<DiscoveryPacket> expired_reply;
         {
           std::lock_guard lock(*advertised->mutex);
@@ -1585,6 +1588,8 @@ class LanDiscoveryService::Impl {
           if(valid&&existing&&!legacy_diagnostics) {
             const auto member=std::find_if(advertised->members.begin(),advertised->members.end(),[&](const auto& value){return value.xuid==xuid;});
             valid=member!=advertised->members.end()&&bool(member->gameplay_admission);
+            stale_member = valid && !NonzeroToken(WireToken(query.authentication)) &&
+                           member->machine_id && member->machine_id != Swap64(wire.machine_id);
           }
         }
         if (expired_reply) {
@@ -1608,14 +1613,18 @@ class LanDiscoveryService::Impl {
               {source.sin_addr.s_addr, ntohs(source.sin_port)}, challenge.value_or(ArbitrationToken{}), reply_credential};
           {
             std::lock_guard record_lock(*advertised->mutex);
+            // A stale member is only replaced below, after a fresh directory
+            // grant proves the relaunched client; the arbitration check then
+            // runs against the cleared roster before anything is admitted.
             valid = member.gameplay_address.port && advertised->arbitration &&
-                advertised->arbitration->CheckAdmission(claim, SessionArbitrationAuthority::Clock::now()).accepted();
+                (stale_member ||
+                 advertised->arbitration->CheckAdmission(claim, SessionArbitrationAuthority::Clock::now()).accepted());
           }
           HostAdmissionReservation reservation;
           DiscoveryAdmissionContext context;
-          REXSYS_INFO("INVITE_DIAG HOST_ADMISSION_BEGIN xuid={:016X} private_request={} existing={}",
-                      xuid, member.private_slot, existing);
-          if (valid && !existing) {
+          REXSYS_INFO("INVITE_DIAG HOST_ADMISSION_BEGIN xuid={:016X} private_request={} existing={} stale={}",
+                      xuid, member.private_slot, existing, stale_member);
+          if (valid && (!existing || stale_member)) {
             // NAT snapshot -> atomic grant reservation -> membership commit ->
             // finalization. No pair of these lock domains is nested.
             auto matches = NatProbeMatchAcknowledgedDiscoveryAttempts(
@@ -1637,6 +1646,18 @@ class LanDiscoveryService::Impl {
                     GameplayAdmissionBinding{reservation.directory_session_id,
                                               reservation.attempt_id,
                                               reservation.admission_generation});
+                if (stale_member) {
+                  // The grant proves the same player relaunched. Drop the
+                  // silent incarnation so the join proceeds as a new admission.
+                  std::lock_guard record_lock(*advertised->mutex);
+                  if (advertised->arbitration) advertised->arbitration->Remove(xuid);
+                  std::erase_if(advertised->members,
+                                [&](const auto& value) { return value.xuid == xuid; });
+                  existing = false;
+                  valid = advertised->arbitration &&
+                      advertised->arbitration->CheckAdmission(claim, SessionArbitrationAuthority::Clock::now()).accepted();
+                  REXSYS_INFO("INVITE_DIAG HOST_STALE_MEMBER_REPLACED xuid={:016X} admitted={}", xuid, valid);
+                }
               } else if (authority.status ==
                          HostAdmissionReservationStatus::kDuplicateReservation) {
                 // The winning packet owns the one synchronous transaction.
