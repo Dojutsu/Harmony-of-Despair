@@ -8,7 +8,7 @@
 #include <thread>
 #include <set>
 #include "private_lan_crypto.h"
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_LINUX
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <fcntl.h>
@@ -18,7 +18,7 @@
 #include <ws2tcpip.h>
 #endif
 namespace rex::system::xam {
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32 || REX_PLATFORM_ANDROID
 namespace {
 namespace crypto=lan_crypto;
 using Clock=std::chrono::steady_clock;
@@ -183,7 +183,7 @@ struct PrivateLanDiscoveryAdapter::Impl {
   uint32_t title;uint16_t port;uint64_t machine;std::shared_ptr<const PrivateLanInvitation> invitation;
   std::shared_ptr<SessionRecord> host;std::atomic<bool> running=false,client_running=false;std::thread thread,client_thread;
   std::weak_ptr<SessionRecord> client;uint64_t client_xuid=0;
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32 || REX_PLATFORM_ANDROID
   std::unique_ptr<Socket> listener;
   struct DepartureReceipt {
     Packet request{};ArbitrationToken proof{};LanAddress source{};
@@ -301,7 +301,7 @@ struct PrivateLanDiscoveryAdapter::Impl {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));}}
 #endif
 };
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32 || REX_PLATFORM_ANDROID
 void PrivateLanDiscoveryAdapter::Impl::Register(const Packet& p,LanAddress source) {
   std::optional<PrivateLanDiscoveryWire> wire;
   {
@@ -380,7 +380,7 @@ bool PrivateLanDiscoveryAdapter::IsAdvertising() const noexcept{return impl_->ru
 void PrivateLanDiscoveryAdapter::SetTitle(uint32_t title){if(impl_->title==title)return;if(impl_->running||impl_->client_running)Stop();impl_->title=title;}
 void PrivateLanDiscoveryAdapter::SetMachine(uint64_t machine){if(impl_->machine==machine)return;if(impl_->running||impl_->client_running)Stop();impl_->machine=machine;}
 bool PrivateLanDiscoveryAdapter::Start(const std::shared_ptr<SessionRecord>& session) {
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32 || REX_PLATFORM_ANDROID
   try {
     if(impl_->running&&impl_->host==session)return true;Stop();
     if(!session||!impl_->invitation||!impl_->invitation->host()||!impl_->invitation->Current())return false;
@@ -409,7 +409,7 @@ bool PrivateLanDiscoveryAdapter::Start(const std::shared_ptr<SessionRecord>& ses
 void PrivateLanDiscoveryAdapter::StopClient(){impl_->client_running=false;if(impl_->client_thread.joinable())impl_->client_thread.join();impl_->client.reset();}
 void PrivateLanDiscoveryAdapter::Stop() {
   impl_->running=false;if(impl_->thread.joinable())impl_->thread.join();StopClient();
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32 || REX_PLATFORM_ANDROID
   impl_->listener.reset();impl_->ClearDepartureReceipts();
 #endif
   if(impl_->host){RevokeGameplayAuthorization(impl_->host,impl_->host->host_xuid);std::lock_guard lock(*impl_->host->mutex);
@@ -418,7 +418,7 @@ void PrivateLanDiscoveryAdapter::Stop() {
 }
 std::vector<SessionRecord> PrivateLanDiscoveryAdapter::Search(uint32_t timeout,uint32_t max_results) {
   std::vector<SessionRecord> results;
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32 || REX_PLATFORM_ANDROID
   try {
     if(!max_results||!impl_->invitation||impl_->invitation->host()||!impl_->invitation->Current())return results;
     Socket socket;if(!socket.Open())return results;LanAddress target;in_addr host{};
@@ -440,7 +440,7 @@ std::vector<SessionRecord> PrivateLanDiscoveryAdapter::Search(uint32_t timeout,u
   return results;
 }
 std::optional<SessionRecord> PrivateLanDiscoveryAdapter::Join(const SessionRecord& session,const SessionMember& member,uint32_t timeout) {
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32 || REX_PLATFORM_ANDROID
   try {
     if(!impl_->invitation||impl_->invitation->host()||!impl_->invitation->Current()||member.xuid!=impl_->invitation->clients().front()||
        session.private_lan_invitation!=impl_->invitation||session.host_xuid!=impl_->invitation->host_xuid())return std::nullopt;
@@ -463,7 +463,7 @@ std::optional<SessionRecord> PrivateLanDiscoveryAdapter::Join(const SessionRecor
 #endif
 }
 std::optional<SessionRecord> PrivateLanDiscoveryAdapter::Leave(const SessionRecord& session,uint64_t xuid,uint32_t timeout) {
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32 || REX_PLATFORM_ANDROID
   StopClient();auto binding=session.private_lan_client;if(!binding||binding->xuid()!=xuid||!binding->Confirmed())return std::nullopt;
   std::lock_guard lock(binding->impl_->mutex);SessionMember member;
   {std::lock_guard record_lock(*session.mutex);const auto found=std::find_if(session.members.begin(),session.members.end(),[&](const auto& m){return m.xuid==xuid;});if(found==session.members.end())return std::nullopt;member=*found;}
@@ -474,7 +474,7 @@ std::optional<SessionRecord> PrivateLanDiscoveryAdapter::Leave(const SessionReco
 }
 std::optional<ArbitrationSnapshot> PrivateLanDiscoveryAdapter::RegisterArbitration(
     const std::shared_ptr<SessionRecord>& session,uint64_t xuid,uint64_t nonce) {
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32 || REX_PLATFORM_ANDROID
   try {
     if(!session||!impl_->invitation||impl_->invitation->host()||!impl_->invitation->Current())return std::nullopt;
     std::shared_ptr<PrivateLanClientBinding> binding;Packet packet;
@@ -508,7 +508,7 @@ std::optional<ArbitrationSnapshot> PrivateLanDiscoveryAdapter::RegisterArbitrati
   return std::nullopt;
 }
 bool PrivateLanDiscoveryAdapter::Activate(const std::shared_ptr<SessionRecord>& session,uint64_t xuid) {
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32 || REX_PLATFORM_ANDROID
   if(!session||!impl_->invitation||impl_->invitation->host()||!impl_->invitation->Current())return false;
   {std::lock_guard lock(*session->mutex);if(session->state==SessionState::kDeleted||!session->private_lan_gameplay||
     session->private_lan_gameplay->xuid!=xuid||!session->private_lan_client||!session->private_lan_client->Confirmed())return false;}

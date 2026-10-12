@@ -9,9 +9,11 @@
 #if REX_PLATFORM_WIN32
 #include <windows.h>
 #include <bcrypt.h>
-#elif REX_PLATFORM_GNU_LINUX
+#elif REX_PLATFORM_LINUX
 #include <sys/random.h>
+#if REX_PLATFORM_GNU_LINUX
 #include <openssl/crypto.h>
+#endif
 #endif
 
 namespace rex::system::xam {
@@ -34,7 +36,7 @@ bool CredentialEqual(const ArbitrationToken& left, const ArbitrationToken& right
 bool RandomBytes(std::span<uint8_t> bytes) {
 #if REX_PLATFORM_WIN32
   return BCryptGenRandom(nullptr, bytes.data(), ULONG(bytes.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG) >= 0;
-#elif REX_PLATFORM_GNU_LINUX
+#elif REX_PLATFORM_LINUX
   size_t completed = 0;
   while (completed < bytes.size()) {
     const auto count = ::getrandom(bytes.data() + completed, bytes.size() - completed, 0);
@@ -185,6 +187,9 @@ std::optional<ArbitrationSnapshot> SessionArbitrationAuthority::RegisterFromVeri
       OPENSSL_cleanse(previous.data(),sizeof(previous));
 #elif REX_PLATFORM_WIN32
       SecureZeroMemory(previous.data(),sizeof(previous));
+#else
+      { volatile uint8_t* bytes=reinterpret_cast<volatile uint8_t*>(previous.data());
+        for(size_t i=0;i<sizeof(previous);++i)bytes[i]=0; }
 #endif
     }
   } restore{*this,previous,revision};

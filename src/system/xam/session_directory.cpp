@@ -1750,7 +1750,7 @@ class SessionDirectoryClient::Impl {
           "candidates are required");
       return;
     }
-#if !REX_PLATFORM_WIN32 && !REX_PLATFORM_GNU_LINUX
+#if !REX_PLATFORM_WIN32 && !REX_PLATFORM_GNU_LINUX && !REX_PLATFORM_ANDROID
     REXSYS_WARN("Session directory: hosting is unavailable on this platform");
     return;
 #endif
