@@ -8,6 +8,8 @@
 #   ANDROID_SDK_ROOT   Android SDK with build-tools and platforms (default /opt/android-sdk)
 #   SDL_ANDROID_JAVA   SDL3's Java sources (android-project/app/src/main/java)
 #   HARMONY_KEYSTORE   signing keystore (created with the "android" password if missing)
+#   HARMONY_ICON       optional square PNG used as the launcher icon (kept out of the repo,
+#                      since the artwork is third-party); needs python3 with Pillow
 set -euo pipefail
 
 BUILD_DIR=${1:?build dir}
@@ -35,7 +37,13 @@ javac -source 1.8 -target 1.8 -nowarn -Xlint:-options -bootclasspath "$ANDROID_J
 
 echo "[2/5] Resources"
 mkdir -p "$WORK/res-compiled"
-"$BT/aapt2" compile --dir "$APP/res" -o "$WORK/res.zip"
+RES="$APP/res"
+if [ -n "${HARMONY_ICON:-}" ]; then
+    RES="$WORK/res"
+    cp -r "$APP/res" "$RES"
+    python3 "$HERE/make-icons.py" "$HARMONY_ICON" "$RES"
+fi
+"$BT/aapt2" compile --dir "$RES" -o "$WORK/res.zip"
 "$BT/aapt2" link -o "$WORK/base.apk" -I "$ANDROID_JAR" --manifest "$APP/AndroidManifest.xml" \
     --min-sdk-version 29 --target-sdk-version 33 "$WORK/res.zip"
 
