@@ -63,6 +63,16 @@ std::vector<std::string> BuildArguments(const std::vector<std::string>& java_arg
   if (!has_flag("update_data_root")) args.push_back("--update_data_root=" + data_root);
   if (!has_flag("user_name")) args.emplace_back("--user_name=Thor");
   if (!has_flag("log_flush_interval")) args.emplace_back("--log_flush_interval=1");
+  // Arm Mali GPUs (Pixel, many Samsung phones) have no geometry shaders or
+  // wireframe fill; the runtime has fallback paths for both (as on macOS), so
+  // allow those GPUs instead of refusing to start. GPUs that have the features
+  // (the Thor's Adreno) still use them.
+  if (!has_flag("vulkan_require_geometry_shader")) {
+    args.emplace_back("--vulkan_require_geometry_shader=false");
+  }
+  if (!has_flag("vulkan_require_fill_mode_non_solid")) {
+    args.emplace_back("--vulkan_require_fill_mode_non_solid=false");
+  }
   if (!has_flag("log_file")) {
     // Next to the game data, so the log can be pulled over adb without root.
     std::error_code ec;
