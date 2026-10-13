@@ -453,47 +453,56 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
                                           PageAccess access, bool commit) {
   REX_MAPPING_MUTATION();
 #if REX_PLATFORM_ANDROID
-  // TODO(Triang3l): Check if memfd can be used instead on API 30+.
+  // Three ways to get the backing, tried in order and each error logged:
+  // /dev/ashmem (what the Thor has always used; blocked on many devices for
+  // apps targeting API 29+), ASharedMemory (API 26+), then an anonymous memfd.
+  int ashmem_errno = 0;
+  int ashmem_fd = open("/" ASHMEM_NAME_DEF, O_RDWR | O_CLOEXEC);
+  if (ashmem_fd >= 0) {
+    char ashmem_name[ASHMEM_NAME_LEN];
+    strlcpy(ashmem_name, path.c_str(), rex::countof(ashmem_name));
+    if (ioctl(ashmem_fd, ASHMEM_SET_NAME, ashmem_name) >= 0 &&
+        ioctl(ashmem_fd, ASHMEM_SET_SIZE, length) >= 0) {
+      return static_cast<FileMappingHandle>(ashmem_fd);
+    }
+    ashmem_errno = errno;
+    close(ashmem_fd);
+  } else {
+    ashmem_errno = errno;
+  }
+
+  // AndroidInitialize() is not called on every startup path; load lazily.
+  if (!android_ASharedMemory_create_ && rex::GetAndroidApiLevel() >= 26) {
+    AndroidInitialize();
+  }
+  int sharedmem_errno = 0;
   if (android_ASharedMemory_create_) {
     errno = 0;
     int sharedmem_fd = android_ASharedMemory_create_(path.c_str(), length);
     if (sharedmem_fd >= 0) {
+      REXLOG_INFO("Guest memory: /dev/ashmem unavailable ({}); using ASharedMemory",
+                  std::strerror(ashmem_errno));
       return static_cast<FileMappingHandle>(sharedmem_fd);
     }
-    const int sharedmem_errno = errno;
-    // Some devices (seen on a Pixel 6 Pro, Android 15) refuse a region this
-    // large through ASharedMemory; an anonymous memfd backs it the same way.
-    errno = 0;
-    int memfd = static_cast<int>(syscall(__NR_memfd_create, "rex-guest-arena", MFD_CLOEXEC));
-    if (memfd >= 0 && ftruncate(memfd, static_cast<off_t>(length)) == 0) {
-      REXLOG_WARN("ASharedMemory_create({} bytes) failed ({}); using memfd instead", length,
-                  std::strerror(sharedmem_errno));
-      return static_cast<FileMappingHandle>(memfd);
-    }
-    const int memfd_errno = errno;
-    if (memfd >= 0) {
-      close(memfd);
-    }
-    REXLOG_ERROR("Guest memory: ASharedMemory_create({} bytes) failed ({}), memfd failed ({})",
-                 length, std::strerror(sharedmem_errno), std::strerror(memfd_errno));
-    return kFileMappingHandleInvalid;
+    sharedmem_errno = errno;
   }
 
-  // Use /dev/ashmem on API versions below 26, which added ASharedMemory.
-  // /dev/ashmem was disabled on API 29 for apps targeting it.
-  // https://chromium.googlesource.com/chromium/src/+/master/third_party/ashmem/ashmem-dev.c
-  int ashmem_fd = open("/" ASHMEM_NAME_DEF, O_RDWR);
-  if (ashmem_fd < 0) {
-    return kFileMappingHandleInvalid;
+  errno = 0;
+  int memfd = static_cast<int>(syscall(__NR_memfd_create, "rex-guest-arena", MFD_CLOEXEC));
+  if (memfd >= 0 && ftruncate(memfd, static_cast<off_t>(length)) == 0) {
+    REXLOG_INFO("Guest memory: /dev/ashmem ({}) and ASharedMemory ({}) unavailable; using memfd",
+                std::strerror(ashmem_errno), std::strerror(sharedmem_errno));
+    return static_cast<FileMappingHandle>(memfd);
   }
-  char ashmem_name[ASHMEM_NAME_LEN];
-  strlcpy(ashmem_name, path.c_str(), rex::countof(ashmem_name));
-  if (ioctl(ashmem_fd, ASHMEM_SET_NAME, ashmem_name) < 0 ||
-      ioctl(ashmem_fd, ASHMEM_SET_SIZE, length) < 0) {
-    close(ashmem_fd);
-    return kFileMappingHandleInvalid;
+  const int memfd_errno = errno;
+  if (memfd >= 0) {
+    close(memfd);
   }
-  return static_cast<FileMappingHandle>(ashmem_fd);
+  REXLOG_ERROR("Guest memory ({} bytes): /dev/ashmem failed ({}), ASharedMemory failed ({}), "
+               "memfd failed ({})",
+               length, std::strerror(ashmem_errno), std::strerror(sharedmem_errno),
+               std::strerror(memfd_errno));
+  return kFileMappingHandleInvalid;
 #elif REX_PLATFORM_GNU_LINUX
   // The guest arena is private to this process. A named shm object could be
   // reopened by another instance or collide with an existing object's name.
