@@ -29,8 +29,9 @@ REXCVAR_DEFINE_BOOL(vulkan_require_fragment_stores_and_atomics, true, "UI/Vulkan
                     "required for Vulkan GPU emulation")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(vulkan_require_vertex_pipeline_stores_and_atomics, true, "UI/Vulkan",
-                    "Deprecated and ignored for parity; vertexPipelineStoresAndAtomics is always "
-                    "required for Vulkan GPU emulation")
+                    "Require vertexPipelineStoresAndAtomics for Vulkan GPU emulation (disable to "
+                    "allow GPUs without it, such as Arm Mali; vertex shader memory export draws "
+                    "are then skipped)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // Apple Silicon / MoltenVK does not expose geometryShader or fillModeNonSolid;
 // default both to false on macOS so the device can still be selected.
@@ -118,10 +119,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
           properties.deviceName);
       return nullptr;
     }
-    if (!supported_features.vertexPipelineStoresAndAtomics) {
+    if (REXCVAR_GET(vulkan_require_vertex_pipeline_stores_and_atomics) &&
+        !supported_features.vertexPipelineStoresAndAtomics) {
       REXLOG_WARN(
           "Vulkan device '{}' doesn't support vertexPipelineStoresAndAtomics, which "
-          "is required for Vulkan GPU emulation parity",
+          "is required for Vulkan GPU emulation parity "
+          "(vulkan_require_vertex_pipeline_stores_and_atomics=true)",
           properties.deviceName);
       return nullptr;
     }

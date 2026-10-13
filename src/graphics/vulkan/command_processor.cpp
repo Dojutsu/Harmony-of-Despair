@@ -930,10 +930,15 @@ bool VulkanCommandProcessor::SetupContext() {
     return false;
   }
   if (!device_properties.vertexPipelineStoresAndAtomics) {
-    REXGPU_ERROR(
-        "Vulkan vertexPipelineStoresAndAtomics is required for GPU emulation and "
-        "D3D12 parity, but unsupported by the selected device");
-    return false;
+    if (REXCVAR_GET(vulkan_require_vertex_pipeline_stores_and_atomics)) {
+      REXGPU_ERROR(
+          "Vulkan vertexPipelineStoresAndAtomics is required for GPU emulation and "
+          "D3D12 parity, but unsupported by the selected device");
+      return false;
+    }
+    REXGPU_WARN(
+        "Vulkan vertexPipelineStoresAndAtomics is not supported by the device; draws with "
+        "vertex shader memory export will be skipped");
   }
   if (!device_properties.geometryShader) {
     if (REXCVAR_GET(vulkan_require_geometry_shader)) {
@@ -3632,10 +3637,16 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   bool memexport_used_vertex = vertex_shader->memexport_eM_written() != 0;
   if (memexport_used_vertex) {
     if (!device_properties.vertexPipelineStoresAndAtomics) {
-      REXGPU_ERROR(
-          "Vertex shader memexport draw encountered without "
-          "vertexPipelineStoresAndAtomics support");
-      return false;
+      // Skip the draw (reported once) rather than failing it, which logs an
+      // error for every such draw.
+      static bool reported = false;
+      if (!reported) {
+        reported = true;
+        REXGPU_WARN(
+            "Skipping vertex shader memexport draws: the device lacks "
+            "vertexPipelineStoresAndAtomics");
+      }
+      return true;
     }
     draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges_);
   }
