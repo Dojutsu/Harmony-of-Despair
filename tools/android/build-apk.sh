@@ -8,6 +8,9 @@
 #   ANDROID_SDK_ROOT   Android SDK with build-tools and platforms (default /opt/android-sdk)
 #   SDL_ANDROID_JAVA   SDL3's Java sources (android-project/app/src/main/java)
 #   HARMONY_KEYSTORE   signing keystore (created with the "android" password if missing)
+#   HARMONY_RELEASE    set to 1 for a public build: not debuggable, and signed with the
+#                      keystore whose password is read from HARMONY_KEYSTORE_PASS_FILE
+#                      (alias from HARMONY_KEY_ALIAS, default "harmony")
 #   HARMONY_ICON       optional square PNG used as the launcher icon (kept out of the repo,
 #                      since the artwork is third-party); needs python3 with Pillow
 set -euo pipefail
@@ -44,7 +47,12 @@ if [ -n "${HARMONY_ICON:-}" ]; then
     python3 "$HERE/make-icons.py" "$HARMONY_ICON" "$RES"
 fi
 "$BT/aapt2" compile --dir "$RES" -o "$WORK/res.zip"
-"$BT/aapt2" link -o "$WORK/base.apk" -I "$ANDROID_JAR" --manifest "$APP/AndroidManifest.xml" \
+MANIFEST="$APP/AndroidManifest.xml"
+if [ "${HARMONY_RELEASE:-}" = "1" ]; then
+    MANIFEST="$WORK/AndroidManifest.xml"
+    sed 's/android:debuggable="true"/android:debuggable="false"/' "$APP/AndroidManifest.xml" > "$MANIFEST"
+fi
+"$BT/aapt2" link -o "$WORK/base.apk" -I "$ANDROID_JAR" --manifest "$MANIFEST" \
     --min-sdk-version 29 --target-sdk-version 33 "$WORK/res.zip"
 
 echo "[3/5] Native libraries"
@@ -67,6 +75,15 @@ echo "[4/5] Align"
 "$BT/zipalign" -p -f 4 "$WORK/unaligned.apk" "$WORK/aligned.apk"
 
 echo "[5/5] Sign"
+if [ "${HARMONY_RELEASE:-}" = "1" ]; then
+    PASS_FILE=${HARMONY_KEYSTORE_PASS_FILE:?release builds need HARMONY_KEYSTORE_PASS_FILE}
+    [ -f "$KEYSTORE" ] || { echo "release keystore $KEYSTORE is missing" >&2; exit 1; }
+    "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass "file:$PASS_FILE" \
+        --ks-key-alias "${HARMONY_KEY_ALIAS:-harmony}" --out "$OUT_APK" "$WORK/aligned.apk"
+    "$BT/apksigner" verify "$OUT_APK"
+    ls -la "$OUT_APK"
+    exit 0
+fi
 if [ ! -f "$KEYSTORE" ]; then
     keytool -genkeypair -v -keystore "$KEYSTORE" -storepass android -keypass android \
         -alias harmony -keyalg RSA -keysize 2048 -validity 10000 \
