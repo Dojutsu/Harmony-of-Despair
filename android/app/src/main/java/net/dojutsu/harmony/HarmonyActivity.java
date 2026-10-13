@@ -19,7 +19,6 @@ import android.widget.RelativeLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import org.json.JSONArray;
 import org.json.JSONObject;
 import org.libsdl.app.SDLActivity;
 
@@ -79,17 +78,21 @@ public class HarmonyActivity extends SDLActivity {
         if (online && mLayout instanceof RelativeLayout) {
             onlineOverlay = new TextView(this);
             onlineOverlay.setTextColor(Color.WHITE);
-            onlineOverlay.setBackgroundColor(Color.argb(160, 0, 0, 0));
+            onlineOverlay.setBackgroundColor(Color.argb(120, 0, 0, 0));
             onlineOverlay.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-            onlineOverlay.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+            onlineOverlay.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
             int pad = Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 6, getResources().getDisplayMetrics()));
             onlineOverlay.setPadding(pad * 2, pad, pad * 2, pad);
-            onlineOverlay.setGravity(Gravity.CENTER);
-            onlineOverlay.setText("Online: connecting...");
+            onlineOverlay.setGravity(Gravity.START);
+            // Hidden until a lobby exists (hosting or joined); the title screen and single player stay clean.
+            onlineOverlay.setVisibility(View.GONE);
             RelativeLayout.LayoutParams params = new RelativeLayout.LayoutParams(
                     RelativeLayout.LayoutParams.WRAP_CONTENT, RelativeLayout.LayoutParams.WRAP_CONTENT);
-            params.addRule(RelativeLayout.ALIGN_PARENT_TOP);
-            params.addRule(RelativeLayout.CENTER_HORIZONTAL);
+            // Lower left, clear of the menu titles and the HP/MP bars at the top.
+            params.addRule(RelativeLayout.ALIGN_PARENT_BOTTOM);
+            params.addRule(RelativeLayout.ALIGN_PARENT_START);
+            params.leftMargin = pad * 2;
+            params.bottomMargin = pad * 2;
             mLayout.addView(onlineOverlay, params);
             handler.postDelayed(poll, 1000);
         }
@@ -124,43 +127,28 @@ public class HarmonyActivity extends SDLActivity {
             }
         }
         if (newest == null) {
-            onlineOverlay.setText("Online: starting...");
-            onlineOverlay.setVisibility(View.VISIBLE);
+            onlineOverlay.setVisibility(View.GONE);
             return;
         }
         String mode = newest.optString("mode", "offline");
         String code = newest.optString("invite_code", "");
-        int players = newest.optInt("player_count", 0);
-        int max = newest.optInt("max_players", 0);
-        String party = max > 0 ? "  " + players + "/" + max + " players" : "";
-        StringBuilder names = new StringBuilder();
-        JSONArray members = newest.optJSONArray("members");
-        if (members != null) {
-            for (int i = 0; i < members.length(); ++i) {
-                JSONObject member = members.optJSONObject(i);
-                String name = member != null ? member.optString("name", "") : "";
-                if (name.isEmpty()) continue;
-                if (names.length() > 0) names.append(", ");
-                names.append(name);
-            }
-        }
+        // Only the invite code is shown, and only while a lobby exists.
         if ("hosting".equals(mode) && code.length() == 6) {
-            onlineOverlay.setText("Invite code  " + code + party + (names.length() > 0 ? "\n" + names : ""));
+            onlineOverlay.setText("Invite code  " + code);
             onlineOverlay.setVisibility(View.VISIBLE);
             if (!code.equals(copiedCode)) {
                 copiedCode = code;
                 ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
                 if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Harmony invite code", code));
             }
-        } else if ("joined".equals(mode)) {
-            onlineOverlay.setText("Joined" + party + (names.length() > 0 ? "\n" + names : ""));
-            onlineOverlay.setVisibility(View.VISIBLE);
         } else if ("hosting".equals(mode)) {
-            onlineOverlay.setText("Hosting: getting an invite code..." + party);
+            onlineOverlay.setText("Getting invite code...");
+            onlineOverlay.setVisibility(View.VISIBLE);
+        } else if ("joined".equals(mode) && code.length() == 6) {
+            onlineOverlay.setText("Invite code  " + code);
             onlineOverlay.setVisibility(View.VISIBLE);
         } else {
-            onlineOverlay.setText("Online: not in a game");
-            onlineOverlay.setVisibility(View.VISIBLE);
+            onlineOverlay.setVisibility(View.GONE);
         }
     }
 
