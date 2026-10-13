@@ -80,21 +80,29 @@ public class HarmonyActivity extends SDLActivity {
             onlineOverlay.setTextColor(Color.WHITE);
             onlineOverlay.setBackgroundColor(Color.argb(120, 0, 0, 0));
             onlineOverlay.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-            onlineOverlay.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            onlineOverlay.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
             int pad = Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 6, getResources().getDisplayMetrics()));
-            onlineOverlay.setPadding(pad * 2, pad, pad * 2, pad);
-            onlineOverlay.setGravity(Gravity.START);
+            onlineOverlay.setPadding(pad, pad / 2, pad, pad / 2);
+            onlineOverlay.setGravity(Gravity.CENTER_HORIZONTAL);
             // Hidden until a lobby exists (hosting or joined); the title screen and single player stay clean.
             onlineOverlay.setVisibility(View.GONE);
             RelativeLayout.LayoutParams params = new RelativeLayout.LayoutParams(
                     RelativeLayout.LayoutParams.WRAP_CONTENT, RelativeLayout.LayoutParams.WRAP_CONTENT);
-            // Lower left, clear of the menu titles and the HP/MP bars at the top.
-            params.addRule(RelativeLayout.ALIGN_PARENT_BOTTOM);
+            // On the open book of the team screen, just right of "Invite to Team" / "Finalize Team",
+            // where no player card or menu text sits. Placed as a fraction of the screen so it
+            // follows the game picture at any resolution.
+            params.addRule(RelativeLayout.ALIGN_PARENT_TOP);
             params.addRule(RelativeLayout.ALIGN_PARENT_START);
-            // Keep clear of the rounded screen corners and the edge the game draws under.
-            params.leftMargin = pad * 6;
-            params.bottomMargin = pad * 7;
             mLayout.addView(onlineOverlay, params);
+            mLayout.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                @Override public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
+                    if (r - l == or - ol && b - t == ob - ot) return;
+                    RelativeLayout.LayoutParams p = (RelativeLayout.LayoutParams) onlineOverlay.getLayoutParams();
+                    p.leftMargin = Math.round((r - l) * 0.505f);
+                    p.topMargin = Math.round((b - t) * 0.695f);
+                    onlineOverlay.setLayoutParams(p);
+                }
+            });
             handler.postDelayed(poll, 1000);
         }
     }
@@ -133,20 +141,23 @@ public class HarmonyActivity extends SDLActivity {
         }
         String mode = newest.optString("mode", "offline");
         String code = newest.optString("invite_code", "");
-        // Only the invite code is shown, and only while a lobby exists.
-        if ("hosting".equals(mode) && code.length() == 6) {
-            onlineOverlay.setText("Invite code  " + code);
+        String state = newest.optString("session_state", "lobby");
+        int players = newest.optInt("player_count", 0);
+        int max = newest.optInt("max_players", 0);
+        // Show the code only while the hosted lobby is still taking players. Finalizing the team
+        // closes the free seats (max_players drops to the team size), which hides it; searching
+        // for more players reopens them and it comes back.
+        boolean recruiting = "hosting".equals(mode) && "lobby".equals(state) && players < max;
+        if (recruiting && code.length() == 6) {
+            onlineOverlay.setText("Invite code\n" + code);
             onlineOverlay.setVisibility(View.VISIBLE);
             if (!code.equals(copiedCode)) {
                 copiedCode = code;
                 ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
                 if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Harmony invite code", code));
             }
-        } else if ("hosting".equals(mode)) {
-            onlineOverlay.setText("Getting invite code...");
-            onlineOverlay.setVisibility(View.VISIBLE);
-        } else if ("joined".equals(mode) && code.length() == 6) {
-            onlineOverlay.setText("Invite code  " + code);
+        } else if (recruiting) {
+            onlineOverlay.setText("Invite code\n...");
             onlineOverlay.setVisibility(View.VISIBLE);
         } else {
             onlineOverlay.setVisibility(View.GONE);
