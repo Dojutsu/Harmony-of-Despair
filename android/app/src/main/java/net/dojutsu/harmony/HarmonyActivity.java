@@ -71,6 +71,7 @@ public class HarmonyActivity extends SDLActivity {
                     Uri.parse("package:" + getPackageName()));
             startActivity(intent);
         }
+        CrashReport.installJavaHandler(this);
         super.onCreate(savedInstanceState);
 
         Intent intent = getIntent();

@@ -64,6 +64,7 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        CrashReport.installJavaHandler(this);
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
 
         LinearLayout column = new LinearLayout(this);
@@ -78,6 +79,14 @@ public class LauncherActivity extends Activity {
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28);
         column.addView(title);
+
+        String crashReport = CrashReport.saveIfCrashedLastTime(this);
+        if (crashReport != null) {
+            TextView crashNote = label("The game closed unexpectedly last time. A crash report was saved in your "
+                    + "Downloads folder as " + crashReport + ". Please send that file to whoever gave you the game.");
+            crashNote.setTextColor(Color.rgb(255, 196, 64));
+            column.addView(crashNote);
+        }
 
         // First-run setup, shown only while no game files are installed.
         setupPanel = new LinearLayout(this);
