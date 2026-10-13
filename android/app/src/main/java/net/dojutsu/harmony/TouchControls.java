@@ -198,6 +198,11 @@ final class TouchControls extends View implements InputManager.InputDeviceListen
         int index = event.getActionIndex();
         switch (action) {
             case MotionEvent.ACTION_DOWN:
+                // A touch that starts away from every button goes to the game as before.
+                if (!onDpad(event.getX(), event.getY(), 1.15f) && hit(event.getX(), event.getY()) == NONE) {
+                    return false;
+                }
+                // fall through
             case MotionEvent.ACTION_POINTER_DOWN: {
                 int id = event.getPointerId(index);
                 float x = event.getX(index), y = event.getY(index);
@@ -223,7 +228,7 @@ final class TouchControls extends View implements InputManager.InputDeviceListen
                 break;
         }
         update(event, action == MotionEvent.ACTION_POINTER_UP || action == MotionEvent.ACTION_UP ? index : -1);
-        return true;  // the game itself has no use for touches
+        return true;
     }
 
     private boolean onDpad(float x, float y, float scale) {
