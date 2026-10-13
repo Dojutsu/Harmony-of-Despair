@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -106,6 +107,59 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     env->ExceptionClear();
   }
   return JNI_VERSION_1_6;
+}
+
+// On-screen touch controls (TouchControls.java) drive a virtual SDL gamepad,
+// which the runtime's input driver picks up like any connected controller.
+namespace {
+std::mutex touch_mutex;
+SDL_JoystickID touch_id = 0;
+SDL_Joystick* touch_pad = nullptr;
+}  // namespace
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_net_dojutsu_harmony_TouchControls_nativeAttach(JNIEnv*, jclass) {
+  std::lock_guard lock(touch_mutex);
+  if (touch_pad) return JNI_TRUE;
+  // Too early: the game has not started SDL's gamepad support yet.
+  if (!SDL_WasInit(SDL_INIT_GAMEPAD)) return JNI_FALSE;
+  SDL_VirtualJoystickDesc desc;
+  SDL_INIT_INTERFACE(&desc);
+  desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+  desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
+  desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+  desc.name = "Harmony touch controls";
+  touch_id = SDL_AttachVirtualJoystick(&desc);
+  if (!touch_id) return JNI_FALSE;
+  touch_pad = SDL_OpenJoystick(touch_id);
+  if (!touch_pad) {
+    SDL_DetachVirtualJoystick(touch_id);
+    touch_id = 0;
+    return JNI_FALSE;
+  }
+  return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_net_dojutsu_harmony_TouchControls_nativeDetach(JNIEnv*, jclass) {
+  std::lock_guard lock(touch_mutex);
+  if (!touch_pad) return;
+  SDL_CloseJoystick(touch_pad);
+  SDL_DetachVirtualJoystick(touch_id);
+  touch_pad = nullptr;
+  touch_id = 0;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_net_dojutsu_harmony_TouchControls_nativeSetButton(JNIEnv*, jclass, jint button, jboolean down) {
+  std::lock_guard lock(touch_mutex);
+  if (touch_pad) SDL_SetJoystickVirtualButton(touch_pad, button, down == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_net_dojutsu_harmony_TouchControls_nativeSetAxis(JNIEnv*, jclass, jint axis, jint value) {
+  std::lock_guard lock(touch_mutex);
+  if (touch_pad) SDL_SetJoystickVirtualAxis(touch_pad, axis, static_cast<Sint16>(value));
 }
 
 int main(int argc, char** argv) {

@@ -37,6 +37,7 @@ import java.nio.charset.StandardCharsets;
 public class HarmonyActivity extends SDLActivity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView onlineOverlay;
+    private TouchControls touchControls;
     private String copiedCode;
     // Android Wi-Fi drops incoming broadcast packets unless a multicast lock is
     // held; same-house players find a hosted game through such broadcasts.
@@ -88,6 +89,13 @@ public class HarmonyActivity extends SDLActivity {
             multicastLock = null;
         }
 
+        // Phones without a controller get on-screen buttons; they hide while one is connected.
+        if (mLayout instanceof RelativeLayout) {
+            touchControls = new TouchControls(this);
+            mLayout.addView(touchControls, new RelativeLayout.LayoutParams(
+                    RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT));
+        }
+
         Intent intent = getIntent();
         boolean online = intent != null && intent.getBooleanExtra(LauncherActivity.EXTRA_ONLINE, false);
         if (online && mLayout instanceof RelativeLayout) {
@@ -126,6 +134,7 @@ public class HarmonyActivity extends SDLActivity {
     protected void onDestroy() {
         if (multicastLock != null && multicastLock.isHeld()) multicastLock.release();
         handler.removeCallbacks(poll);
+        if (touchControls != null) touchControls.release();
         super.onDestroy();
     }
 
