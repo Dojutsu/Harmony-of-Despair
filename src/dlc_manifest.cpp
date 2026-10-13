@@ -493,7 +493,10 @@ bool DlcManager::extract_to_staging(const fs::path& container_path,
     pending.pop();
     for (const auto& child : entry->children()) pending.push(child.get());
 
-    fs::path relative = fs::u8path(entry->path());
+    // STFS entry paths use Xbox-style '\\' separators; POSIX hosts need '/'.
+    std::string guest_relative = entry->path();
+    std::replace(guest_relative.begin(), guest_relative.end(), '\\', '/');
+    fs::path relative = fs::u8path(guest_relative);
     if (relative.is_absolute()) relative = relative.relative_path();
 
     // Basic path safety checks before writing anything host-side.

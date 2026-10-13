@@ -225,6 +225,14 @@ bool WriteInstallMarker(const fs::path& root, const XexIdentity& identity, std::
   return true;
 }
 
+// STFS entry paths use Xbox-style '\' separators. Convert them before building a host
+// path, otherwise POSIX hosts (Linux, Android) treat "dir\file" as one file name.
+fs::path GuestRelativePath(const std::string& guest_path) {
+  std::string normalized = guest_path;
+  std::replace(normalized.begin(), normalized.end(), '\\', '/');
+  return fs::u8path(normalized);
+}
+
 bool SafeRelativePath(const fs::path& path) {
   if (path.empty() || path.is_absolute()) return false;
   for (const auto& component : path.lexically_normal()) {
@@ -326,7 +334,7 @@ bool ExtractStfs(const fs::path& source, const fs::path& destination, XexIdentit
     pending.pop();
     for (const auto& child : entry->children()) pending.push(child.get());
 
-    fs::path relative = fs::path(entry->path());
+    fs::path relative = GuestRelativePath(entry->path());
     if (relative.is_absolute()) relative = relative.relative_path();
     if (!SafeRelativePath(relative)) {
       error = "the STFS package contains an unsafe path";
