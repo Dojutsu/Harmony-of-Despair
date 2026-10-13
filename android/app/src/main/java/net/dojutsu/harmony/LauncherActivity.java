@@ -28,6 +28,7 @@ import android.widget.Toast;
 import java.io.File;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -47,9 +48,16 @@ public class LauncherActivity extends Activity {
     private static final String DIRECTORY_URL = "https://hod.dojutsu.net";
     private static final String CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
+    private static final int PICK_GAME_FILES = 41;
+
     private EditText nameField;
     private EditText codeField;
     private TextView storageNote;
+    private LinearLayout setupPanel;
+    private TextView setupNote;
+    private Button pickButton;
+    private final List<View> playControls = new ArrayList<>();
+    private boolean importing;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -69,6 +77,24 @@ public class LauncherActivity extends Activity {
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28);
         column.addView(title);
 
+        // First-run setup, shown only while no game files are installed.
+        setupPanel = new LinearLayout(this);
+        setupPanel.setOrientation(LinearLayout.VERTICAL);
+        TextView setupTitle = label("First-time setup");
+        setupTitle.setTextColor(Color.WHITE);
+        setupTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        setupPanel.addView(setupTitle);
+        setupNote = label("Pick the folder that holds your own Harmony of Despair Xbox 360 files: "
+                + "the base game, title update 2 and any extra content. They are copied into the game once.");
+        setupNote.setPadding(0, dp(4), 0, dp(4));
+        setupPanel.addView(setupNote);
+        pickButton = button("Pick your game files");
+        pickButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { pickGameFiles(); }
+        });
+        setupPanel.addView(pickButton);
+        column.addView(setupPanel);
+
         TextView nameLabel = label("Player name");
         column.addView(nameLabel);
         nameField = new EditText(this);
@@ -86,12 +112,14 @@ public class LauncherActivity extends Activity {
             @Override public void onClick(View v) { launch(null, false); }
         });
         column.addView(offline);
+        playControls.add(offline);
 
         Button host = button("Host an online game");
         host.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { launch(null, true); }
         });
         column.addView(host);
+        playControls.add(host);
 
         column.addView(label("Friend's invite code"));
         LinearLayout codeRow = new LinearLayout(this);
@@ -143,6 +171,7 @@ public class LauncherActivity extends Activity {
             }
         });
         column.addView(join);
+        playControls.add(join);
 
         storageNote = label("");
         storageNote.setTextColor(Color.rgb(255, 200, 120));
@@ -165,8 +194,72 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        boolean ok = Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager();
-        storageNote.setText(ok ? "" : "The game needs 'All files access' to read its data in /sdcard/HoD.");
+        boolean ok = hasFileAccess();
+        storageNote.setText(ok ? "" : "The game needs 'All files access' to read its game files.");
+        if (!importing) refreshSetup();
+    }
+
+    private boolean hasFileAccess() {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager();
+    }
+
+    /** Shows the setup step only while the game files are missing, and holds the play buttons until then. */
+    private void refreshSetup() {
+        boolean ready = hasFileAccess() && GameFiles.status() != GameFiles.MISSING;
+        setupPanel.setVisibility(ready ? View.GONE : View.VISIBLE);
+        for (View control : playControls) {
+            control.setEnabled(ready);
+            control.setAlpha(ready ? 1f : 0.4f);
+        }
+    }
+
+    private void pickGameFiles() {
+        if (!hasFileAccess()) {
+            Toast.makeText(this, "First allow 'All files access', then pick the folder.", Toast.LENGTH_LONG).show();
+            startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:" + getPackageName())));
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        try {
+            startActivityForResult(intent, PICK_GAME_FILES);
+        } catch (android.content.ActivityNotFoundException e) {
+            Toast.makeText(this, "This device has no folder picker.", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != PICK_GAME_FILES || resultCode != RESULT_OK || data == null) return;
+        final File source = GameFiles.folderFromTree(data.getData());
+        if (source == null || !source.isDirectory()) {
+            setupNote.setText("That folder can't be read directly. Pick a folder on the device's own storage or SD card.");
+            return;
+        }
+        importing = true;
+        pickButton.setEnabled(false);
+        setupNote.setText("Copying your game files. This can take a few minutes; keep the app open.");
+        final File contentRoot = new File(filesRoot(), "user");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final String result = GameFiles.importFrom(source, contentRoot);
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        importing = false;
+                        pickButton.setEnabled(true);
+                        if (result.startsWith("OK:")) {
+                            Toast.makeText(LauncherActivity.this, result.substring(3), Toast.LENGTH_LONG).show();
+                            refreshSetup();
+                        } else {
+                            setupNote.setText("The game files could not be copied. "
+                                    + result.substring(Math.min(4, result.length()))
+                                    + " Pick the folder again when it's fixed.");
+                        }
+                    }
+                });
+            }
+        }, "harmony-import").start();
     }
 
     private void launch(String inviteCode, boolean online) {

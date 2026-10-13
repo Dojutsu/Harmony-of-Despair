@@ -80,6 +80,16 @@ elseif(ANDROID)
             "${HARMONY_ANDROID_LIB_DIR}"
         VERBATIM)
     add_dependencies(harmonyrecomp_android_libs harmonyrecomp)
+    # First-run import for the start screen: the same steps as the PC's
+    # harmonyrecomp-import --aggregate --install-dlc, called from Java.
+    add_library(harmonyimport SHARED
+        src/android_import.cpp
+        src/game_data.cpp
+        src/dlc_manifest.cpp
+        thirdparty/crypto/sha256.cpp)
+    target_include_directories(harmonyimport PRIVATE src thirdparty/crypto)
+    target_link_libraries(harmonyimport PRIVATE rex::runtime log)
+    add_dependencies(harmonyrecomp_android_libs harmonyimport)
 else()
     rexglue_setup_target(harmonyrecomp GPU_PLUGINS xenos)
 endif()
