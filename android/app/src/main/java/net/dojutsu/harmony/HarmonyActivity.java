@@ -91,8 +91,9 @@ public class HarmonyActivity extends SDLActivity {
             // Lower left, clear of the menu titles and the HP/MP bars at the top.
             params.addRule(RelativeLayout.ALIGN_PARENT_BOTTOM);
             params.addRule(RelativeLayout.ALIGN_PARENT_START);
-            params.leftMargin = pad * 2;
-            params.bottomMargin = pad * 2;
+            // Keep clear of the rounded screen corners and the edge the game draws under.
+            params.leftMargin = pad * 6;
+            params.bottomMargin = pad * 7;
             mLayout.addView(onlineOverlay, params);
             handler.postDelayed(poll, 1000);
         }
