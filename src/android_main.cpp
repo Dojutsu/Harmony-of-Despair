@@ -73,6 +73,11 @@ std::vector<std::string> BuildArguments(const std::vector<std::string>& java_arg
   if (!has_flag("vulkan_require_fill_mode_non_solid")) {
     args.emplace_back("--vulkan_require_fill_mode_non_solid=false");
   }
+  // Mali also lacks shader stores from the vertex stage; only rare draws that
+  // write memory from a vertex shader need them, and those are skipped.
+  if (!has_flag("vulkan_require_vertex_pipeline_stores_and_atomics")) {
+    args.emplace_back("--vulkan_require_vertex_pipeline_stores_and_atomics=false");
+  }
   if (!has_flag("log_file")) {
     // Next to the game data, so the log can be pulled over adb without root.
     std::error_code ec;
