@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.net.Uri;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
@@ -37,6 +38,9 @@ public class HarmonyActivity extends SDLActivity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView onlineOverlay;
     private String copiedCode;
+    // Android Wi-Fi drops incoming broadcast packets unless a multicast lock is
+    // held; same-house players find a hosted game through such broadcasts.
+    private WifiManager.MulticastLock multicastLock;
     private final Runnable poll = new Runnable() {
         @Override public void run() {
             refreshOnlineOverlay();
@@ -73,6 +77,16 @@ public class HarmonyActivity extends SDLActivity {
         }
         CrashReport.installJavaHandler(this);
         super.onCreate(savedInstanceState);
+        try {
+            WifiManager wifi = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+            if (wifi != null) {
+                multicastLock = wifi.createMulticastLock("harmony-lan");
+                multicastLock.setReferenceCounted(false);
+                multicastLock.acquire();
+            }
+        } catch (RuntimeException ignored) {
+            multicastLock = null;
+        }
 
         Intent intent = getIntent();
         boolean online = intent != null && intent.getBooleanExtra(LauncherActivity.EXTRA_ONLINE, false);
@@ -110,6 +124,7 @@ public class HarmonyActivity extends SDLActivity {
 
     @Override
     protected void onDestroy() {
+        if (multicastLock != null && multicastLock.isHeld()) multicastLock.release();
         handler.removeCallbacks(poll);
         super.onDestroy();
     }
