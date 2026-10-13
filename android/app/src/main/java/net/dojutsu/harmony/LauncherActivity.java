@@ -49,10 +49,12 @@ public class LauncherActivity extends Activity {
     private static final String CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
     private static final int PICK_GAME_FILES = 41;
+    private static final String PICK_NOTE = "Pick the folder that holds your own Harmony of Despair Xbox 360 files: "
+            + "the base game, title update 2 and any extra content. They are copied into the game once.";
+    private int setupState = -1;
 
     private EditText nameField;
     private EditText codeField;
-    private TextView storageNote;
     private LinearLayout setupPanel;
     private TextView setupNote;
     private Button pickButton;
@@ -84,8 +86,7 @@ public class LauncherActivity extends Activity {
         setupTitle.setTextColor(Color.WHITE);
         setupTitle.setTypeface(Typeface.DEFAULT_BOLD);
         setupPanel.addView(setupTitle);
-        setupNote = label("Pick the folder that holds your own Harmony of Despair Xbox 360 files: "
-                + "the base game, title update 2 and any extra content. They are copied into the game once.");
+        setupNote = label(PICK_NOTE);
         setupNote.setPadding(0, dp(4), 0, dp(4));
         setupPanel.addView(setupNote);
         pickButton = button("Pick your game files");
@@ -107,19 +108,14 @@ public class LauncherActivity extends Activity {
         styleBox(nameField);
         column.addView(nameField);
 
-        Button offline = button("Play offline");
-        offline.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { launch(null, false); }
-        });
-        column.addView(offline);
-        playControls.add(offline);
-
-        Button host = button("Host an online game");
-        host.setOnClickListener(new View.OnClickListener() {
+        // One Play button, like the PC launcher: the game always starts online-capable and the player
+        // picks single player or an online game in the game's own menus. Hosting shows the invite code.
+        Button play = button("Play");
+        play.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { launch(null, true); }
         });
-        column.addView(host);
-        playControls.add(host);
+        column.addView(play);
+        playControls.add(play);
 
         column.addView(label("Friend's invite code"));
         LinearLayout codeRow = new LinearLayout(this);
@@ -173,18 +169,6 @@ public class LauncherActivity extends Activity {
         column.addView(join);
         playControls.add(join);
 
-        storageNote = label("");
-        storageNote.setTextColor(Color.rgb(255, 200, 120));
-        column.addView(storageNote);
-        Button storage = button("Allow access to the game files");
-        storage.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                        Uri.parse("package:" + getPackageName()));
-                startActivity(intent);
-            }
-        });
-        column.addView(storage);
 
         ScrollView scroll = new ScrollView(this);
         scroll.addView(column);
@@ -194,8 +178,6 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        boolean ok = hasFileAccess();
-        storageNote.setText(ok ? "" : "The game needs 'All files access' to read its game files.");
         if (!importing) refreshSetup();
     }
 
@@ -207,6 +189,18 @@ public class LauncherActivity extends Activity {
     private void refreshSetup() {
         boolean ready = hasFileAccess() && GameFiles.status() != GameFiles.MISSING;
         setupPanel.setVisibility(ready ? View.GONE : View.VISIBLE);
+        // One setup panel covers both steps: first file access, then (only if still missing) the game files.
+        int state = ready ? 0 : (hasFileAccess() ? 2 : 1);
+        if (state != setupState) {
+            setupState = state;
+            if (state == 1) {
+                setupNote.setText("First, let the game read files on this device. Turn on 'Allow access to manage all files', then come back.");
+                pickButton.setText("Allow file access");
+            } else if (state == 2) {
+                setupNote.setText(PICK_NOTE);
+                pickButton.setText("Pick your game files");
+            }
+        }
         for (View control : playControls) {
             control.setEnabled(ready);
             control.setAlpha(ready ? 1f : 0.4f);
@@ -215,7 +209,6 @@ public class LauncherActivity extends Activity {
 
     private void pickGameFiles() {
         if (!hasFileAccess()) {
-            Toast.makeText(this, "First allow 'All files access', then pick the folder.", Toast.LENGTH_LONG).show();
             startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
                     Uri.parse("package:" + getPackageName())));
             return;
