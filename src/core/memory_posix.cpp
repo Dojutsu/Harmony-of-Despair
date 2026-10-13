@@ -54,6 +54,8 @@
 
 #include <rex/main_android.h>
 #include <sys/ioctl.h>
+#include <sys/syscall.h>
+#include <linux/memfd.h>
 
 #include <linux/ashmem.h>
 
@@ -453,9 +455,28 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
 #if REX_PLATFORM_ANDROID
   // TODO(Triang3l): Check if memfd can be used instead on API 30+.
   if (android_ASharedMemory_create_) {
+    errno = 0;
     int sharedmem_fd = android_ASharedMemory_create_(path.c_str(), length);
-    return sharedmem_fd >= 0 ? static_cast<FileMappingHandle>(sharedmem_fd)
-                             : kFileMappingHandleInvalid;
+    if (sharedmem_fd >= 0) {
+      return static_cast<FileMappingHandle>(sharedmem_fd);
+    }
+    const int sharedmem_errno = errno;
+    // Some devices (seen on a Pixel 6 Pro, Android 15) refuse a region this
+    // large through ASharedMemory; an anonymous memfd backs it the same way.
+    errno = 0;
+    int memfd = static_cast<int>(syscall(__NR_memfd_create, "rex-guest-arena", MFD_CLOEXEC));
+    if (memfd >= 0 && ftruncate(memfd, static_cast<off_t>(length)) == 0) {
+      REXLOG_WARN("ASharedMemory_create({} bytes) failed ({}); using memfd instead", length,
+                  std::strerror(sharedmem_errno));
+      return static_cast<FileMappingHandle>(memfd);
+    }
+    const int memfd_errno = errno;
+    if (memfd >= 0) {
+      close(memfd);
+    }
+    REXLOG_ERROR("Guest memory: ASharedMemory_create({} bytes) failed ({}), memfd failed ({})",
+                 length, std::strerror(sharedmem_errno), std::strerror(memfd_errno));
+    return kFileMappingHandleInvalid;
   }
 
   // Use /dev/ashmem on API versions below 26, which added ASharedMemory.
