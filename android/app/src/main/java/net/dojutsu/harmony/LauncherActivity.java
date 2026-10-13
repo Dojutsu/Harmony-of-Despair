@@ -178,6 +178,20 @@ public class LauncherActivity extends Activity {
         column.addView(join);
         playControls.add(join);
 
+        // For players whose game closes in a way Android doesn't flag as a crash.
+        TextView report = label("Game closing by itself? Tap here to save a problem report to Downloads.");
+        report.setTextColor(Color.GRAY);
+        report.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        report.setPadding(0, dp(28), 0, dp(4));
+        report.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                String name = CrashReport.saveNow(LauncherActivity.this);
+                Toast.makeText(LauncherActivity.this, name != null
+                        ? "Saved " + name + " in Downloads. Please send it to whoever gave you the game."
+                        : "Couldn't save the report", Toast.LENGTH_LONG).show();
+            }
+        });
+        column.addView(report);
 
         ScrollView scroll = new ScrollView(this);
         scroll.addView(column);

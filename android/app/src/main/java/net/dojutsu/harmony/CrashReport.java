@@ -83,19 +83,13 @@ final class CrashReport {
             for (ApplicationExitInfo info : exits) {
                 if (info.getTimestamp() <= seen) continue;
                 newest = Math.max(newest, info.getTimestamp());
-                int reason = info.getReason();
-                boolean bad = reason == ApplicationExitInfo.REASON_CRASH
-                        || reason == ApplicationExitInfo.REASON_CRASH_NATIVE
-                        || reason == ApplicationExitInfo.REASON_ANR
-                        || reason == ApplicationExitInfo.REASON_INITIALIZATION_FAILURE
-                        || reason == ApplicationExitInfo.REASON_SIGNALED;
-                if (bad && (crash == null || info.getTimestamp() > crash.getTimestamp())) crash = info;
+                if (isProblem(info) && (crash == null || info.getTimestamp() > crash.getTimestamp())) crash = info;
             }
             prefs.edit().putLong(PREF_SEEN, newest).apply();
             if (crash == null) return null;
             File javaCrashFile = new File(context.getFilesDir(), JAVA_CRASH_FILE);
             String javaCrash = readSmallFile(javaCrashFile);
-            String name = save(context, build(context, crash, javaCrash));
+            String name = save(context, build(context, crash, javaCrash, exits));
             javaCrashFile.delete();
             return name;
         } catch (Throwable error) {
@@ -103,7 +97,48 @@ final class CrashReport {
         }
     }
 
+    /**
+     * Anything but a normal quit, the player closing the app, or an update counts:
+     * crashes, but also Android stopping the game for memory or the game giving up.
+     */
+    private static boolean isProblem(ApplicationExitInfo info) {
+        switch (info.getReason()) {
+            case ApplicationExitInfo.REASON_USER_REQUESTED:
+            case ApplicationExitInfo.REASON_USER_STOPPED:
+            case ApplicationExitInfo.REASON_PACKAGE_UPDATED:
+            case ApplicationExitInfo.REASON_PACKAGE_STATE_CHANGE:
+            case ApplicationExitInfo.REASON_PERMISSION_CHANGE:
+                return false;
+            case ApplicationExitInfo.REASON_EXIT_SELF:
+                return info.getStatus() != 0;
+            default:
+                return true;
+        }
+    }
+
+    /** The "Save a problem report" button: always writes a report, with whatever Android recorded. */
+    static String saveNow(Context context) {
+        List<ApplicationExitInfo> exits = null;
+        ApplicationExitInfo latest = null;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                ActivityManager am = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
+                exits = am.getHistoricalProcessExitReasons(context.getPackageName(), 0, 8);
+                for (ApplicationExitInfo info : exits) {
+                    if (isProblem(info) && (latest == null || info.getTimestamp() > latest.getTimestamp())) latest = info;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return save(context, build(context, latest, readSmallFile(new File(context.getFilesDir(), JAVA_CRASH_FILE)), exits));
+    }
+
     private static String build(Context context, ApplicationExitInfo exit, String javaCrash) {
+        return build(context, exit, javaCrash, null);
+    }
+
+    private static String build(Context context, ApplicationExitInfo exit, String javaCrash,
+            List<ApplicationExitInfo> recent) {
         StringBuilder out = new StringBuilder();
         out.append("Harmony of Despair crash report\n");
         out.append("Saved: ").append(new Date()).append('\n');
@@ -140,6 +175,22 @@ final class CrashReport {
             } catch (Throwable error) {
                 out.append("Trace unavailable: ").append(error).append('\n');
             }
+        }
+        if (recent != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            out.append("\n== Recent exits (newest first) ==\n");
+            for (ApplicationExitInfo info : recent) {
+                out.append(new Date(info.getTimestamp())).append("  reason ").append(info.getReason())
+                        .append("  status ").append(info.getStatus()).append("  importance ").append(info.getImportance())
+                        .append("  pss/rss kB ").append(info.getPss()).append('/').append(info.getRss())
+                        .append("  ").append(info.getDescription()).append('\n');
+            }
+        }
+        ActivityManager.MemoryInfo memory = new ActivityManager.MemoryInfo();
+        try {
+            ((ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE)).getMemoryInfo(memory);
+            out.append("\nPhone memory: total ").append(memory.totalMem / (1024 * 1024)).append(" MB, free ")
+                    .append(memory.availMem / (1024 * 1024)).append(" MB\n");
+        } catch (Throwable ignored) {
         }
         if (javaCrash != null && !javaCrash.isEmpty()) {
             out.append("\n== Last Java crash ==\n").append(javaCrash).append('\n');
