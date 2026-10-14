@@ -47,6 +47,7 @@ set(HARMONYRECOMP_SOURCES
     src/main.cpp
     src/game_data.cpp
     src/scene_cache_hook.cpp
+    src/team_search_diag_hooks.cpp
 )
 
 if(WIN32)
