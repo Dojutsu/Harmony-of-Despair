@@ -50,7 +50,10 @@ if(REXGLUE_USE_VULKAN)
         spirv-headers spirv-tools glslang
     )
     if(APPLE)
-        list(APPEND REQUIRED_SUBMODULES vulkan-loader moltenvk)
+        list(APPEND REQUIRED_SUBMODULES moltenvk)
+        if(NOT IOS)
+            list(APPEND REQUIRED_SUBMODULES vulkan-loader)
+        endif()
     endif()
 endif()
 
@@ -210,8 +213,11 @@ if(REXGLUE_USE_VULKAN)
         set(LOADER_CODEGEN OFF CACHE BOOL "" FORCE)
         string(REGEX REPLACE "\\.[0-9]+$" "" VulkanHeaders_VERSION
             "${REXGLUE_VULKAN_SDK_VERSION}")
-        add_subdirectory(vulkan-loader EXCLUDE_FROM_ALL)
-        set_target_properties(vulkan PROPERTIES EXCLUDE_FROM_ALL FALSE)
+        # iOS apps load MoltenVK directly from the bundle; there is no loader.
+        if(NOT IOS)
+            add_subdirectory(vulkan-loader EXCLUDE_FROM_ALL)
+            set_target_properties(vulkan PROPERTIES EXCLUDE_FROM_ALL FALSE)
+        endif()
 
         set(MVK_BUILD_SHADER_CONVERTER_TOOL OFF CACHE BOOL "" FORCE)
         set(MVK_EXCLUDE_SPIRV_TOOLS ON CACHE BOOL "" FORCE)

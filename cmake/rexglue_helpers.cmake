@@ -9,6 +9,17 @@
 include_guard(GLOBAL)
 
 function(_rexglue_stage_macos_vulkan_runtime target_name)
+    if(IOS)
+        # iOS: MoltenVK alone, loaded from the app's Frameworks directory by
+        # VulkanInstance. The packaging step moves it into the bundle.
+        add_custom_command(TARGET ${target_name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:MoltenVK::MoltenVK>"
+                "$<TARGET_FILE_DIR:${target_name}>/libMoltenVK.dylib"
+            VERBATIM
+        )
+        return()
+    endif()
     if(TARGET Vulkan::Loader AND TARGET MoltenVK::MoltenVK)
         set(_rexglue_vulkan_loader Vulkan::Loader)
         set(_rexglue_moltenvk MoltenVK::MoltenVK)
@@ -103,8 +114,14 @@ function(rexglue_configure_target target_name)
         # macOS analogue of $ORIGIN: resolve @rpath dylibs (librexruntime,
         # libTracyClient, ...) next to the executable. Pairs with the runtime
         # dylib staging below so the app is self-contained.
+        # iOS bundles keep every dylib in <App>.app/Frameworks.
+        if(IOS)
+            set(_rexglue_rpath "@executable_path/Frameworks")
+        else()
+            set(_rexglue_rpath "@executable_path")
+        endif()
         set_target_properties(${target_name} PROPERTIES
-            INSTALL_RPATH "@executable_path"
+            INSTALL_RPATH "${_rexglue_rpath}"
             BUILD_WITH_INSTALL_RPATH ON
         )
     endif()

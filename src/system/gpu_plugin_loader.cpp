@@ -55,7 +55,12 @@ std::vector<platform::DynamicLibrary>& LoadedPlugins() {
 }  // namespace
 
 std::unique_ptr<IGraphicsSystem> LoadGpuPlugin(std::string_view name, std::string_view backend) {
+#if REX_PLATFORM_IOS
+  // iOS only loads code from the signed bundle's Frameworks directory.
+  auto path = rex::filesystem::GetExecutableFolder() / "Frameworks" / PluginFileName(name);
+#else
   auto path = rex::filesystem::GetExecutableFolder() / PluginFileName(name);
+#endif
   if (!std::filesystem::exists(path)) {
     REXSYS_ERROR(
         "GPU plugin '{}' not found at {}. Stage it next to the executable "

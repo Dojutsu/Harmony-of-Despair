@@ -24,7 +24,13 @@ std::filesystem::path ResolveModuleLibraryPath(const std::filesystem::path& path
   // Same CMake target stems on macOS, built as lib<name>.dylib next to the host.
   if (!path.empty() && !path.has_parent_path() && !path.has_extension() && path != "." &&
       path != "..") {
+#if REX_PLATFORM_IOS
+    // iOS only loads code from the signed bundle's Frameworks directory.
+    return rex::filesystem::GetExecutableFolder() / "Frameworks" /
+           ("lib" + path.string() + ".dylib");
+#else
     return rex::filesystem::GetExecutableFolder() / ("lib" + path.string() + ".dylib");
+#endif
   }
 #endif
   return path;

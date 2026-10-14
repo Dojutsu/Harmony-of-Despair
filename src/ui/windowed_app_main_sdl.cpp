@@ -130,6 +130,12 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hinstance_prev, LPWSTR comman
 
 #elif !REX_PLATFORM_WIN32 && !defined(REXGLUE_CUSTOM_ENTRYPOINT)
 
+#if REX_PLATFORM_IOS
+// UIKit owns the process entry point: SDL_main.h renames main() to SDL_main
+// and supplies a main() that starts UIApplicationMain and then calls it.
+#include <SDL3/SDL_main.h>
+#endif
+
 int main(int argc, char* argv[]) {
   return rex::ui::RunWindowedApp(argc, argv);
 }

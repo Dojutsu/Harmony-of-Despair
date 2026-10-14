@@ -23,6 +23,9 @@
 
 #if REX_PLATFORM_MAC
 #include "vulkan_moltenvk.h"
+#if REX_PLATFORM_IOS
+#include <rex/filesystem.h>
+#endif
 #endif
 
 REXCVAR_DEFINE_BOOL(vulkan_log_debug_messages, true, "UI/Vulkan", "Log Vulkan debug messages");
@@ -46,6 +49,12 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
   bool functions_loaded = true;
   bool loader_loaded = false;
 #if REX_PLATFORM_MAC
+#if REX_PLATFORM_IOS
+  // No Vulkan loader on iOS: MoltenVK ships in the bundle's Frameworks
+  // directory and exports vkGetInstanceProcAddr itself.
+  std::vector<std::filesystem::path> loader_candidates = {
+      rex::filesystem::GetExecutableFolder() / "Frameworks" / "libMoltenVK.dylib"};
+#else
   const MacOSVulkanRuntimePaths macos_runtime_paths = DetectMacOSVulkanRuntimePaths();
   ConfigureMacOSVulkanEnvironment(macos_runtime_paths);
 
@@ -53,6 +62,7 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
   loader_candidates.emplace_back(platform::lib_names::kVulkanLoader);
   loader_candidates.emplace_back("libvulkan.dylib");
   loader_candidates.emplace_back("libMoltenVK.dylib");
+#endif
 
   std::vector<std::string> attempted_loader_paths;
   attempted_loader_paths.reserve(loader_candidates.size());

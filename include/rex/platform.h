@@ -29,7 +29,12 @@
 #endif
 
 #if defined(TARGET_OS_MAC) && TARGET_OS_MAC
+// iOS/iPadOS is Darwin too and shares the Mac paths; REX_PLATFORM_IOS marks
+// the places where UIKit and the app sandbox differ from macOS.
 #define REX_PLATFORM_MAC 1
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+#define REX_PLATFORM_IOS 1
+#endif
 #elif defined(WIN32) || defined(_WIN32)
 #define REX_PLATFORM_WIN32 1
 #elif defined(__ANDROID__)
@@ -46,6 +51,9 @@
 // so they can be used in static_assert and regular expressions.
 #ifndef REX_PLATFORM_MAC
 #define REX_PLATFORM_MAC 0
+#endif
+#ifndef REX_PLATFORM_IOS
+#define REX_PLATFORM_IOS 0
 #endif
 #ifndef REX_PLATFORM_WIN32
 #define REX_PLATFORM_WIN32 0

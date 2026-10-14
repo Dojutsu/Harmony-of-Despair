@@ -40,7 +40,9 @@
 #include <ws2tcpip.h>
 #elif REX_PLATFORM_POSIX_ONLINE
 #include <arpa/inet.h>
+#if !REX_PLATFORM_IOS
 #include <curl/curl.h>
+#endif
 #if REX_PLATFORM_GNU_LINUX
 #include <sys/random.h>
 #else
@@ -52,6 +54,13 @@
 #endif
 
 namespace rex::system::xam {
+
+#if REX_PLATFORM_IOS
+// http_apple.mm: NSURLSession transport (iOS has no libcurl).
+bool AppleHttpRequest(const std::string& url, const std::string& method, std::string_view body,
+                      std::string_view bearer, size_t max_response_bytes, uint32_t& status_out,
+                      std::string& body_out);
+#endif
 
 class ClientAdmissionSocketOwner final {
  public:
@@ -1112,6 +1121,31 @@ std::optional<HttpResult> Request(std::string_view base_url, std::wstring_view m
   WinHttpCloseHandle(connection);
   WinHttpCloseHandle(session);
   return received ? std::optional<HttpResult>(std::move(result)) : std::nullopt;
+}
+#elif REX_PLATFORM_IOS
+std::optional<HttpResult> Request(std::string_view base_url, std::wstring_view method,
+                                  std::string_view relative_path, std::string_view body,
+                                  std::string_view bearer = {}) {
+  if (base_url.empty() || !IsSafeDirectoryUrl(base_url)) return std::nullopt;
+  auto full_url = std::string(base_url);
+  while (full_url.ends_with('/'))
+    full_url.pop_back();
+  if (!relative_path.starts_with('/'))
+    full_url.push_back('/');
+  full_url.append(relative_path);
+
+  const std::string method_ascii(method.begin(), method.end());
+  if (method_ascii.empty() ||
+      !std::all_of(method_ascii.begin(), method_ascii.end(), [](unsigned char ch) {
+        return ch >= 'A' && ch <= 'Z';
+      }))
+    return std::nullopt;
+
+  HttpResult result;
+  if (!AppleHttpRequest(full_url, method_ascii, body, bearer, kMaxResponseBytes, result.status,
+                        result.body))
+    return std::nullopt;
+  return result;
 }
 #elif REX_PLATFORM_POSIX_ONLINE
 size_t AppendCurlResponse(char* data, size_t size, size_t count, void* context) {
