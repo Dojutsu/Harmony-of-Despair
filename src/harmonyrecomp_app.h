@@ -23,6 +23,10 @@
 #endif
 REXCVAR_DECLARE(std::string, harmony_config_root);
 REXCVAR_DECLARE(bool, harmony_start_screen);
+#elif defined(__APPLE__)
+#include "linux_first_run.h"
+REXCVAR_DECLARE(std::string, harmony_config_root);
+REXCVAR_DECLARE(bool, harmony_start_screen);
 #endif
 
 class HarmonyrecompApp : public rex::ReXApp {
@@ -60,6 +64,14 @@ class HarmonyrecompApp : public rex::ReXApp {
     paths.config_path = harmony::LinuxConfigPath(REXCVAR_GET(harmony_config_root),
         xdg ? xdg : "", home ? home : "");
     std::filesystem::create_directories(paths.config_path.parent_path());
+#elif defined(__APPLE__)
+    std::filesystem::path root(REXCVAR_GET(harmony_config_root));
+    if (root.empty() || !root.is_absolute()) {
+      const char* home = std::getenv("HOME");
+      root = std::filesystem::path(home ? home : "/tmp") / "Library" / "Application Support";
+    }
+    paths.config_path = root / "HarmonyRecomp" / "harmonyrecomp.toml";
+    std::filesystem::create_directories(paths.config_path.parent_path());
 #endif
     // An explicit --game_data_root remains authoritative for developers and
     // advanced users. Normal launches use the private per-user import.
@@ -72,7 +84,7 @@ class HarmonyrecompApp : public rex::ReXApp {
   std::optional<rex::PathConfig> OnFinalizePaths(
       const rex::PathConfig& defaults,
       std::function<void(rex::PathConfig)> resume) override {
-#if defined(__linux__) && !defined(__ANDROID__)
+#if (defined(__linux__) && !defined(__ANDROID__)) || defined(__APPLE__)
     // Shared DLC installed by the setup screen is linked into this profile.
     harmony::first_run::MirrorSharedDlc(defaults.game_data_root, defaults.user_data_root);
     const bool needs_setup = imgui_drawer() &&
@@ -102,7 +114,7 @@ class HarmonyrecompApp : public rex::ReXApp {
               rex::cvar::SetFlagByName("user_name", choice.name);
               rex::cvar::SetFlagByName("user_xuid", std::to_string(choice.xuid));
               rex::cvar::SetFlagByName("lan_online", "true");
-              // Linux cannot bind the title's guest port 1000 without root;
+              // Linux and macOS cannot bind the title's guest port 1000 without root;
               // use the same fixed ports as the Windows launcher.
               rex::cvar::SetFlagByName("lan_discovery_port", "30741");
               rex::cvar::SetFlagByName("lan_gameplay_port", "30742");

@@ -454,6 +454,10 @@ fs::path DefaultRoot() {
   if (const char* local_app_data = std::getenv("LOCALAPPDATA")) {
     return fs::path(local_app_data) / "HarmonyRecomp" / "game-data";
   }
+#elif defined(__APPLE__)
+  if (const char* home = std::getenv("HOME")) {
+    return fs::path(home) / "Library" / "Application Support" / "HarmonyRecomp" / "game-data";
+  }
 #else
   if (const char* xdg_data_home = std::getenv("XDG_DATA_HOME")) {
     return fs::path(xdg_data_home) / "HarmonyRecomp" / "game-data";

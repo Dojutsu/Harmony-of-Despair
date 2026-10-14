@@ -55,6 +55,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/linux_first_run.cpp src/dlc_manifest.cpp)
     # The opt-in Vulkan diagnostic includes the SDK's RenderDoc API header.
     target_link_libraries(harmonyrecomp PRIVATE renderdoc)
+elseif(APPLE)
+    rexglue_setup_target(harmonyrecomp GPU_PLUGINS xenos)
+    # The Mac app reuses the desktop start screen and first-run setup.
+    target_sources(harmonyrecomp PRIVATE src/linux_first_run.cpp src/dlc_manifest.cpp)
 else()
     rexglue_setup_target(harmonyrecomp GPU_PLUGINS xenos)
 endif()
@@ -166,8 +170,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/crypto/sha256.cpp")
 
     target_link_libraries(harmonyrecomp-dlc-import PRIVATE sha256_lib)
     target_link_libraries(harmonyrecomp-import PRIVATE sha256_lib)
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        # The Linux first-run setup screen installs DLC in-process.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)
+        # The Linux and Mac first-run setup screen installs DLC in-process.
         target_link_libraries(harmonyrecomp PRIVATE sha256_lib)
     endif()
 
