@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <atomic>
 #include <array>
 #include <climits>
 #include <chrono>
@@ -1257,6 +1258,12 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
     const int sent = sendto(handle, reinterpret_cast<const char*>(wire->data()), int(wire->size()), flags | kNoSignal,
                            to ? reinterpret_cast<sockaddr*>(&nto) : nullptr,
                            to ? int(sizeof(nto)) : 0);
+    {
+      static std::atomic<uint32_t> logged{0};
+      if (REXCVAR_GET(net_packet_trace) && logged.fetch_add(1) < 300)
+        REXSYS_INFO("GAMEPLAY_WIRE_SEND socket={} native={:08X}:{} bytes={} result={}", handle,
+                    nto.sin_addr.s_addr, ntohs(nto.sin_port), buf_len, sent);
+    }
     if (sent < 0) return -1;
     if (size_t(sent) != wire->size()) { FailSocket(EMSGSIZE); return -1; }
     xam::NatProbeRecordGameplayTraffic(handle,

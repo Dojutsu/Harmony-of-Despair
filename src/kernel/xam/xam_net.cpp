@@ -405,7 +405,8 @@ void CompleteRecvFromError(PendingRecvFrom& pending, uint32_t error) {
 void LogGameplayPayload(const char* direction, uint32_t socket_handle, const uint8_t* payload,
                         uint32_t length) {
   static std::atomic<uint32_t> logged{0};
-  if (!payload || !length || length > 256 || logged.fetch_add(1) >= 400)
+  if (!REXCVAR_GET(net_packet_trace) || !payload || !length || length > 256 ||
+      logged.fetch_add(1) >= 400)
     return;
   std::string hex;
   hex.reserve(length * 2);
@@ -1762,7 +1763,10 @@ u32 NetDll_bind_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> nam
   }
   X_STATUS status = socket->Bind(&native_name, namelen);
   if (XFAILED(status)) {
-    XThread::SetLastError(LastSocketError());
+    const auto error = LastSocketError();
+    REXKRNL_WARN("NetDll_bind: failed socket={:08X} address={:08X}:{} error={}", socket_handle,
+                 htonl(uint32_t(native_name.sin_addr)), ntohs(native_name.sin_port), error);
+    XThread::SetLastError(error);
     return -1;
   }
   uint16_t bound_port = ntohs(socket->bound_port());
