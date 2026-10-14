@@ -10,14 +10,16 @@ build_dir=$(cd "$1" && pwd)
 app=$2
 icon_png=${3:-}
 
-test -x "$build_dir/harmonyrecomp" || { echo "no harmonyrecomp in $build_dir" >&2; exit 1; }
+# CMake lays out iOS executables as <name>.app with the dylibs beside them.
+built="$build_dir/harmonyrecomp.app"
+test -x "$built/harmonyrecomp" || { echo "no harmonyrecomp.app in $build_dir" >&2; exit 1; }
 rm -rf "$app"
 mkdir -p "$app/Frameworks"
 
-cp "$build_dir/harmonyrecomp" "$app/harmonyrecomp"
+cp "$built/harmonyrecomp" "$app/harmonyrecomp"
 # iOS loads code only from the bundle; the runtime looks in Frameworks for
 # MoltenVK and the guest modules (rpath @executable_path/Frameworks).
-find "$build_dir" -maxdepth 1 -name '*.dylib' -type f -exec cp {} "$app/Frameworks/" \;
+find "$built" -maxdepth 1 -name '*.dylib' -type f -exec cp {} "$app/Frameworks/" \;
 
 version=$(git -C "$(dirname "$0")/../.." describe --tags --always 2>/dev/null || echo dev)
 # Same Info.plist the Xcode wrapper project uses, with its build settings filled in.

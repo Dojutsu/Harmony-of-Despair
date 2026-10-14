@@ -27,15 +27,15 @@ deployment_target=${IOS_DEPLOYMENT_TARGET:-17.0}
 build_dir="$game_root/out/build/ios-arm64-$(echo "$build_type" | tr '[:upper:]' '[:lower:]')"
 openssl_prefix="$work_root/deps/openssl-ios"
 
-# OpenSSL (libcrypto only is linked; static, no apps or tests).
+# OpenSSL (libcrypto only is linked; static, no apps or tests). no-asm: its
+# assembly objects otherwise get tagged for macOS and fail the iOS link.
 if [ ! -f "$openssl_prefix/lib/libcrypto.a" ]; then
   openssl_src=${OPENSSL_SRC:-$(ls -d "$work_root"/deps/src/openssl-*/ | head -1)}
   scratch=$(mktemp -d)
   rsync -a "$openssl_src/" "$scratch/openssl/"
   (
     cd "$scratch/openssl"
-    CC="$(xcrun --sdk iphoneos -f clang)" \
-      ./Configure ios64-xcrun no-shared no-tests no-apps no-docs no-dso \
+    ./Configure ios64-xcrun no-asm no-shared no-tests no-apps no-docs no-dso \
         -mios-version-min="$deployment_target" --prefix="$openssl_prefix" --libdir=lib
     make -j"$jobs" build_libs
     make install_dev
@@ -53,7 +53,10 @@ cmake -S "$game_root" -B "$build_dir" -G Ninja \
   -DREXGLUE_USE_PREGENERATED=ON \
   -DREXGLUE_ENABLE_TRACY=OFF \
   -DOPENSSL_ROOT_DIR="$openssl_prefix" \
+  -DOPENSSL_INCLUDE_DIR="$openssl_prefix/include" \
+  -DOPENSSL_CRYPTO_LIBRARY="$openssl_prefix/lib/libcrypto.a" \
+  -DOPENSSL_SSL_LIBRARY="$openssl_prefix/lib/libssl.a" \
   -DOPENSSL_USE_STATIC_LIBS=ON
 
 cmake --build "$build_dir" --target harmonyrecomp --parallel "$jobs"
-echo "Built $build_dir/harmonyrecomp"
+echo "Built $build_dir/harmonyrecomp.app"
