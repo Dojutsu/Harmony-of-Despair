@@ -247,9 +247,42 @@ X_HRESULT WriteSearchResults(KernelState* state, uint32_t output_ptr, uint32_t o
     std::memcpy(requested_contexts.data(), state->memory()->TranslateVirtual(contexts_ptr),
                 context_bytes);
   }
+  // A real search result carries the host session's properties, not only the
+  // ones the searcher filtered on: the title's Quick Search skips any result
+  // without properties, and its search sends none once Hard is unlocked. Add
+  // each listed host property the request did not name, when it all fits.
+  std::vector<std::vector<std::pair<uint32_t, const std::vector<uint8_t>*>>> extra_properties(
+      count);
+  size_t extra_property_total = 0;
+  for (size_t i = 0; i < count; ++i) {
+    if (!entries[i].listing)
+      continue;
+    for (const auto& [id, value] : entries[i].listing->properties) {
+      const uint8_t type = uint8_t(id >> 28);
+      const bool sized = ((type == 1 || type == 5) && value.size() == 4) ||
+                         ((type == 2 || type == 3) && value.size() == 8);
+      bool requested = false;
+      for (uint16_t p = 0; p < property_count && !requested; ++p)
+        requested = memory::load_and_swap<uint32_t>(requested_properties.data() +
+                                                    p * kGuestUserPropertySize) == id;
+      if (sized && !requested && property_count + extra_properties[i].size() < 0xFFFF)
+        extra_properties[i].emplace_back(id, &value);
+    }
+    extra_property_total += extra_properties[i].size();
+  }
   const size_t metadata_bytes_per_result = property_bytes + context_bytes;
   size_t required = sizeof(GuestSearchHeader) + count * sizeof(GuestSearchResult) +
                     count * metadata_bytes_per_result;
+  if (extra_property_total) {
+    const size_t extended = required + extra_property_total * kGuestUserPropertySize;
+    if (output_ptr && output_size >= extended) {
+      required = extended;
+    } else {
+      REXKRNL_INFO("SEARCH_DIAG host properties omitted: buffer={} needed={}", output_size,
+                   extended);
+      for (auto& extra : extra_properties) extra.clear();
+    }
+  }
   REXKRNL_INFO(
       "XSession search results: discovered={} remote={} listed={} selected={} max={} "
       "output={:08X} size={} required={}",
@@ -274,16 +307,25 @@ X_HRESULT WriteSearchResults(KernelState* state, uint32_t output_ptr, uint32_t o
     results[i].open_private_slots = entry.open_private;
     results[i].filled_public_slots = entry.filled_public;
     results[i].filled_private_slots = entry.filled_private;
-    results[i].property_count = property_count;
+    const auto& extra = extra_properties[i];
+    const size_t entry_property_bytes = property_bytes + extra.size() * kGuestUserPropertySize;
+    results[i].property_count = uint32_t(property_count + extra.size());
     results[i].context_count = context_count;
-    if (property_bytes) {
+    if (entry_property_bytes) {
       results[i].properties_ptr = metadata_ptr;
       auto* properties = state->memory()->TranslateVirtual(metadata_ptr);
-      std::memcpy(properties, requested_properties.data(), property_bytes);
+      if (property_bytes)
+        std::memcpy(properties, requested_properties.data(), property_bytes);
       if (entry.listing)
         for (uint16_t p = 0; p < property_count; ++p)
           ApplyListingProperty(properties + p * kGuestUserPropertySize, *entry.listing);
-      metadata_ptr += uint32_t(property_bytes);
+      for (size_t e = 0; e < extra.size(); ++e) {
+        auto* property = properties + property_bytes + e * kGuestUserPropertySize;
+        memory::store_and_swap<uint32_t>(property, extra[e].first);
+        property[8] = uint8_t(extra[e].first >> 28);
+        std::memcpy(property + 16, extra[e].second->data(), extra[e].second->size());
+      }
+      metadata_ptr += uint32_t(entry_property_bytes);
     }
     if (context_bytes) {
       results[i].contexts_ptr = metadata_ptr;
