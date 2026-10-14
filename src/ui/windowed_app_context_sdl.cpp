@@ -91,6 +91,9 @@ bool SDLWindowedAppContext::Initialize() {
     // coming up for a text field then flipped the game into a portrait-sized
     // surface. The game is landscape only, as in the Info.plist.
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+    // Hide the home indicator and require a second swipe to leave, so a
+    // thumb near the bottom edge mid-fight doesn't drop out of the game.
+    SDL_SetHint(SDL_HINT_IOS_HIDE_HOME_INDICATOR, "2");
 #elif REX_PLATFORM_MAC
     // macOS presents via a CAMetalLayer surface obtained from the Cocoa driver.
     if (requested_driver.empty()) {

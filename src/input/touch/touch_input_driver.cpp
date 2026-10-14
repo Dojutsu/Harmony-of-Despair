@@ -76,6 +76,12 @@ struct Finger {
 struct State {
   std::mutex mutex;
   float aspect = 16.0f / 9.0f;
+  // Safe area insets in height units (iPhone notch / Dynamic Island, home
+  // indicator); the controls are laid out inside them.
+  float inset_left = 0.0f;
+  float inset_right = 0.0f;
+  float inset_top = 0.0f;
+  float inset_bottom = 0.0f;
   Finger fingers[kMaxFingers];
   bool stick_active = false;
   float stick_x = 0.0f;  // base, height units
@@ -98,16 +104,43 @@ struct Placed {
   uint16_t mask;
 };
 
-// Buttons first (kButtons order), then Back, Start.
-std::vector<Placed> PlaceButtons(float aspect) {
+// Window aspect and safe area, read from the first SDL window. Callers hold
+// the state lock.
+void UpdateGeometry(State& s, SDL_Window* window) {
+  if (!window) {
+    int count = 0;
+    SDL_Window** windows = SDL_GetWindows(&count);
+    window = windows && count > 0 ? windows[0] : nullptr;
+    SDL_free(windows);
+  }
+  int w = 0, h = 0;
+  if (!window || !SDL_GetWindowSize(window, &w, &h) || w <= 0 || h <= 0) return;
+  s.aspect = float(w) / float(h);
+  SDL_Rect safe{};
+  if (SDL_GetWindowSafeArea(window, &safe) && safe.w > 0 && safe.h > 0) {
+    s.inset_left = float(safe.x) / float(h);
+    s.inset_top = float(safe.y) / float(h);
+    s.inset_right = float(w - safe.x - safe.w) / float(h);
+    s.inset_bottom = float(h - safe.y - safe.h) / float(h);
+  }
+}
+
+// Buttons first (kButtons order), then Back, Start. The layout's vertical
+// positions are fractions of the safe height, offset by the top inset.
+std::vector<Placed> PlaceButtons(const State& s) {
+  const float aspect = s.aspect;
+  const float safe_h = 1.0f - s.inset_top - s.inset_bottom;
+  const auto y_of = [&](float y) { return s.inset_top + y * safe_h; };
   std::vector<Placed> placed;
   for (const auto& def : kButtons) {
-    placed.push_back({def.from_right ? aspect - def.edge_x : def.edge_x, def.y, def.radius,
-                      def.label, def.kind, def.mask});
+    placed.push_back({def.from_right ? aspect - s.inset_right - def.edge_x
+                                     : s.inset_left + def.edge_x,
+                      y_of(def.y), def.radius, def.label, def.kind, def.mask});
   }
-  placed.push_back({aspect * 0.5f - kMenuOffset, kMenuY, kMenuRadius, "Back", Kind::kButton,
+  const float centre = s.inset_left + (aspect - s.inset_left - s.inset_right) * 0.5f;
+  placed.push_back({centre - kMenuOffset, y_of(kMenuY), kMenuRadius, "Back", Kind::kButton,
                     X_INPUT_GAMEPAD_BACK});
-  placed.push_back({aspect * 0.5f + kMenuOffset, kMenuY, kMenuRadius, "Start", Kind::kButton,
+  placed.push_back({centre + kMenuOffset, y_of(kMenuY), kMenuRadius, "Start", Kind::kButton,
                     X_INPUT_GAMEPAD_START});
   return placed;
 }
@@ -154,10 +187,8 @@ bool SDLCALL OnSdlEvent(void*, SDL_Event* event) {
 
   State& s = state();
   std::lock_guard lock(s.mutex);
-  if (SDL_Window* window = SDL_GetWindowFromID(event->tfinger.windowID)) {
-    int w = 0, h = 0;
-    if (SDL_GetWindowSize(window, &w, &h) && w > 0 && h > 0) s.aspect = float(w) / float(h);
-  }
+  if (SDL_Window* window = SDL_GetWindowFromID(event->tfinger.windowID))
+    UpdateGeometry(s, window);
   const float x = event->tfinger.x * s.aspect;
   const float y = event->tfinger.y;
   const SDL_FingerID id = event->tfinger.fingerID;
@@ -178,9 +209,10 @@ bool SDLCALL OnSdlEvent(void*, SDL_Event* event) {
     }
     if (!finger) return true;
     *finger = Finger{id, true, false, -1};
-    const auto placed = PlaceButtons(s.aspect);
+    const auto placed = PlaceButtons(s);
     finger->button = HitButton(placed, x, y);
-    if (finger->button < 0 && !s.stick_active && x < s.aspect * 0.5f && y > kStickZoneTop) {
+    if (finger->button < 0 && !s.stick_active && x < s.aspect * 0.5f &&
+        y > s.inset_top + kStickZoneTop * (1.0f - s.inset_top - s.inset_bottom)) {
       finger->on_stick = true;
       s.stick_active = true;
       s.stick_x = x;
@@ -192,7 +224,7 @@ bool SDLCALL OnSdlEvent(void*, SDL_Event* event) {
       UpdateKnob(s, x, y);
     } else {
       // Sliding a thumb across the face buttons moves the press with it.
-      finger->button = HitButton(PlaceButtons(s.aspect), x, y);
+      finger->button = HitButton(PlaceButtons(s), x, y);
     }
   } else if (up && finger) {
     if (finger->on_stick) {
@@ -215,8 +247,10 @@ OverlaySnapshot GetOverlaySnapshot(float aspect) {
   if (GamepadConnected() || aspect <= 0.0f) return snapshot;
   State& s = state();
   std::lock_guard lock(s.mutex);
+  UpdateGeometry(s, nullptr);
+  aspect = s.aspect;
   snapshot.visible = true;
-  const auto placed = PlaceButtons(aspect);
+  const auto placed = PlaceButtons(s);
   for (size_t i = 0; i < placed.size(); ++i) {
     OverlayControl control;
     control.x = placed[i].x / aspect;
@@ -228,8 +262,10 @@ OverlaySnapshot GetOverlaySnapshot(float aspect) {
     }
     snapshot.buttons.push_back(control);
   }
-  snapshot.stick_base.x = (s.stick_active ? s.stick_x : kStickHomeX) / aspect;
-  snapshot.stick_base.y = s.stick_active ? s.stick_y : kStickHomeY;
+  snapshot.stick_base.x = (s.stick_active ? s.stick_x : s.inset_left + kStickHomeX) / aspect;
+  snapshot.stick_base.y =
+      s.stick_active ? s.stick_y
+                     : s.inset_top + kStickHomeY * (1.0f - s.inset_top - s.inset_bottom);
   snapshot.stick_base.radius = kStickRadius;
   snapshot.stick_base.pressed = s.stick_active;
   snapshot.knob_x = s.knob_dx;
@@ -274,7 +310,7 @@ X_RESULT TouchInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state)
   if (!GamepadConnected() && is_active()) {
     State& s = state();
     std::lock_guard lock(s.mutex);
-    const auto placed = PlaceButtons(s.aspect);
+    const auto placed = PlaceButtons(s);
     uint16_t buttons = 0;
     for (const auto& f : s.fingers) {
       if (!f.active || f.button < 0) continue;
