@@ -87,6 +87,10 @@ bool SDLWindowedAppContext::Initialize() {
     if (requested_driver.empty()) {
       requested_driver = "uikit";
     }
+    // SDL lets a resizable window follow every orientation, and the keyboard
+    // coming up for a text field then flipped the game into a portrait-sized
+    // surface. The game is landscape only, as in the Info.plist.
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
 #elif REX_PLATFORM_MAC
     // macOS presents via a CAMetalLayer surface obtained from the Cocoa driver.
     if (requested_driver.empty()) {
