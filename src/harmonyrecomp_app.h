@@ -185,14 +185,6 @@ class HarmonyrecompApp : public rex::ReXApp {
       config.gpu_plugin = "xenos";
     }
 
-#if defined(__APPLE__)
-    // Fullscreen at launch currently leaves a blank green surface on macOS;
-    // start windowed unless the player chose fullscreen explicitly.
-    if (rex::cvar::GetFlagSource("fullscreen") == rex::cvar::Source::kDefault) {
-      rex::cvar::SetFlagByName("fullscreen", "false");
-    }
-#endif
-
     // Harmony of Despair checks bit 0 to expose the licensed full game. Match
     // --license_mask=1 only when no config, environment, or CLI value won.
     if (rex::cvar::GetFlagSource("license_mask") == rex::cvar::Source::kDefault) {
