@@ -151,7 +151,11 @@ std::vector<fs::path> ScanRoots() {
   roots.push_back(home);
   std::error_code ec;
   // SD cards and USB drives on SteamOS and most desktops.
+#if defined(__APPLE__)
+  for (const fs::path base : {fs::path("/Volumes")}) {
+#else
   for (const fs::path base : {fs::path("/run/media"), fs::path("/media")}) {
+#endif
     for (fs::directory_iterator it(base, ec), end; !ec && it != end; it.increment(ec)) {
       if (!it->is_directory(ec)) continue;
       roots.push_back(it->path());
@@ -721,7 +725,9 @@ class StartScreenDialog final : public rex::ui::ImGuiDialog {
     const bool join = ImGui::Button("Join", ImVec2(-FLT_MIN, 0));
     ImGui::EndDisabled();
     ImGui::Spacing();
+#if !defined(__APPLE__)
     ImGui::TextDisabled("Text boxes: press A, then Steam + X for the on-screen keyboard.");
+#endif
     const bool quit = ImGui::Button("Quit", ImVec2(-FLT_MIN, 0));
     ImGui::End();
     // HARMONY_SETUP_AUTO=1 (automated tests only): press Play after a pause.
@@ -883,7 +889,11 @@ void ShowInviteCodeOverlay(rex::ui::ImGuiDrawer* drawer, fs::path status_directo
 std::string OutboundIpv4() {
   // A UDP "connect" sends nothing; it only asks the kernel which local address
   // would carry internet traffic, i.e. the network the device is on right now.
+#if defined(__APPLE__)
+  const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+#else
   const int fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+#endif
   if (fd < 0) return {};
   sockaddr_in remote{};
   remote.sin_family = AF_INET;
