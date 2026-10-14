@@ -87,6 +87,10 @@ bool SDLWindowedAppContext::Initialize() {
     if (requested_driver.empty()) {
       requested_driver = "cocoa";
     }
+    // Fullscreen in its own Space leaves the presented CAMetalLayer showing a
+    // blank, stretched surface after the transition; use SDL's non-Space
+    // fullscreen instead, for startup fullscreen and runtime toggles alike.
+    SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "0");
 #endif
     if (!requested_driver.empty()) {
       SDL_SetHint(SDL_HINT_VIDEO_DRIVER, requested_driver.c_str());
