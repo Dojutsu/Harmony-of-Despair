@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <unordered_set>
 
 #include <rex/kernel/xam/apps/xgi_app.h>
@@ -38,6 +39,14 @@ bool InitializeEmptyStatsReadResults(std::span<uint8_t> results) {
 using namespace rex::system;
 
 namespace {
+// Session calls the title makes around a join, logged for the first few uses of
+// each call site so a short log shows what the title asked for.
+#define SESSION_CALL_DIAG(format, ...)                                     \
+  do {                                                                     \
+    static std::atomic<uint32_t> session_call_count{0};                    \
+    if (session_call_count.fetch_add(1) < 40)                              \
+      REXKRNL_INFO("SESSION_CALL " format __VA_OPT__(, ) __VA_ARGS__);    \
+  } while (0)
 constexpr uint32_t kSessionCreateHost = 1;
 constexpr uint32_t kInvalidUserIndex = 0xFFFFFFFFu;
 
@@ -520,7 +529,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t flags = memory::load_and_swap<uint32_t>(buffer + 4);
       uint64_t session_nonce = memory::load_and_swap<uint64_t>(buffer + 8);
 
-      REXKRNL_DEBUG("XGISessionDelete({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
+      SESSION_CALL_DIAG("XGISessionDelete({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
 
       auto* object = LookupSession(kernel_state_, obj_ptr);
       if (!object || !object->record())
@@ -543,7 +552,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t private_slots_array = memory::load_and_swap<uint32_t>(buffer + 16);
       bool is_local = xuid_array_ptr == 0;
 
-      REXKRNL_DEBUG("{}({:08X}, count={}, xuids={:08X}, users={:08X}, private={:08X})",
+      SESSION_CALL_DIAG("{}({:08X}, count={}, xuids={:08X}, users={:08X}, private={:08X})",
                     is_local ? "XGISessionJoinLocal" : "XGISessionJoinRemote", session_ptr,
                     user_count, xuid_array_ptr, user_index_array, private_slots_array);
       auto object = LookupArbitrationSession(kernel_state_, session_ptr, 0);
@@ -722,7 +731,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t flags = memory::load_and_swap<uint32_t>(buffer + 4);
       uint64_t session_nonce = memory::load_and_swap<uint64_t>(buffer + 8);
 
-      REXKRNL_DEBUG("XSessionStart({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
+      SESSION_CALL_DIAG("XSessionStart({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
 
       auto* object = LookupSession(kernel_state_, obj_ptr);
       return object && object->record() &&
@@ -738,7 +747,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t flags = memory::load_and_swap<uint32_t>(buffer + 4);
       uint64_t session_nonce = memory::load_and_swap<uint64_t>(buffer + 8);
 
-      REXKRNL_DEBUG("XSessionEnd({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
+      SESSION_CALL_DIAG("XSessionEnd({:08X}, {:08X}, {:016X})", obj_ptr, flags, session_nonce);
 
       auto* object = LookupSession(kernel_state_, obj_ptr);
       return object && object->record() &&
@@ -778,7 +787,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t maxPublicSlots = memory::load_and_swap<uint32_t>(buffer + 8);
       uint16_t maxPrivateSlots = memory::load_and_swap<uint16_t>(buffer + 12);
 
-      REXKRNL_DEBUG("XSessionModify({:08X}, {:08X}, {:08X}, {:08X})", obj_ptr, flags,
+      SESSION_CALL_DIAG("XSessionModify({:08X}, {:08X}, {:08X}, {:08X})", obj_ptr, flags,
                     maxPublicSlots, maxPrivateSlots);
 
       auto* object = LookupSession(kernel_state_, obj_ptr);
@@ -847,7 +856,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t reserved2 = memory::load_and_swap<uint32_t>(buffer + 16);
       uint32_t reserved3 = memory::load_and_swap<uint32_t>(buffer + 20);
 
-      REXKRNL_DEBUG("XSessionGetDetails({:08X}, {}, {:08X}, {}, {}, {})", obj_ptr,
+      SESSION_CALL_DIAG("XSessionGetDetails({:08X}, {}, {:08X}, {}, {}, {})", obj_ptr,
                     details_buffer_size, session_details_ptr, reserved1, reserved2, reserved3);
 
       auto* object = LookupSession(kernel_state_, obj_ptr);
@@ -900,7 +909,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t reserved2 = memory::load_and_swap<uint32_t>(buffer + 16);
       uint32_t reserved3 = memory::load_and_swap<uint32_t>(buffer + 20);
 
-      REXKRNL_DEBUG("XSessionMigrateHost({:08X}, {:08X}, {}, {}, {}, {})", obj_ptr,
+      SESSION_CALL_DIAG("XSessionMigrateHost({:08X}, {:08X}, {}, {}, {}, {})", obj_ptr,
                     session_info_ptr, user_index, reserved1, reserved2, reserved3);
 
       return X_E_SUCCESS;
@@ -911,7 +920,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t user_index = memory::load_and_swap<uint32_t>(buffer + 0);
       uint32_t session_info_ptr = memory::load_and_swap<uint32_t>(buffer + 4);
 
-      REXKRNL_DEBUG("XSessionGetInvitationData - unimplemented({}, {:08X})", user_index,
+      SESSION_CALL_DIAG("XSessionGetInvitationData - unimplemented({}, {:08X})", user_index,
                     session_info_ptr);
 
       return X_E_SUCCESS;
@@ -957,7 +966,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
         if (session->state == SessionState::kDeleted || session->nonce != request->nonce)
           return X_E_INVALIDARG;
       }
-      REXKRNL_DEBUG("XSessionArbitrationRegister({:08X}, {:08X}, {:016X}, {}, {}, {:08X})",
+      SESSION_CALL_DIAG("XSessionArbitrationRegister({:08X}, {:08X}, {:016X}, {}, {}, {:08X})",
                     request->session_object, request->flags, request->nonce,
                     request->duration_seconds, request->result_capacity, request->result_address);
       // Duration is recognized as a BE32 input. TU2 passes 300; no registration
@@ -1003,7 +1012,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t reserved2 = memory::load_and_swap<uint32_t>(buffer + 24);
       uint32_t reserved3 = memory::load_and_swap<uint32_t>(buffer + 28);
 
-      REXKRNL_DEBUG("XSessionSearchByID({}, {:08X}, {:08X}, {:08X}, {:08X}, {}, {}, {})",
+      SESSION_CALL_DIAG("XSessionSearchByID({}, {:08X}, {:08X}, {:08X}, {:08X}, {}, {}, {})",
                     user_index, num_session_ids, session_ids_ptr, results_buffer_size,
                     search_results_ptr, reserved1, reserved2, reserved3);
 
@@ -1027,7 +1036,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t reserved2 = memory::load_and_swap<uint32_t>(buffer + 16);
       uint32_t reserved3 = memory::load_and_swap<uint32_t>(buffer + 20);
 
-      REXKRNL_DEBUG("XSessionModifySkill({:08X}, {}, {:08X}, {}, {}, {})", obj_ptr, array_count,
+      SESSION_CALL_DIAG("XSessionModifySkill({:08X}, {}, {:08X}, {}, {}, {})", obj_ptr, array_count,
                     xuid_array_ptr, reserved1, reserved2, reserved3);
 
       return X_E_SUCCESS;
@@ -1070,7 +1079,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t num_views = memory::load_and_swap<uint32_t>(buffer + 12);
       uint32_t views_ptr = memory::load_and_swap<uint32_t>(buffer + 16);
 
-      REXKRNL_DEBUG("XSessionWriteStats({:08X}, {:016X}, {:08X}, {:08X})", obj_ptr, xuid, num_views,
+      SESSION_CALL_DIAG("XSessionWriteStats({:08X}, {:016X}, {:08X}, {:08X})", obj_ptr, xuid, num_views,
                     views_ptr);
 
       return X_E_SUCCESS;
@@ -1083,7 +1092,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t num_views = memory::load_and_swap<uint32_t>(buffer + 12);
       uint32_t views_ptr = memory::load_and_swap<uint32_t>(buffer + 16);
 
-      REXKRNL_DEBUG("XSessionFlushStats({:08X}, {:016X}, {:08X}, {:08X})", obj_ptr, xuid, num_views,
+      SESSION_CALL_DIAG("XSessionFlushStats({:08X}, {:016X}, {:08X}, {:08X})", obj_ptr, xuid, num_views,
                     views_ptr);
 
       return X_E_SUCCESS;
@@ -1116,7 +1125,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t context_ptr = memory::load_and_swap<uint32_t>(buffer + 16);
       auto context = context_ptr ? memory_->TranslateVirtual(context_ptr) : nullptr;
       uint32_t context_id = context ? memory::load_and_swap<uint32_t>(context + 0) : 0;
-      REXKRNL_DEBUG("XGIUserGetContext({:08X}, {:08X}, {:08X}))", user_index, context_ptr,
+      SESSION_CALL_DIAG("XGIUserGetContext({:08X}, {:08X}, {:08X}))", user_index, context_ptr,
                     context_id);
       uint32_t value = 0;
       if (context) {
@@ -1136,7 +1145,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t reserved2 = memory::load_and_swap<uint32_t>(buffer + 24);
       uint32_t reserved3 = memory::load_and_swap<uint32_t>(buffer + 28);
 
-      REXKRNL_DEBUG("XSessionSearchByIds({:08X}, {:08X}, {:08X}, {:08X}, {:08X}, {}, {}, {})",
+      SESSION_CALL_DIAG("XSessionSearchByIds({:08X}, {:08X}, {:08X}, {:08X}, {:08X}, {}, {}, {})",
                     user_index, num_session_ids, session_ids_ptr, results_buffer_size,
                     search_results_ptr, reserved1, reserved2, reserved3);
 
@@ -1161,7 +1170,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t num_users = memory::load_and_swap<uint32_t>(buffer + 44);
       uint32_t weighted_search = memory::load_and_swap<uint32_t>(buffer + 48);
 
-      REXKRNL_DEBUG(
+      SESSION_CALL_DIAG(
           "XSessionSearchWeighted({:08X}, {:08X}, {:08X}, {}, {}, {:08X}, {:08X}, {}, {}, {:08X}, "
           "{:08X}, {:08X}, {:08X}, {:08X}, {:08X})",
           proc_index, user_index, num_results, num_weighted_properties, num_weighted_contexts,
@@ -1172,7 +1181,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       return X_E_SUCCESS;
     }
     case 0x000B0071: {
-      REXKRNL_DEBUG("XGI 0x000B0071, unimplemented");
+      SESSION_CALL_DIAG("XGI 0x000B0071, unimplemented");
       return X_E_SUCCESS;
     }
   }

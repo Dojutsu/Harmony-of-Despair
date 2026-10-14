@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <atomic>
 #include <rex/kernel/xam/private.h>
 #include <rex/logging.h>
 #include <rex/hook.h>
@@ -92,6 +93,9 @@ u32 XNotifyGetNext_entry(u32 handle, u32 match_id, mapped_u32 id_ptr, mapped_u32
     if (id == 0x02000002)
       REXKRNL_INFO("INVITE_DIAG XNOTIFY_02000002_CONSUMED listener={:08X} match={:08X} user={}",
                     uint32_t(handle), uint32_t(match_id), param);
+    static std::atomic<uint32_t> logged{0};
+    if (logged.fetch_add(1) < 100)
+      REXKRNL_INFO("NOTIFY_DIAG delivered id={:08X} param={:08X}", id, param);
     REXKRNL_NOISY_DEBUG("XNotifyGetNext({:08X}, {:08X}) -> id={:#x}, param={}", uint32_t(handle),
                         uint32_t(match_id), id, param);
   }

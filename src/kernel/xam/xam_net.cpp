@@ -21,6 +21,7 @@
 #include <mutex>
 #include <new>
 #include <span>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include "pending_socket_sends_lifetime.h"
@@ -399,6 +400,20 @@ void CompleteRecvFromError(PendingRecvFrom& pending, uint32_t error) {
   pending_recv_changed.notify_all();
 }
 
+// Full contents of the first gameplay datagrams in each direction, so a log
+// shows the title's join conversation. Small packets only; never addresses.
+void LogGameplayPayload(const char* direction, uint32_t socket_handle, const uint8_t* payload,
+                        uint32_t length) {
+  static std::atomic<uint32_t> logged{0};
+  if (!payload || !length || length > 256 || logged.fetch_add(1) >= 400)
+    return;
+  std::string hex;
+  hex.reserve(length * 2);
+  for (uint32_t i = 0; i < length; ++i) hex += fmt::format("{:02X}", payload[i]);
+  REXKRNL_INFO("GAMEPLAY_PAYLOAD {} socket={:08X} bytes={} data={}", direction, socket_handle,
+               length, hex);
+}
+
 bool TryCompleteRecvFrom(PendingRecvFrom& pending, bool wait) {
   constexpr uint32_t kWsaNotSocket = 0x2736;
   auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(pending.socket_handle);
@@ -485,6 +500,7 @@ bool TryCompleteRecvFrom(PendingRecvFrom& pending, bool wait) {
       pending.transferred > 3 ? payload[3] : 0, pending.transferred > 4 ? payload[4] : 0,
       pending.transferred > 5 ? payload[5] : 0, pending.transferred > 6 ? payload[6] : 0,
       pending.transferred > 7 ? payload[7] : 0);
+  LogGameplayPayload("recv", pending.socket_handle, payload, pending.transferred);
   return true;
 }
 
@@ -1045,6 +1061,7 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
     // validation above, and retire the old cache before initiating new I/O.
     if (previous != pending_recvs.end()) pending_recvs.erase(previous);
   }
+  LogGameplayPayload("send", socket_handle, combined.data(), uint32_t(size));
   const int result = socket->SendTo(combined.data(), uint32_t(size), flags,
                                     to_ptr ? &native_to : nullptr, to_len);
   const uint32_t send_error = result < 0 ? LastSocketError() : 0;
@@ -1536,6 +1553,13 @@ u32 NetDll_XNetQosLookup_entry(u32 caller, u32 xnaddr_count, mapped_void xnaddr_
                                mapped_void in_addr_array, mapped_void service_id_array,
                                u32 probe_count, u32 bits_per_second, u32 flags, u32 event_handle,
                                mapped_u32 qos_out) {
+  {
+    static std::atomic<uint32_t> logged{0};
+    if (logged.fetch_add(1) < 40)
+      REXKRNL_INFO("QOS_DIAG lookup xnaddrs={} inaddrs={} probes={} bps={} flags={:08X}",
+                   uint32_t(xnaddr_count), uint32_t(in_addr_count), uint32_t(probe_count),
+                   uint32_t(bits_per_second), uint32_t(flags));
+  }
   if (!qos_out)
     return 0x2726;
   uint32_t result_count = xnaddr_count + in_addr_count;
@@ -1579,6 +1603,17 @@ u32 NetDll_XNetQosRelease_entry(u32 caller, ppc_ptr_t<XNQOS> qos) {
 
 u32 NetDll_XNetQosListen_entry(u32 caller, mapped_void id, mapped_void data, u32 data_size, u32 r7,
                                u32 flags) {
+  {
+    static std::atomic<uint32_t> logged{0};
+    if (logged.fetch_add(1) < 40) {
+      std::string hex;
+      if (data && data_size)
+        for (uint32_t i = 0; i < std::min<uint32_t>(data_size, 64); ++i)
+          hex += fmt::format("{:02X}", static_cast<const uint8_t*>(data.host_address())[i]);
+      REXKRNL_INFO("QOS_DIAG listen flags={:08X} bytes={} bps={} data={}", uint32_t(flags),
+                   uint32_t(data_size), uint32_t(r7), hex);
+    }
+  }
   // The first LAN milestone does not probe the payload. Accept enable/disable,
   // data, bandwidth and release updates so the title can proceed to lookup.
   return 0;
