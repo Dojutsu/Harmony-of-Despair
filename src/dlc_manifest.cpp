@@ -493,7 +493,10 @@ bool DlcManager::extract_to_staging(const fs::path& container_path,
     pending.pop();
     for (const auto& child : entry->children()) pending.push(child.get());
 
-    fs::path relative = fs::u8path(entry->path());
+    // Guest '\' separators are ordinary file-name characters on POSIX.
+    std::string guest_path = entry->path();
+    std::replace(guest_path.begin(), guest_path.end(), '\\', '/');
+    fs::path relative = fs::u8path(guest_path);
     if (relative.is_absolute()) relative = relative.relative_path();
 
     // Basic path safety checks before writing anything host-side.
