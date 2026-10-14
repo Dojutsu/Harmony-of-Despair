@@ -345,7 +345,7 @@ int Memory::MapViewsMac() {
 
   void* reserved_base = mmap(nullptr, total_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (reserved_base == MAP_FAILED) {
-    REXSYS_ERROR("MapViewsMac: reserve failed: {}", std::strerror(errno));
+    REXSYS_ERROR("MapViewsMac: reserve of 0x{:X} bytes failed: {}", total_size, std::strerror(errno));
     return 1;
   }
 
@@ -357,14 +357,11 @@ int Memory::MapViewsMac() {
                                            map_info[n].virtual_address_start + 1);
     size_t file_offset = static_cast<size_t>(map_info[n].target_address & granularity_mask);
     void* target_address = mapping_base + map_info[n].virtual_address_start;
-    void* result = mmap(target_address, view_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED,
-                        mapping_, file_offset);
-    if (result == MAP_FAILED || result != target_address) {
-      int err = errno;
-      REXSYS_ERROR(
-          "MapViewsMac: map failed view {} addr 0x{:016X} size 0x{:X} offset 0x{:X} err {} ({})", n,
-          reinterpret_cast<uintptr_t>(target_address), view_size, file_offset, err,
-          std::strerror(err));
+    void* result = rex::memory::MapFileView(mapping_, target_address, view_size,
+                                            rex::memory::PageAccess::kReadWrite, file_offset);
+    if (!result || result != target_address) {
+      REXSYS_ERROR("MapViewsMac: map failed view {} addr 0x{:016X} size 0x{:X} offset 0x{:X}", n,
+                   reinterpret_cast<uintptr_t>(target_address), view_size, file_offset);
       munmap(reserved_base, total_size);
       for (auto& view : views_.all_views) {
         view = nullptr;

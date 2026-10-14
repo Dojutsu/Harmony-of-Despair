@@ -62,6 +62,7 @@
 namespace rex {
 namespace memory {
 
+#if !REX_PLATFORM_MAC
 // Convert a filesystem path to a valid shm_open name (must start with /, no other slashes).
 // macOS enforces a 31-character total limit, so long names are folded from the full path rather
 // than only the filename. This keeps equal filenames in different directories distinct.
@@ -85,6 +86,7 @@ static std::string MakeShmName(const std::filesystem::path& path) {
 #endif
   return name;
 }
+#endif  // !REX_PLATFORM_MAC
 
 #if REX_PLATFORM_ANDROID
 // May be null if no dynamically loaded functions are required.
@@ -499,6 +501,42 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
     return kFileMappingHandleInvalid;
   }
   return static_cast<FileMappingHandle>(fd);
+#elif REX_PLATFORM_MAC
+  // Back the arena with an anonymous Mach memory entry rather than a named
+  // shm object: the iOS sandbox denies shm_open, and an unnamed entry can't
+  // collide with another instance. Pages are only committed when touched.
+  (void)path;
+  (void)commit;
+  vm_prot_t entry_prot;
+  switch (access) {
+    case PageAccess::kReadOnly:
+    case PageAccess::kExecuteReadOnly:
+      entry_prot = VM_PROT_READ;
+      break;
+    case PageAccess::kReadWrite:
+    case PageAccess::kExecuteReadWrite:
+      entry_prot = VM_PROT_READ | VM_PROT_WRITE;
+      break;
+    default:
+      return kFileMappingHandleInvalid;
+  }
+  if (!length) {
+    return kFileMappingHandleInvalid;
+  }
+  memory_object_size_t entry_size = length;
+  mach_port_t entry = MACH_PORT_NULL;
+  const kern_return_t kr =
+      mach_make_memory_entry_64(mach_task_self(), &entry_size, 0,
+                                MAP_MEM_NAMED_CREATE | entry_prot, &entry, MACH_PORT_NULL);
+  if (kr != KERN_SUCCESS || entry_size < length) {
+    REXSYS_ERROR("mach_make_memory_entry_64(0x{:X}) failed: {} ({})", length,
+                 mach_error_string(kr), kr);
+    if (entry != MACH_PORT_NULL) {
+      mach_port_deallocate(mach_task_self(), entry);
+    }
+    return kFileMappingHandleInvalid;
+  }
+  return static_cast<FileMappingHandle>(entry);
 #else
   int oflag;
   switch (access) {
@@ -534,11 +572,16 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
 
 void CloseFileMappingHandle(FileMappingHandle handle, const std::filesystem::path& path) {
   REX_MAPPING_MUTATION();
+#if REX_PLATFORM_MAC
+  (void)path;
+  mach_port_deallocate(mach_task_self(), static_cast<mach_port_t>(handle));
+  return;
+#endif
 #if REX_PLATFORM_GNU_LINUX
   ForgetMappingHandle(static_cast<int>(handle));
 #endif
   close(static_cast<int>(handle));
-#if !REX_PLATFORM_ANDROID && !REX_PLATFORM_GNU_LINUX
+#if !REX_PLATFORM_ANDROID && !REX_PLATFORM_GNU_LINUX && !REX_PLATFORM_MAC
   auto full_path = MakeShmName(path);
   shm_unlink(full_path.c_str());
 #endif
@@ -552,6 +595,26 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length, P
   if (file_offset % page != 0) {
     return nullptr;
   }
+
+#if REX_PLATFORM_MAC
+  // Map the Mach memory entry; VM_FLAGS_OVERWRITE replaces any reservation
+  // at a fixed address, matching MAP_FIXED below.
+  vm_address_t address = reinterpret_cast<vm_address_t>(base_address);
+  const int vm_flags = base_address ? (VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE) : VM_FLAGS_ANYWHERE;
+  const kern_return_t kr =
+      vm_map(mach_task_self(), &address, length, 0, vm_flags, static_cast<mach_port_t>(handle),
+             static_cast<vm_offset_t>(file_offset), FALSE,
+             static_cast<vm_prot_t>(ToPosixProtectFlags(access)), VM_PROT_READ | VM_PROT_WRITE,
+             VM_INHERIT_NONE);
+  if (kr != KERN_SUCCESS) {
+    return nullptr;
+  }
+  if (base_address && reinterpret_cast<void*>(address) != base_address) {
+    vm_deallocate(mach_task_self(), address, length);
+    return nullptr;
+  }
+  return reinterpret_cast<void*>(address);
+#endif
 
   int flags = MAP_SHARED;
 
