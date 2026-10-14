@@ -20,6 +20,12 @@ std::filesystem::path ResolveModuleLibraryPath(const std::filesystem::path& path
     // a dlopen call in rexruntime does not inherit the host's ELF RUNPATH.
     return rex::filesystem::GetExecutableFolder() / ("lib" + path.string() + ".so");
   }
+#elif REX_PLATFORM_MAC
+  // Same CMake target stems on macOS, built as lib<name>.dylib next to the host.
+  if (!path.empty() && !path.has_parent_path() && !path.has_extension() && path != "." &&
+      path != "..") {
+    return rex::filesystem::GetExecutableFolder() / ("lib" + path.string() + ".dylib");
+  }
 #endif
   return path;
 }
