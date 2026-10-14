@@ -582,6 +582,43 @@ bool SetNonBlocking(SOCKET value) {
       fcntl(value, F_SETFL, flags | O_NONBLOCK) == 0;
 #endif
 }
+bool IsPrivateLanIpv4(uint32_t network_address);
+
+#if REX_PLATFORM_IOS
+// iOS apps can't send broadcasts (EHOSTUNREACH without Apple's multicast
+// entitlement), so an invite LAN probe with no known host address sweeps the
+// local subnet with unicast instead: every address in the /24 around the
+// device's private Wi-Fi address, in network byte order.
+std::vector<uint32_t> LocalSubnetPeers() {
+  std::vector<uint32_t> peers;
+  ifaddrs* interfaces = nullptr;
+  if (getifaddrs(&interfaces) != 0)
+    return peers;
+  for (auto* item = interfaces; item; item = item->ifa_next) {
+    if (!item->ifa_addr || !item->ifa_netmask || item->ifa_addr->sa_family != AF_INET ||
+        !(item->ifa_flags & IFF_UP) || !(item->ifa_flags & IFF_RUNNING) ||
+        (item->ifa_flags & IFF_LOOPBACK))
+      continue;
+    const auto address = reinterpret_cast<const sockaddr_in*>(item->ifa_addr)->sin_addr.s_addr;
+    if (!IsPrivateLanIpv4(address))
+      continue;
+    // Even on a wider network, keep the sweep to the /24 around this device.
+    const uint32_t mask =
+        ntohl(reinterpret_cast<const sockaddr_in*>(item->ifa_netmask)->sin_addr.s_addr) |
+        0xFFFFFF00u;
+    const uint32_t self = ntohl(address);
+    const uint32_t network = self & mask, last = network | ~mask;
+    for (uint32_t host = network + 1; host < last; ++host) {
+      if (host != self)
+        peers.push_back(htonl(host));
+    }
+    break;
+  }
+  freeifaddrs(interfaces);
+  return peers;
+}
+#endif
+
 bool IsPrivateLanIpv4(uint32_t network_address) {
   uint32_t address = ntohl(network_address);
   return (address & 0xFF000000u) == 0x0A000000u || (address & 0xFFF00000u) == 0xAC100000u ||
@@ -2000,6 +2037,13 @@ LanDiscoveryService::DiscoverConfiguredInvite(
   std::vector<Candidate> candidates;
   auto next_lan_probe = started;
   bool lan_probe_send_failed = false;
+#if REX_PLATFORM_IOS
+  const auto subnet_peers =
+      lan_probe_target.ipv4 ? std::vector<uint32_t>{} : LocalSubnetPeers();
+  size_t subnet_sweep_next = 0;
+  if (lan_enabled && !subnet_peers.empty())
+    REXSYS_INFO("INVITE_LAN_SUBNET_SWEEP peers={}", subnet_peers.size());
+#endif
   bool sent_once = false;
   bool waiting_observed = false;
   bool traversal_observed = false;
@@ -2015,6 +2059,17 @@ LanDiscoveryService::DiscoverConfiguredInvite(
                                                         : htonl(INADDR_BROADCAST);
       broadcast.sin_port = htons(lan_probe_target.port ? lan_probe_target.port
                                                        : endpoint->discovery_port);
+#if REX_PLATFORM_IOS
+      if (!lan_probe_target.ipv4 && !subnet_peers.empty()) {
+        // A /24 every 0.8 s: several full sweeps within the discovery window.
+        constexpr size_t kSweepBatch = 32;
+        for (size_t i = 0; i < kSweepBatch; ++i) {
+          broadcast.sin_addr.s_addr = subnet_peers[subnet_sweep_next++ % subnet_peers.size()];
+          sendto(socket, reinterpret_cast<const char*>(&probe), sizeof(probe), 0,
+                 reinterpret_cast<sockaddr*>(&broadcast), sizeof(broadcast));
+        }
+      } else
+#endif
       if (sendto(socket, reinterpret_cast<const char*>(&probe), sizeof(probe), 0,
                  reinterpret_cast<sockaddr*>(&broadcast), sizeof(broadcast)) < 0 &&
           !lan_probe_send_failed) {
