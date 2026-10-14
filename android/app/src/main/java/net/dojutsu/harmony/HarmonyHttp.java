@@ -28,8 +28,9 @@ public final class HarmonyHttp {
         try {
             if (url == null || !(url.startsWith("https://") || url.startsWith("http://"))) return null;
             connection = (HttpURLConnection) new URL(url).openConnection();
-            connection.setConnectTimeout(1500);
-            connection.setReadTimeout(2500);
+            // Cellular DNS+TCP+TLS often takes more than a second; match the desktop 3 s / 4 s.
+            connection.setConnectTimeout(3000);
+            connection.setReadTimeout(4000);
             connection.setInstanceFollowRedirects(false);
             connection.setUseCaches(false);
             connection.setRequestMethod(method);
