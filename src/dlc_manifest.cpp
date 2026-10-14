@@ -551,7 +551,7 @@ bool DlcManager::extract_to_staging(const fs::path& container_path,
     while (offset < entry->size()) {
       const uint64_t requested =
           std::min(static_cast<uint64_t>(buffer.size()), entry->size() - offset);
-      uint64_t actual = 0;
+      size_t actual = 0;
       if (input->ReadSync(std::span<uint8_t>(buffer.data(), static_cast<size_t>(requested)),
                           offset, &actual) != 0 || actual == 0) {
         input->Destroy();
