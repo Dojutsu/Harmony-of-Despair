@@ -79,6 +79,11 @@ class HarmonyrecompApp : public rex::ReXApp {
     if (paths.game_data_root.empty()) {
       paths.game_data_root = harmony::game_data::DefaultRoot();
     }
+#if defined(__APPLE__)
+    // The Mac app has no launcher script to pass --update_data_root; the
+    // imported TU2 files live in the same folder as the base game.
+    if (paths.update_data_root.empty()) paths.update_data_root = paths.game_data_root;
+#endif
   }
 
   std::optional<rex::PathConfig> OnFinalizePaths(
