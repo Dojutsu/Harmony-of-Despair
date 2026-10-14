@@ -23,7 +23,7 @@ find "$built" -maxdepth 1 -name '*.dylib' -type f -exec cp {} "$app/Frameworks/"
 
 version=$(git -C "$(dirname "$0")/../.." describe --tags --always 2>/dev/null || echo dev)
 # Same Info.plist the Xcode wrapper project uses, with its build settings filled in.
-sed -e "s|\$(PRODUCT_BUNDLE_IDENTIFIER)|${BUNDLE_ID:-net.dojutsu.harmony.ios}|" \
+sed -e "s|\$(PRODUCT_BUNDLE_IDENTIFIER)|${BUNDLE_ID:-net.dojutsu.harmonyipad}|" \
     -e "s|\$(EXECUTABLE_NAME)|harmonyrecomp|" \
     -e "s|\$(CURRENT_PROJECT_VERSION)|${version}|" \
     -e "s|\$(IPHONEOS_DEPLOYMENT_TARGET)|${IOS_DEPLOYMENT_TARGET:-17.0}|" \

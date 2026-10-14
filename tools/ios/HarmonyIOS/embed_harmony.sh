@@ -18,4 +18,9 @@ if [ "${CODE_SIGNING_ALLOWED:-YES}" = "YES" ] && [ -n "${EXPANDED_CODE_SIGN_IDEN
   for lib in "$app/Frameworks"/*.dylib; do
     codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none "$lib"
   done
+  # Xcode skips its own CodeSign step when the stub is unchanged, which would
+  # leave the swapped-in binary unsigned; sign the app here with Xcode's
+  # entitlements (Xcode re-signs it the same way when it does run).
+  codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none \
+    --entitlements "$TARGET_TEMP_DIR/$WRAPPER_NAME.xcent" --generate-entitlement-der "$app"
 fi
