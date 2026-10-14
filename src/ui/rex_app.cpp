@@ -171,7 +171,16 @@ bool ReXApp::SetupEnvironment() {
                                         log_level_str, category_levels);
   if (log_file_cvar.empty()) {
     log_config.app_name = std::string(GetName());
+#if REX_PLATFORM_MAC
+    // A signed .app bundle must stay unmodified (and may be read-only), so
+    // macOS logs go to the user's standard log folder instead.
+    if (const char* home = std::getenv("HOME"); home && *home)
+      log_config.log_dir = (std::filesystem::path(home) / "Library" / "Logs" / GetName()).string();
+    else
+      log_config.log_dir = (exe_dir / "logs").string();
+#else
     log_config.log_dir = (exe_dir / "logs").string();
+#endif
   }
 
   rex::InitLogging(log_config);
