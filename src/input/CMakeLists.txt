@@ -36,4 +36,8 @@ else()
     target_sources(rexinput PRIVATE sdl/sdl_input_driver.cpp)
 endif()
 
+if(IOS)
+    target_sources(rexinput PRIVATE touch/touch_input_driver.cpp)
+endif()
+
 target_link_libraries(rexinput PUBLIC rexcore rexui SDL3::SDL3)

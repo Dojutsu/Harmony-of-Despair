@@ -10,7 +10,10 @@
  */
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -20,6 +23,10 @@
 #include <rex/logging.h>
 #include <rex/platform.h>
 #include <rex/string.h>
+
+#if REX_PLATFORM_MAC
+#include <pthread.h>
+#endif
 #include <rex/ui/vulkan/device.h>
 
 #include "capture_submission.h"
@@ -868,6 +875,31 @@ VulkanDevice::VulkanDevice(const VulkanInstance* const vulkan_instance,
       capture_state_(std::make_unique<VulkanCaptureState>()) {
   assert_not_null(vulkan_instance);
   assert_not_null(physical_device);
+}
+
+namespace {
+std::atomic<bool> submissions_suspended{false};
+std::mutex submissions_mutex;
+std::condition_variable submissions_resumed;
+}  // namespace
+
+void VulkanDevice::SetSubmissionsSuspended(bool suspended) {
+  {
+    std::lock_guard lock(submissions_mutex);
+    submissions_suspended.store(suspended, std::memory_order_release);
+  }
+  if (!suspended) submissions_resumed.notify_all();
+}
+
+void VulkanDevice::WaitWhileSubmissionsSuspended() {
+  if (!submissions_suspended.load(std::memory_order_acquire)) return;
+#if REX_PLATFORM_MAC
+  if (pthread_main_np()) return;
+#endif
+  std::unique_lock lock(submissions_mutex);
+  submissions_resumed.wait(lock, [] {
+    return !submissions_suspended.load(std::memory_order_acquire);
+  });
 }
 
 }  // namespace vulkan

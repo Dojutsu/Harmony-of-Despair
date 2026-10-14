@@ -383,6 +383,10 @@ class LanDiscoveryService {
       const std::function<bool()>& operation_is_current,
       const std::function<void(ConfiguredInviteStage)>& stage_observer = {},
       LanAddress lan_probe_target = {});
+  // Unicast target for the next invite LAN probe when the caller gives none.
+  // iOS apps can't send broadcasts, so a search join aims at the host's LAN
+  // address from its listing instead.
+  void SetInviteLanProbeHint(LanAddress hint);
   std::optional<SessionRecord> Join(const SessionRecord& session, const SessionMember& member,
                                     uint32_t timeout_ms);
   std::optional<SessionRecord> Leave(const SessionRecord& session, uint64_t xuid,
@@ -401,6 +405,8 @@ class LanDiscoveryService {
   std::shared_ptr<HostAdmissionGrantStore> admission_grants_;
   std::unique_ptr<Impl> impl_;
   SessionDirectoryClient directory_;
+  std::mutex invite_lan_probe_hint_mutex_;
+  LanAddress invite_lan_probe_hint_;
 };
 
 struct SessionManagerDependencies {

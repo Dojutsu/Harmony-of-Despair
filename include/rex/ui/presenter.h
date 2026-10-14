@@ -327,6 +327,11 @@ class Presenter {
   Presenter& operator=(const Presenter& presenter) = delete;
   virtual ~Presenter();
 
+  // While suspended no presenter paints or presents at all. iOS forbids GPU
+  // work from a backgrounded app, and one stray command buffer loses the
+  // device for good.
+  static void SetHostPresentationSuspended(bool suspended);
+
   virtual Surface::TypeFlags GetSupportedSurfaceTypes() const = 0;
 
   // For calling from the Window for the Presenter attached to it.

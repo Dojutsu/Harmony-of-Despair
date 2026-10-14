@@ -45,6 +45,15 @@
 #include <fmt/format.h>
 #include <imgui.h>
 
+#if REX_PLATFORM_IOS
+#include <SDL3/SDL_events.h>
+
+#include <rex/input/touch/touch_input_driver.h>
+#include <rex/ui/imgui_dialog.h>
+#include <rex/ui/presenter.h>
+#include <rex/ui/vulkan/device.h>
+#endif
+
 #include <algorithm>
 #include <filesystem>
 #include <string_view>
@@ -53,6 +62,71 @@ REXCVAR_DEFINE_STRING(gpu_plugin, "", "GPU",
                       "GPU emulation plugin to load at startup (e.g. 'xenos'); empty disables "
                       "GPU emulation")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+#if REX_PLATFORM_IOS
+namespace {
+
+// Draws the touch driver's on-screen controls over the game. It only draws;
+// fingers reach the driver straight from SDL, so ImGui never captures them.
+class TouchControlsOverlay final : public rex::ui::ImGuiDialog {
+ public:
+  explicit TouchControlsOverlay(rex::ui::ImGuiDrawer* drawer) : ImGuiDialog(drawer) {}
+
+ protected:
+  void OnDraw(ImGuiIO& io) override {
+    const float w = io.DisplaySize.x, h = io.DisplaySize.y;
+    if (w <= 0.0f || h <= 0.0f) return;
+    const auto snapshot = rex::input::touch::GetOverlaySnapshot(w / h);
+    if (!snapshot.visible) return;
+
+    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    const ImU32 outline = IM_COL32(255, 255, 255, 140);
+    const ImU32 label = IM_COL32(255, 255, 255, 210);
+    const auto fill = [](bool pressed) {
+      return pressed ? IM_COL32(255, 255, 255, 110) : IM_COL32(255, 255, 255, 40);
+    };
+
+    const auto& base = snapshot.stick_base;
+    const ImVec2 centre(base.x * w, base.y * h);
+    const float radius = base.radius * h;
+    draw->AddCircleFilled(centre, radius, IM_COL32(255, 255, 255, 25), 48);
+    draw->AddCircle(centre, radius, outline, 48, 2.0f);
+    draw->AddCircleFilled(
+        ImVec2(centre.x + snapshot.knob_x * radius, centre.y + snapshot.knob_y * radius),
+        radius * 0.45f, fill(base.pressed), 32);
+
+    for (const auto& button : snapshot.buttons) {
+      const ImVec2 at(button.x * w, button.y * h);
+      const float r = button.radius * h;
+      draw->AddCircleFilled(at, r, fill(button.pressed), 32);
+      draw->AddCircle(at, r, outline, 32, 2.0f);
+      const float size = r * (button.label[1] ? 0.6f : 0.9f);
+      const ImVec2 text =
+          ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, 0.0f, button.label);
+      draw->AddText(nullptr, size, ImVec2(at.x - text.x * 0.5f, at.y - text.y * 0.5f), label,
+                    button.label);
+    }
+  }
+};
+
+// iOS revokes GPU access while the app is in the background, and a command
+// buffer executed there loses the Vulkan device for good. Stop presenting and
+// hold every worker-thread queue submission until the app is active again.
+bool SDLCALL OnAppLifecycle(void*, SDL_Event* event) {
+  if (event->type == SDL_EVENT_WILL_ENTER_BACKGROUND) {
+    rex::ui::Presenter::SetHostPresentationSuspended(true);
+    rex::ui::vulkan::VulkanDevice::SetSubmissionsSuspended(true);
+    REXLOG_INFO("App leaving the foreground: GPU submissions held");
+  } else if (event->type == SDL_EVENT_DID_ENTER_FOREGROUND) {
+    rex::ui::vulkan::VulkanDevice::SetSubmissionsSuspended(false);
+    rex::ui::Presenter::SetHostPresentationSuspended(false);
+    REXLOG_INFO("App active again: GPU submissions resumed");
+  }
+  return true;
+}
+
+}  // namespace
+#endif  // REX_PLATFORM_IOS
 
 namespace rex {
 
@@ -278,7 +352,15 @@ bool ReXApp::ConstructRuntime(const PathConfig& paths) {
         return !imgui_drawer_->GetIO().WantCaptureMouse;
       });
     }
+#if REX_PLATFORM_IOS
+    // Owned by the drawer like every dialog; lives for the whole session.
+    new TouchControlsOverlay(imgui_drawer_.get());
+#endif
   }
+
+#if REX_PLATFORM_IOS
+  SDL_AddEventWatch(OnAppLifecycle, nullptr);
+#endif
 
   std::string xex_image = "game:\\default.xex";
   OnLoadXexImage(xex_image);
@@ -630,6 +712,9 @@ void ReXApp::OnRestored(ui::UIEvent& e) {
 }
 
 void ReXApp::OnDestroy() {
+#if REX_PLATFORM_IOS
+  SDL_RemoveEventWatch(OnAppLifecycle, nullptr);
+#endif
   // Notify subclass before cleanup
   OnShutdown();
 

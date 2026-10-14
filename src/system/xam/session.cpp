@@ -1874,6 +1874,11 @@ void LanDiscoveryService::ReleaseConfiguredInviteAttempt(
     const DirectoryTraversalAttempt& attempt) {
   directory_.CompleteJoinAttempt(attempt);
 }
+void LanDiscoveryService::SetInviteLanProbeHint(LanAddress hint) {
+  std::lock_guard lock(invite_lan_probe_hint_mutex_);
+  invite_lan_probe_hint_ = hint;
+}
+
 std::optional<ConfiguredInviteDiscoveryResult>
 LanDiscoveryService::DiscoverConfiguredInvite(
     const DirectoryInviteJoinAttempt& issued, uint32_t timeout_ms,
@@ -1909,6 +1914,12 @@ LanDiscoveryService::DiscoverConfiguredInvite(
   // An explicit Direct Connect endpoint is also authoritative for the signed
   // invite LAN fallback. Private loopback tests must not emit LAN broadcasts.
   // An explicit caller target remains stronger, preserving fixture behavior.
+  {
+    std::lock_guard lock(invite_lan_probe_hint_mutex_);
+    if (!lan_probe_target.ipv4)
+      lan_probe_target = invite_lan_probe_hint_;
+    invite_lan_probe_hint_ = {};
+  }
   if (!lan_probe_target.ipv4 && !REXCVAR_GET(direct_connect_address).empty()) {
     in_addr direct{};
     if (inet_pton(AF_INET, REXCVAR_GET(direct_connect_address).c_str(), &direct) != 1)
@@ -1977,8 +1988,9 @@ LanDiscoveryService::DiscoverConfiguredInvite(
                                       reinterpret_cast<const char*>(&broadcast_enabled),
                                       sizeof(broadcast_enabled)) == 0;
   if (lan_enabled)
-    REXSYS_INFO("INVITE_LAN_DISCOVERY_STARTED attempt_ref={}",
-                attempt.attempt_id.substr(0, 8));
+    REXSYS_INFO("INVITE_LAN_DISCOVERY_STARTED attempt_ref={} target={:08X}",
+                attempt.attempt_id.substr(0, 8),
+                lan_probe_target.ipv4 ? ntohl(lan_probe_target.ipv4) : 0xFFFFFFFFu);
   struct Candidate {
     LanAddress peer;
     bool lan = false;
@@ -1987,6 +1999,7 @@ LanDiscoveryService::DiscoverConfiguredInvite(
   };
   std::vector<Candidate> candidates;
   auto next_lan_probe = started;
+  bool lan_probe_send_failed = false;
   bool sent_once = false;
   bool waiting_observed = false;
   bool traversal_observed = false;
@@ -2002,8 +2015,13 @@ LanDiscoveryService::DiscoverConfiguredInvite(
                                                         : htonl(INADDR_BROADCAST);
       broadcast.sin_port = htons(lan_probe_target.port ? lan_probe_target.port
                                                        : endpoint->discovery_port);
-      sendto(socket, reinterpret_cast<const char*>(&probe), sizeof(probe), 0,
-             reinterpret_cast<sockaddr*>(&broadcast), sizeof(broadcast));
+      if (sendto(socket, reinterpret_cast<const char*>(&probe), sizeof(probe), 0,
+                 reinterpret_cast<sockaddr*>(&broadcast), sizeof(broadcast)) < 0 &&
+          !lan_probe_send_failed) {
+        lan_probe_send_failed = true;
+        REXSYS_WARN("INVITE_LAN_PROBE_SEND_FAILED target={:08X} errno={}",
+                    ntohl(broadcast.sin_addr.s_addr), errno);
+      }
       next_lan_probe = now + std::chrono::milliseconds(100);
     }
     for (const auto& peer : NatProbePeerAttempts(uint64_t(socket))) {
@@ -3950,6 +3968,12 @@ bool SessionManager::JoinSearchListing(const std::array<uint8_t, 8>& xbox_sessio
     if (found == search_listings_.end())
       return false;
     code = found->invite_code;
+#if REX_PLATFORM_IOS
+    // No broadcasts on iOS: probe the host's own LAN address. Port 0 means
+    // the session's discovery port.
+    if (found->host_ipv4)
+      discovery_.SetInviteLanProbeHint({found->host_ipv4, 0});
+#endif
   }
   {
     std::lock_guard lock(configured_invite_mutex_);

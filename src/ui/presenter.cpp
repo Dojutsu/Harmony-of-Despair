@@ -1494,9 +1494,20 @@ bool Presenter::InSurfaceOnMonitorFromUIThread() const {
 #endif  // XE_PLATFORM
 }
 
+namespace {
+std::atomic<bool> host_presentation_suspended{false};
+}  // namespace
+
+void Presenter::SetHostPresentationSuspended(bool suspended) {
+  host_presentation_suspended.store(suspended, std::memory_order_release);
+}
+
 Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
   assert_false(execute_ui_drawers && !is_in_ui_thread_paint_);
   assert_true(surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable);
+  if (host_presentation_suspended.load(std::memory_order_acquire)) {
+    return PaintResult::kNotPresented;
+  }
   PaintResult result = PaintAndPresentImpl(execute_ui_drawers);
   switch (result) {
     case PaintResult::kPresented:

@@ -104,6 +104,12 @@ std::filesystem::path GetExecutableFolder() {
 }
 
 std::filesystem::path GetUserFolder() {
+#if REX_PLATFORM_IOS
+  // Only Documents, Library and tmp are writable in an app container.
+  if (auto home = rex::platform::env::get("HOME")) {
+    return std::filesystem::path(*home) / "Library" / "Application Support";
+  }
+#endif
   // get preferred data home
   if (auto xdg = rex::platform::env::get("XDG_DATA_HOME")) {
     return std::filesystem::path(*xdg);

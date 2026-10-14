@@ -281,8 +281,16 @@ class VulkanDevice {
 
   Queue::Acquisition AcquireQueue(const uint32_t queue_family_index,
                                   const uint32_t queue_index) const {
+    WaitWhileSubmissionsSuspended();
     return queue_families()[queue_family_index].queues[queue_index]->Acquire();
   }
+
+  // iOS forbids GPU work from a backgrounded app; a command buffer executed
+  // then loses the device for good. While suspended, worker threads wait here
+  // before touching a queue. The main thread never waits (it must stay free
+  // to receive the foreground event); presenting is gated separately.
+  static void SetSubmissionsSuspended(bool suspended);
+  static void WaitWhileSubmissionsSuspended();
 
   struct MemoryTypes {
     uint32_t device_local = 0b0;

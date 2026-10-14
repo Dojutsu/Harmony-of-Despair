@@ -22,6 +22,9 @@
 #include <rex/input/sdl/sdl_input_driver.h>
 #include <rex/input/scripted/scripted_input_driver.h>
 #include <rex/input/state_merge.h>
+#if REX_PLATFORM_IOS
+#include <rex/input/touch/touch_input_driver.h>
+#endif
 #include <rex/input/xinput/xinput_input_driver.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
@@ -434,6 +437,14 @@ std::unique_ptr<InputSystem> CreateDefaultInputSystem(bool tool_mode) {
         input->AddDriver(std::move(sdl_driver));
       }
     }
+
+#if REX_PLATFORM_IOS
+    // On-screen controls for playing without a controller.
+    auto touch_driver = std::make_unique<touch::TouchInputDriver>(nullptr, 0);
+    if (touch_driver->Setup() == X_STATUS_SUCCESS) {
+      input->AddDriver(std::move(touch_driver));
+    }
+#endif
 
     // MnK driver (keyboard/mouse -> controller emulation)
     auto mnk_driver = std::make_unique<mnk::MnkInputDriver>(nullptr, 0);
