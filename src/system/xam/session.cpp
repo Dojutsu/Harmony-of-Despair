@@ -3611,7 +3611,13 @@ void SessionManager::RunConfiguredInviteOperation(
       TryPublishAcceptedInvite(operation);
     } else {
       std::lock_guard lock(configured_invite_mutex_);
-      if (configured_invite_operation_ == operation) {
+      // Each lease renewal is briefly "not ready" until the host acknowledges
+      // the new revision. Once the invite was published to the title, keep it
+      // published while the admission itself is still held (checked above):
+      // a join landing in that window was otherwise rejected as
+      // "state_not_published" and the joiner silently left the lobby.
+      if (configured_invite_operation_ == operation &&
+          configured_invite_state_ != ConfiguredInviteLifecycleState::kPublished) {
         ready_configured_invite_.reset();
         configured_invite_state_ =
             ConfiguredInviteLifecycleState::kHostCorrelated;

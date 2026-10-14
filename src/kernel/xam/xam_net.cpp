@@ -1283,7 +1283,37 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
     }
   }
   uint32_t address = xn_addr->ina.s_addr ? xn_addr->ina.s_addr : xn_addr->inaOnline.s_addr;
-  if (IsGameplayLogicalAddress(address)) return failed(0x2741);
+  if (IsGameplayLogicalAddress(address)) {
+    // A third player's XNADDR arrives from the host already carrying the
+    // directory-assigned logical address; GameplayLogicalToXnAddr refuses
+    // ambiguous matches. An XID naming another session still fails for an
+    // XNADDR this runtime built itself; one rebuilt by the host (identity bytes
+    // differ) is accepted on the unique logical match, with the XIDs logged.
+    auto peer = GameplayLogicalToXnAddr(address);
+    if (peer && xid && std::memcmp(xid.host_address(), peer->session_id.data(),
+                                   peer->session_id.size()) != 0) {
+      const auto expected = ReconstructXnAddrIdentity(peer->xuid);
+      const bool own_identity =
+          std::memcmp(xn_addr->abEnet, expected.ethernet_address.data(), expected.ethernet_address.size()) == 0 &&
+          std::memcmp(xn_addr->abOnline, expected.online_address.data(), expected.online_address.size()) == 0;
+      uint64_t title_xid = 0, peer_session = 0;
+      for (size_t i = 0; i < 8; ++i) {
+        title_xid = (title_xid << 8) | static_cast<const uint8_t*>(xid.host_address())[i];
+        peer_session = (peer_session << 8) | peer->session_id[i];
+      }
+      REXKRNL_WARN("XNetXnAddrToInAddr: logical {:08X} title xid {:016X} differs from peer session {:016X} ({})",
+                   ntohl(address), title_xid, peer_session,
+                   own_identity ? "rejected, runtime-built address" : "accepted, host-built address");
+      if (own_identity) peer.reset();
+    }
+    if (peer) {
+      std::memcpy(in_addr.host_address(), &peer->logical.ipv4, sizeof(uint32_t));
+      return 0;
+    }
+    REXKRNL_WARN("XNetXnAddrToInAddr: no current gameplay peer for logical {:08X} (xid={}) {}",
+                 ntohl(address), bool(xid), DescribeGameplayLogical(address));
+    return failed(0x2741);
+  }
   if (!address)
     return failed(0x2741);
   std::memcpy(in_addr.host_address(), &address, sizeof(address));

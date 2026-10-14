@@ -485,6 +485,17 @@ TEST_CASE("XNet entries round trip admission aliases with exact session and XUID
     auto wrong=session->info.id;wrong[0]^=1;
     CHECK(NetDll_XNetXnAddrToInAddr_entry(1,ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(inverse.data())),
         mapped_void::from_host(wrong.data()),mapped_void::from_host(&address))!=0);
+    // The host relays a third player's address with its own identity bytes;
+    // the unique logical address still resolves, with or without an XID.
+    auto relayed=inverse;std::fill(relayed.begin()+10,relayed.end(),uint8_t(0x5A));
+    address=0;
+    CHECK(NetDll_XNetXnAddrToInAddr_entry(1,ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(relayed.data())),
+        mapped_void::from_host(wrong.data()),mapped_void::from_host(&address))==0);
+    CHECK(address==peer.logical.ipv4);
+    address=0;
+    CHECK(NetDll_XNetXnAddrToInAddr_entry(1,ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(relayed.data())),
+        mapped_void{},mapped_void::from_host(&address))==0);
+    CHECK(address==peer.logical.ipv4);
   }
 }
 TEST_CASE("XSocket protects admitted peer payloads and refuses scoped raw fallback", "[gameplay][network][socket]") {

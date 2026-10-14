@@ -645,4 +645,20 @@ std::optional<GameplayXnAddr> GameplayLogicalToXnAddr(uint32_t ipv4) {
   }
   return result;
 }
+std::string DescribeGameplayLogical(uint32_t ipv4) {
+  std::lock_guard lock(gameplay_mutex);
+  size_t total = 0, current = 0, matched = 0, matched_current = 0;
+  for (const auto& scope : scopes) {
+    ++total;
+    const bool scope_current = Current(scope);
+    if (scope_current) ++current;
+    for (const auto& peer : scope.authorization.peers)
+      if (peer.logical.ipv4 == ipv4) {
+        ++matched;
+        if (scope_current && PeerCurrent(scope, peer)) ++matched_current;
+      }
+  }
+  return fmt::format("scopes={} current={} peers_with_address={} usable={}", total, current, matched,
+                     matched_current);
+}
 }  // namespace rex::system::xam

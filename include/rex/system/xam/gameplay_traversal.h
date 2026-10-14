@@ -81,6 +81,8 @@ struct GameplayXnAddr {
 std::optional<GameplayXnAddr> GameplayXnAddrToLogical(
     const std::array<uint8_t, 8>& session_id, const XnAddrIdentity& identity);
 std::optional<GameplayXnAddr> GameplayLogicalToXnAddr(uint32_t ipv4);
+// One-line summary of why a logical address does or does not resolve, for logs.
+std::string DescribeGameplayLogical(uint32_t ipv4);
 bool IsGameplayLogicalAddress(uint32_t ipv4);
 
 }  // namespace rex::system::xam
