@@ -6,7 +6,7 @@
 #include <string>
 #include <unordered_set>
 #include "private_lan_crypto.h"
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -36,7 +36,15 @@ struct SecretFileBytes {
   std::array<uint8_t, PrivateLanInvitation::kMaximumFileBytes + 1> bytes{};
   ~SecretFileBytes() { crypto::Cleanse(bytes.data(), bytes.size()); }
 };
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
+#if REX_PLATFORM_MAC
+// Darwin names the struct stat timespec members st_*timespec.
+#define REX_STAT_MTIM st_mtimespec
+#define REX_STAT_CTIM st_ctimespec
+#else
+#define REX_STAT_MTIM st_mtim
+#define REX_STAT_CTIM st_ctim
+#endif
 struct Descriptor {
   int value = -1;
   ~Descriptor() { if (value >= 0) ::close(value); }
@@ -84,9 +92,10 @@ bool ReadPrivateFile(std::string_view path, SecretFileBytes& output, size_t& siz
     }
     if (::fstat(file.value, &after) < 0 || size != size_t(before.st_size) ||
         after.st_dev != before.st_dev || after.st_ino != before.st_ino ||
-        after.st_size != before.st_size || after.st_mtim.tv_sec != before.st_mtim.tv_sec ||
-        after.st_mtim.tv_nsec != before.st_mtim.tv_nsec ||
-        after.st_ctim.tv_sec != before.st_ctim.tv_sec || after.st_ctim.tv_nsec != before.st_ctim.tv_nsec)
+        after.st_size != before.st_size || after.REX_STAT_MTIM.tv_sec != before.REX_STAT_MTIM.tv_sec ||
+        after.REX_STAT_MTIM.tv_nsec != before.REX_STAT_MTIM.tv_nsec ||
+        after.REX_STAT_CTIM.tv_sec != before.REX_STAT_CTIM.tv_sec ||
+        after.REX_STAT_CTIM.tv_nsec != before.REX_STAT_CTIM.tv_nsec)
       return false;
     return true;
   }
@@ -223,7 +232,7 @@ bool ReadPrivateFile(std::string_view path, SecretFileBytes& output, size_t& siz
 
 std::shared_ptr<const PrivateLanInvitation> PrivateLanInvitation::Load(
     std::string_view path, std::chrono::system_clock::time_point now) {
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_POSIX_ONLINE || REX_PLATFORM_WIN32
   try {
     SecretFileBytes input;
     size_t size = 0;

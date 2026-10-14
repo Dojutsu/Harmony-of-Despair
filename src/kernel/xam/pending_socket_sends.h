@@ -22,7 +22,13 @@ struct PendingMemoryPin {
   memory::Memory* memory_;
 };
 struct PendingMemoryLease {};
+#if REX_PLATFORM_MAC
+// macOS follows the Windows memory model above (no cooperative mapping gate;
+// guest copies are fault-safe mach VM copies) but does have MSG_DONTWAIT.
+constexpr int kPendingSendFlags = MSG_DONTWAIT;
+#else
 constexpr int kPendingSendFlags = 0;
+#endif
 inline std::shared_ptr<PendingMemoryControl> PendingMemoryControlOf(KernelState* state) {
   return std::make_shared<PendingMemoryControl>(PendingMemoryControl{state->memory()});
 }

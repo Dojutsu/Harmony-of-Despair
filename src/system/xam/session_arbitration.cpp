@@ -12,6 +12,9 @@
 #elif REX_PLATFORM_GNU_LINUX
 #include <sys/random.h>
 #include <openssl/crypto.h>
+#elif REX_PLATFORM_MAC
+#include <cstdlib>  // arc4random_buf
+#include <openssl/crypto.h>
 #endif
 
 namespace rex::system::xam {
@@ -21,7 +24,7 @@ template <size_t N> bool Nonzero(const std::array<uint8_t, N>& bytes) {
 }
 bool ValidEndpoint(ArbitrationEndpoint value) { return value.ipv4 != 0 && value.port != 0; }
 bool CredentialEqual(const ArbitrationToken& left, const ArbitrationToken& right) {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
   return CRYPTO_memcmp(left.data(), right.data(), left.size()) == 0;
 #else
   // Same fixed-length XOR reduction used by the existing invite LAN seam.
@@ -42,6 +45,11 @@ bool RandomBytes(std::span<uint8_t> bytes) {
     if (!count) return false;
     completed += static_cast<size_t>(count);
   }
+  return true;
+#elif REX_PLATFORM_MAC
+  // Darwin has no getrandom; arc4random_buf uses the kernel CSPRNG and
+  // cannot fail.
+  arc4random_buf(bytes.data(), bytes.size());
   return true;
 #else
   (void)bytes; return false;
@@ -181,7 +189,7 @@ std::optional<ArbitrationSnapshot> SessionArbitrationAuthority::RegisterFromVeri
   struct Restore {
     SessionArbitrationAuthority& owner;decltype(members_)& previous;uint64_t revision;bool committed=false;
     ~Restore(){if(!committed){owner.members_=previous;owner.revision_=revision;}
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
       OPENSSL_cleanse(previous.data(),sizeof(previous));
 #elif REX_PLATFORM_WIN32
       SecureZeroMemory(previous.data(),sizeof(previous));

@@ -38,10 +38,14 @@
 #include <bcrypt.h>
 #include <winhttp.h>
 #include <ws2tcpip.h>
-#elif REX_PLATFORM_GNU_LINUX
+#elif REX_PLATFORM_POSIX_ONLINE
 #include <arpa/inet.h>
 #include <curl/curl.h>
+#if REX_PLATFORM_GNU_LINUX
 #include <sys/random.h>
+#else
+#include <cstdlib>  // arc4random_buf
+#endif
 #include <unistd.h>
 #else
 #include <unistd.h>
@@ -757,7 +761,7 @@ bool IsSafeDirectoryUrl(std::string_view value) {
       if (suffix.front() != ':') return false;
       explicit_port = true; port = suffix.substr(1);
     }
-#if REX_PLATFORM_WIN32 || REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_WIN32 || REX_PLATFORM_POSIX_ONLINE
     std::array<uint8_t, 16> address{};
     const std::string text(host);
     if (inet_pton(AF_INET6, text.c_str(), address.data()) != 1) return false;
@@ -808,7 +812,7 @@ bool IsSafeDirectoryUrl(std::string_view value) {
 bool IsIpv4(std::string_view value) {
   if (value.empty())
     return true;
-#if REX_PLATFORM_WIN32 || REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_WIN32 || REX_PLATFORM_POSIX_ONLINE
   in_addr address{};
   std::string text(value);
   return inet_pton(AF_INET, text.c_str(), &address) == 1 && address.s_addr != htonl(INADDR_ANY) &&
@@ -998,6 +1002,10 @@ std::optional<std::string> RandomUrlToken(size_t byte_count) {
       return std::nullopt;
     offset += static_cast<size_t>(count);
   }
+#elif REX_PLATFORM_MAC
+  // Darwin has no getrandom; arc4random_buf draws from the kernel CSPRNG and
+  // cannot fail.
+  arc4random_buf(bytes.data(), bytes.size());
 #else
   return std::nullopt;
 #endif
@@ -1105,7 +1113,7 @@ std::optional<HttpResult> Request(std::string_view base_url, std::wstring_view m
   WinHttpCloseHandle(session);
   return received ? std::optional<HttpResult>(std::move(result)) : std::nullopt;
 }
-#elif REX_PLATFORM_GNU_LINUX
+#elif REX_PLATFORM_POSIX_ONLINE
 size_t AppendCurlResponse(char* data, size_t size, size_t count, void* context) {
   auto* response = static_cast<std::string*>(context);
   if (!response || (count && size > SIZE_MAX / count))
@@ -1882,7 +1890,7 @@ class SessionDirectoryClient::Impl {
           "candidates are required");
       return;
     }
-#if !REX_PLATFORM_WIN32 && !REX_PLATFORM_GNU_LINUX
+#if !REX_PLATFORM_WIN32 && !REX_PLATFORM_POSIX_ONLINE
     REXSYS_WARN("Session directory: hosting is unavailable on this platform");
     return;
 #endif

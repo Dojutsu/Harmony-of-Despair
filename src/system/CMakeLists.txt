@@ -139,6 +139,28 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(CURL REQUIRED)
     find_package(OpenSSL REQUIRED COMPONENTS Crypto)
     target_link_libraries(rexruntime PRIVATE CURL::libcurl OpenSSL::Crypto)
+elseif(APPLE)
+    # The online stack (session directory, LAN/arbitration crypto) uses the
+    # same libcurl and OpenSSL code paths as Linux. libcurl ships with the
+    # macOS SDK; OpenSSL does not (the system LibreSSL has no public headers),
+    # so default to Homebrew's openssl@3 when no root was given.
+    find_package(CURL REQUIRED)
+    if(NOT OPENSSL_ROOT_DIR AND NOT DEFINED ENV{OPENSSL_ROOT_DIR})
+        foreach(_rex_openssl_prefix /opt/homebrew/opt/openssl@3 /usr/local/opt/openssl@3)
+            if(EXISTS "${_rex_openssl_prefix}/include/openssl/evp.h")
+                set(OPENSSL_ROOT_DIR "${_rex_openssl_prefix}")
+                break()
+            endif()
+        endforeach()
+    endif()
+    find_package(OpenSSL 1.1.1 REQUIRED COMPONENTS Crypto)
+    target_link_libraries(rexruntime PRIVATE CURL::libcurl OpenSSL::Crypto)
+    # rexcore is linked privately here; re-export its libc++ jthread flag
+    # (see src/core/CMakeLists.txt) to code that includes session.h.
+    if(DEFINED REX_LIBCXX_HAS_JTHREAD AND NOT REX_LIBCXX_HAS_JTHREAD)
+        target_compile_options(rexruntime PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
+        target_link_options(rexruntime PUBLIC -fexperimental-library)
+    endif()
 endif()
 
 if(REXGLUE_USE_D3D12)

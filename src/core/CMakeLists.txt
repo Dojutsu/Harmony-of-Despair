@@ -30,6 +30,25 @@ if(APPLE)
     # neither type crosses a header boundary.
     set_source_files_properties(timer_queue.cpp PROPERTIES
         COMPILE_OPTIONS "-fexperimental-library")
+    # The online session API (rex/system/xam/session.h, the invitation overlay
+    # task and game audio capture) now carries std::stop_token/std::jthread
+    # across public headers. When this libc++ still gates them, every
+    # consumer needs the flag, so propagate it from the base library.
+    include(CheckCXXSourceCompiles)
+    check_cxx_source_compiles([=[
+        #include <stop_token>
+        #include <thread>
+        int main() {
+          std::stop_source source;
+          std::jthread worker([](std::stop_token token) { (void)token.stop_requested(); });
+          source.request_stop();
+          return 0;
+        }
+    ]=] REX_LIBCXX_HAS_JTHREAD)
+    if(NOT REX_LIBCXX_HAS_JTHREAD)
+        target_compile_options(rexcore PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
+        target_link_options(rexcore PUBLIC -fexperimental-library)
+    endif()
 endif()
 
 # Platform-specific sources
