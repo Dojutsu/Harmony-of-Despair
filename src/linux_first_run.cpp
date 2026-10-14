@@ -18,6 +18,9 @@
 #include <pwd.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -47,6 +50,11 @@ fs::path RealHome() {
   // the starting folder (containers and automated tests).
   if (const char* override_home = std::getenv("HARMONY_SETUP_HOME"); override_home && *override_home)
     return override_home;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+  // The passwd entry names the shared mobile home, which the sandbox denies;
+  // HOME is the app container, whose Documents folder the Files app fills.
+  if (const char* home = std::getenv("HOME")) return home;
+#endif
   if (const passwd* entry = getpwuid(getuid()); entry && entry->pw_dir && *entry->pw_dir)
     return entry->pw_dir;
   if (const char* home = std::getenv("HOME")) return home;
