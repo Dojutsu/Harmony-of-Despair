@@ -49,7 +49,7 @@ bool AppleHttpRequest(const std::string& url, const std::string& method, std::st
             [NSURLSessionConfiguration ephemeralSessionConfiguration];
         if (i & 2) {
           // A cold cellular connection can take several seconds to answer.
-          config.timeoutIntervalForRequest = 8.0;
+          config.timeoutIntervalForRequest = 6.0;
           config.timeoutIntervalForResource = 8.0;
         } else {
           config.timeoutIntervalForRequest = 3.0;  // idle; NSURLSession has no connect timeout
