@@ -1,12 +1,16 @@
 // NSURLSession transport for the session directory on iOS, which has no
-// libcurl. Mirrors the curl options in session_directory.cpp: short timeouts,
-// no redirects, no proxy for loopback HTTP, bounded response size.
+// libcurl. Mirrors the curl options in session_directory.cpp (no redirects, no
+// proxy for loopback HTTP, bounded response size), but with cellular-sized
+// timeouts and one reused session per scheme: a fresh DNS + TCP + TLS setup on
+// a phone's cellular link regularly takes longer than the desktop's 1 s budget.
 
 #import <Foundation/Foundation.h>
 
 #include <cstdint>
 #include <string>
 #include <string_view>
+
+#include <rex/logging.h>
 
 @interface RexNoRedirectDelegate : NSObject <NSURLSessionTaskDelegate>
 @end
@@ -30,17 +34,25 @@ bool AppleHttpRequest(const std::string& url, const std::string& method, std::st
     NSURL* ns_url = [NSURL URLWithString:[NSString stringWithUTF8String:url.c_str()]];
     if (!ns_url) return false;
 
-    NSURLSessionConfiguration* config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    config.timeoutIntervalForRequest = 1.0;
-    config.timeoutIntervalForResource = 1.0;
-    config.HTTPAdditionalHeaders = @{@"User-Agent" : @"HarmonyRecomp/1"};
     // Loopback HTTP is a local-only testing exception; never route it through a proxy.
-    if ([ns_url.scheme isEqualToString:@"http"]) config.connectionProxyDictionary = @{};
-
-    static RexNoRedirectDelegate* delegate = [RexNoRedirectDelegate new];
-    NSURLSession* session = [NSURLSession sessionWithConfiguration:config
-                                                          delegate:delegate
-                                                     delegateQueue:nil];
+    const bool plain_http = [ns_url.scheme isEqualToString:@"http"];
+    static NSURLSession* sessions[2] = {};
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+      RexNoRedirectDelegate* delegate = [RexNoRedirectDelegate new];
+      for (int i = 0; i < 2; ++i) {
+        NSURLSessionConfiguration* config =
+            [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        config.timeoutIntervalForRequest = 3.0;  // idle; NSURLSession has no connect timeout
+        config.timeoutIntervalForResource = 4.0;  // total, as the PC and Android clients
+        config.HTTPAdditionalHeaders = @{@"User-Agent" : @"HarmonyRecomp/1"};
+        if (i == 1) config.connectionProxyDictionary = @{};
+        sessions[i] = [NSURLSession sessionWithConfiguration:config
+                                                    delegate:delegate
+                                               delegateQueue:nil];
+      }
+    });
+    NSURLSession* session = sessions[plain_http ? 1 : 0];
 
     NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:ns_url];
     request.HTTPMethod = [NSString stringWithUTF8String:method.c_str()];
@@ -68,12 +80,20 @@ bool AppleHttpRequest(const std::string& url, const std::string& method, std::st
                        status = static_cast<uint32_t>(http.statusCode);
                        if (data) response_body.assign(static_cast<const char*>(data.bytes), data.length);
                        ok = true;
+                     } else if (error) {
+                       REXSYS_WARN("Session directory HTTP {} failed: domain={} code={} ({})",
+                                   [request.HTTPMethod UTF8String], [error.domain UTF8String],
+                                   static_cast<int64_t>(error.code),
+                                   [error.localizedDescription UTF8String]);
+                     } else {
+                       REXSYS_WARN("Session directory HTTP {} failed: {}",
+                                   [request.HTTPMethod UTF8String],
+                                   http ? "response too large" : "not an HTTP response");
                      }
                      dispatch_semaphore_signal(done);
                    }];
     [task resume];
     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
-    [session finishTasksAndInvalidate];
     if (!ok) return false;
     status_out = status;
     body_out = std::move(response_body);
