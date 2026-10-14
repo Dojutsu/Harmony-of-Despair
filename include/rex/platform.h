@@ -60,6 +60,15 @@
 #define REX_PLATFORM_LINUX 0
 #endif
 
+// Desktop POSIX hosts that run the online/LAN multiplayer stack (BSD sockets,
+// OpenSSL crypto, libcurl session directory). Android is deliberately excluded:
+// it selects its own online paths. Use this only for portable POSIX logic;
+// code that needs a Linux-only API keeps REX_PLATFORM_GNU_LINUX and provides a
+// REX_PLATFORM_MAC equivalent next to it.
+#ifndef REX_PLATFORM_POSIX_ONLINE
+#define REX_PLATFORM_POSIX_ONLINE (REX_PLATFORM_GNU_LINUX || REX_PLATFORM_MAC)
+#endif
+
 #if defined(__clang__)
 #define REX_COMPILER_CLANG 1
 #elif defined(__GNUC__)

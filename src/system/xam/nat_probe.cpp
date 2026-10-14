@@ -22,7 +22,7 @@
 #if REX_PLATFORM_WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#elif REX_PLATFORM_GNU_LINUX
+#elif REX_PLATFORM_POSIX_ONLINE
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/socket.h>

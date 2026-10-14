@@ -7,7 +7,7 @@
 #include <cstring>
 #include <vector>
 
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -26,7 +26,7 @@ bool Nonzero(Bytes bytes) noexcept {
   return value != 0;
 }
 [[maybe_unused]] bool FitsInt(size_t size) noexcept { return size <= size_t(INT_MAX); }
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
 template <class T, void (*Free)(T*)> using Owner = std::unique_ptr<T, decltype(Free)>;
 using CipherContext = Owner<EVP_CIPHER_CTX, EVP_CIPHER_CTX_free>;
 using DigestContext = Owner<EVP_MD_CTX, EVP_MD_CTX_free>;
@@ -106,7 +106,7 @@ bool Gcm(std::span<const uint8_t, 32> key, std::span<const uint8_t, 12> iv, Byte
 }  // namespace
 
 bool Available() noexcept {
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_POSIX_ONLINE || REX_PLATFORM_WIN32
   return true;
 #else
   return false;
@@ -115,7 +115,7 @@ bool Available() noexcept {
 
 void Cleanse(void* data, size_t size) noexcept {
   if (!data || !size) return;
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
   OPENSSL_cleanse(data, size);
 #elif REX_PLATFORM_WIN32
   SecureZeroMemory(data, size);
@@ -126,7 +126,7 @@ void Cleanse(void* data, size_t size) noexcept {
 }
 
 bool Equal(const void* left, const void* right, size_t size) noexcept {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
   return CRYPTO_memcmp(left, right, size) == 0;
 #else
   // Fixed-length XOR reduction; CNG exposes no generic constant-time compare.
@@ -140,7 +140,7 @@ bool Equal(const void* left, const void* right, size_t size) noexcept {
 
 bool Random(std::span<uint8_t> output) noexcept {
   if (output.empty()) return true;
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
   return FitsInt(output.size()) && RAND_bytes(output.data(), int(output.size())) == 1;
 #elif REX_PLATFORM_WIN32
   return FitsUlong(output.size()) &&
@@ -152,7 +152,7 @@ bool Random(std::span<uint8_t> output) noexcept {
 }
 
 bool Sha256(std::initializer_list<Bytes> parts, std::span<uint8_t, 32> output) noexcept {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
   DigestContext digest(EVP_MD_CTX_new(), EVP_MD_CTX_free);
   if (!digest || EVP_DigestInit_ex(digest.get(), EVP_sha256(), nullptr) != 1) return false;
   for (const auto& part : parts)
@@ -169,7 +169,7 @@ bool Sha256(std::initializer_list<Bytes> parts, std::span<uint8_t, 32> output) n
 bool HmacSha256(Bytes key, std::initializer_list<Bytes> parts,
                 std::span<uint8_t, 32> output) noexcept {
   if (key.empty()) return false;
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
   try {
     std::vector<uint8_t> message;
     struct Clean { std::vector<uint8_t>& bytes; ~Clean() { Cleanse(bytes.data(), bytes.size()); } } clean{message};
@@ -189,7 +189,7 @@ bool HmacSha256(Bytes key, std::initializer_list<Bytes> parts,
 bool HkdfSha256(Bytes salt, Bytes key, std::initializer_list<Bytes> info,
                 std::span<uint8_t> output) noexcept {
   if (key.empty() || output.empty() || output.size() > 255 * 32) return false;
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
   KeyContext context(EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr), EVP_PKEY_CTX_free);
   if (!context || EVP_PKEY_derive_init(context.get()) != 1 ||
       EVP_PKEY_CTX_set_hkdf_mode(context.get(), EVP_PKEY_HKDEF_MODE_EXTRACT_AND_EXPAND) != 1 ||
@@ -235,7 +235,7 @@ bool HkdfSha256(Bytes salt, Bytes key, std::initializer_list<Bytes> info,
 bool AesGcmSeal(std::span<const uint8_t, 32> key, std::span<const uint8_t, 12> iv, Bytes aad,
                 Bytes plaintext, uint8_t* ciphertext, std::span<uint8_t, 16> tag) noexcept {
   if (!plaintext.empty() && !ciphertext) return false;
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
   CipherContext cipher(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
   int written = 0, final_size = 0;
   std::array<uint8_t, 16> final{};
@@ -259,7 +259,7 @@ bool AesGcmSeal(std::span<const uint8_t, 32> key, std::span<const uint8_t, 12> i
 bool AesGcmOpen(std::span<const uint8_t, 32> key, std::span<const uint8_t, 12> iv, Bytes aad,
                 Bytes ciphertext, std::span<const uint8_t, 16> tag, uint8_t* plaintext) noexcept {
   if (!ciphertext.empty() && !plaintext) return false;
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
   CipherContext cipher(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
   int written = 0, final_size = 0;
   std::array<uint8_t, 16> expected{};
@@ -286,7 +286,7 @@ bool AesGcmOpen(std::span<const uint8_t, 32> key, std::span<const uint8_t, 12> i
 
 struct X25519Key::State {
   std::array<uint8_t, 32> public_key{};
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
   KeyOwner key{nullptr, EVP_PKEY_free};
 #elif REX_PLATFORM_WIN32
   Algorithm algorithm;
@@ -308,7 +308,7 @@ std::optional<X25519Key> X25519Key::Generate() noexcept {
     X25519Key result;
     result.state_ = std::make_unique<State>();
     auto& state = *result.state_;
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
     KeyContext context(EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, nullptr), EVP_PKEY_CTX_free);
     EVP_PKEY* raw = nullptr;
     if (!context || EVP_PKEY_keygen_init(context.get()) != 1 ||
@@ -350,7 +350,7 @@ std::optional<X25519Key> X25519Key::Generate() noexcept {
 
 bool X25519Key::Agree(std::span<const uint8_t, 32> peer, std::span<uint8_t, 32> shared) const noexcept {
   if (!valid() || !Nonzero(peer)) return false;
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
   KeyOwner peer_key(EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, nullptr, peer.data(), peer.size()),
                     EVP_PKEY_free);
   KeyContext context(EVP_PKEY_CTX_new(state_->key.get(), nullptr), EVP_PKEY_CTX_free);

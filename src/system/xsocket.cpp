@@ -44,6 +44,10 @@
 #include <sys/uio.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
+#elif REX_PLATFORM_MAC
+#include <optional>
+#include <unistd.h>
+#include "net_posix_compat.h"
 #endif
 #endif
 
@@ -80,9 +84,107 @@ void FailSocket(int posix_error) {
 #if REX_PLATFORM_GNU_LINUX
 constexpr int kNoSignal = MSG_NOSIGNAL;
 #else
+// macOS: every online socket carries SO_NOSIGPIPE instead (see Initialize/Accept).
 constexpr int kNoSignal = 0;
 #endif
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_MAC
+// Guest N_XSOCKADDR stores a 16-bit host-order family where BSD sockaddr has
+// sa_len followed by an 8-bit sa_family. Linux/Windows pass the guest layout
+// straight through; Darwin needs the header rewritten in a native copy.
+bool StageNativeSockaddr(const void* guest, int length, sockaddr_storage& native,
+                         socklen_t& native_length) {
+  if (!guest || length < 2 || size_t(length) > sizeof(native)) { errno = EINVAL; return false; }
+  std::memset(&native, 0, sizeof(native));
+  std::memcpy(&native, guest, size_t(length));
+  uint16_t family = 0;
+  std::memcpy(&family, guest, sizeof(family));
+  native.ss_len = uint8_t(length);
+  native.ss_family = sa_family_t(family);
+  native_length = socklen_t(length);
+  return true;
+}
+// Inverse of StageNativeSockaddr for addresses returned to the guest.
+void PublishNativeSockaddr(const sockaddr& native, void* guest) {
+  const uint16_t family = native.sa_family;
+  std::memcpy(guest, &family, sizeof(family));
+}
+// Darwin's shutdown() fails with ENOTCONN on an unconnected UDP socket and on
+// a listening socket, so unlike Linux it does not interrupt a blocked
+// recvfrom/accept there, and Close relies on that wake. Blocking receives and
+// accepts on macOS therefore wait in poll on the socket and its cancellation
+// pipe first, honouring SO_RCVTIMEO like the native call (EAGAIN on expiry).
+using MacDeadline = std::optional<std::chrono::steady_clock::time_point>;
+// True when the call should block (blocking descriptor, no per-call
+// MSG_DONTWAIT and a cancellation pipe to watch).
+bool MacShouldEmulateBlocking(int handle, int cancellation, int flags) {
+  const int mode = fcntl(handle, F_GETFL, 0);
+  return mode >= 0 && !(mode & O_NONBLOCK) && !(flags & MSG_DONTWAIT) && cancellation >= 0;
+}
+bool MacReceiveDeadline(int handle, MacDeadline& deadline) {
+  timeval timeout{};
+  socklen_t length = sizeof(timeout);
+  if (getsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, &timeout, &length) < 0) return false;
+  deadline.reset();
+  if (timeout.tv_sec || timeout.tv_usec)
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout.tv_sec) +
+               std::chrono::microseconds(timeout.tv_usec);
+  return true;
+}
+// Returns true once the socket is readable; false with errno set on
+// cancellation (ENOTSOCK), timeout (EAGAIN) or a poll failure.
+template <class Retired>
+bool MacWaitReadable(int handle, int cancellation, Retired retired, const MacDeadline& deadline) {
+  for (;;) {
+    std::array<pollfd, 2> descriptors{{{handle, POLLIN, 0}, {cancellation, POLLIN, 0}}};
+    timespec remaining{};
+    const timespec* wait = nullptr;
+    if (deadline) {
+      const auto left = *deadline - std::chrono::steady_clock::now();
+      if (left <= decltype(left)::zero()) { errno = EAGAIN; return false; }
+      const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(left);
+      remaining.tv_sec = seconds.count();
+      remaining.tv_nsec = std::chrono::duration_cast<std::chrono::nanoseconds>(left - seconds).count();
+      wait = &remaining;
+    }
+    const int ready = rex::net::mac::PollTimespec(descriptors.data(), descriptors.size(), wait);
+    if (retired() || (ready > 0 && descriptors[1].revents)) { errno = ENOTSOCK; return false; }
+    if (ready < 0) {
+      if (errno == EINTR) continue;  // The native blocking call restarts (SA_RESTART).
+      return false;
+    }
+    if (!ready) { errno = EAGAIN; return false; }
+    return true;
+  }
+}
+template <class Retired>
+int MacDatagramReceive(int handle, int cancellation, Retired retired, uint8_t* data,
+                       uint32_t capacity, int flags, sockaddr* from, socklen_t* from_length) {
+  if (!MacShouldEmulateBlocking(handle, cancellation, flags))
+    return int(recvfrom(handle, data, capacity, flags, from, from_length));
+  MacDeadline deadline;
+  if (!MacReceiveDeadline(handle, deadline)) return -1;
+  for (;;) {
+    if (!MacWaitReadable(handle, cancellation, retired, deadline)) return -1;
+    const auto received = recvfrom(handle, data, capacity, flags | MSG_DONTWAIT, from, from_length);
+    if (received >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) return int(received);
+    // Another receiver consumed the datagram first; wait again.
+  }
+}
+template <class Retired>
+int MacAccept(int handle, int cancellation, Retired retired, sockaddr* address,
+              socklen_t* address_length) {
+  if (MacShouldEmulateBlocking(handle, cancellation, 0)) {
+    MacDeadline deadline;
+    if (!MacReceiveDeadline(handle, deadline) ||
+        !MacWaitReadable(handle, cancellation, retired, deadline))
+      return -1;
+  }
+  // A connection taken by a concurrent accept between poll and here makes
+  // this block like the native call; Close then wakes it only on Linux.
+  return accept(handle, address, address_length);
+}
+#endif
+#if REX_PLATFORM_POSIX_ONLINE || REX_PLATFORM_WIN32
 std::optional<std::vector<uint8_t>> ProtectedGameplayWire(uint64_t socket,
     xam::LanAddress logical, const uint8_t* guest_data, uint32_t length) {
   if (length > xam::kGameplayMaximumPlaintextBytes) { FailSocket(EMSGSIZE); return std::nullopt; }
@@ -92,6 +194,11 @@ std::optional<std::vector<uint8_t>> ProtectedGameplayWire(uint64_t socket,
     // Preserve a bad guest pointer as EFAULT; never dereference it in userspace.
     iovec local{staged.data(), length}, remote{const_cast<uint8_t*>(guest_data), length};
     if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) != ssize_t(length)) {
+      FailSocket(EFAULT); return std::nullopt;
+    }
+#elif REX_PLATFORM_MAC
+    // Mirror process_vm_readv: a bad guest pointer fails as EFAULT, never faults.
+    if (!rex::net::mac::ReadSelf(staged.data(), guest_data, length)) {
       FailSocket(EFAULT); return std::nullopt;
     }
 #else
@@ -114,6 +221,11 @@ struct XSocket::NativeSocketState {
   explicit NativeSocketState(uint64_t value) : handle(value) {
 #if REX_PLATFORM_GNU_LINUX
     cancellation = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+#elif REX_PLATFORM_MAC
+    // No eventfd: a nonblocking close-on-exec pipe. Waiters poll the read end
+    // (cancellation); Close writes one never-drained byte to the write end.
+    if (!rex::net::mac::CreateWakePipe(cancellation, cancellation_write))
+      REXSYS_ERROR("XSocket: cancellation pipe unavailable socket={} error={}", handle, errno);
 #endif
 #if REX_PLATFORM_WIN32
     // Winsock shutdown does not wake a select blocked on an unconnected UDP
@@ -148,6 +260,9 @@ struct XSocket::NativeSocketState {
     Finalize();
 #if REX_PLATFORM_GNU_LINUX
     if (cancellation >= 0) ::close(cancellation);
+#elif REX_PLATFORM_MAC
+    if (cancellation >= 0) ::close(cancellation);
+    if (cancellation_write >= 0) ::close(cancellation_write);
 #endif
 #if REX_PLATFORM_WIN32
     if (wake != uint64_t(-1)) ::closesocket(static_cast<SOCKET>(wake));
@@ -157,7 +272,7 @@ struct XSocket::NativeSocketState {
 #endif
   }
   bool valid() const {
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
     return cancellation >= 0;
 #else
     return true;
@@ -176,6 +291,9 @@ struct XSocket::NativeSocketState {
   std::atomic<bool> retired{false};
   std::atomic<bool> finalized{false};
   int cancellation = -1;
+#if REX_PLATFORM_MAC
+  int cancellation_write = -1;
+#endif
 #if REX_PLATFORM_WIN32
   uint64_t wake = uint64_t(-1);
   sockaddr_in wake_address{};
@@ -230,6 +348,15 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
 #endif
       , proto == Protocol::X_IPPROTO_VDP ? Protocol::X_IPPROTO_UDP : proto);
   if (handle == decltype(handle)(-1)) return X_STATUS_UNSUCCESSFUL;
+#if REX_PLATFORM_MAC
+  // SOCK_CLOEXEC and MSG_NOSIGNAL stand-ins, applied before first use.
+  if (!rex::net::mac::ConfigureSocketDescriptor(int(handle))) {
+    const int error = errno;
+    rex::net::socket_close(handle);
+    errno = error;
+    return X_STATUS_UNSUCCESSFUL;
+  }
+#endif
   std::shared_ptr<NativeSocketState> state;
   try { state = std::make_shared<NativeSocketState>(handle); }
   catch (const std::bad_alloc&) {
@@ -267,6 +394,15 @@ X_STATUS XSocket::Close() {
   const uint64_t wake = 1;
   ssize_t written;
   do { written = ::write(state->cancellation, &wake, sizeof(wake)); }
+  while (written < 0 && errno == EINTR);
+  if (written != static_cast<ssize_t>(sizeof(wake)) && errno != EAGAIN)
+    REXSYS_ERROR("XSocket: cancellation wake failed socket={}", state->handle);
+#elif REX_PLATFORM_MAC
+  // One byte that is never drained: the pipe stays readable (sticky wake),
+  // like the Linux eventfd counter.
+  const uint8_t wake = 1;
+  ssize_t written;
+  do { written = ::write(state->cancellation_write, &wake, sizeof(wake)); }
   while (written < 0 && errno == EINTR);
   if (written != static_cast<ssize_t>(sizeof(wake)) && errno != EAGAIN)
     REXSYS_ERROR("XSocket: cancellation wake failed socket={}", state->handle);
@@ -373,6 +509,13 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, 
     int native_value = boolean ? int(value != 0) : int(value);
     ret = setsockopt(handle, native_level, native_option, &native_value,
                      sizeof(native_value));
+#if REX_PLATFORM_MAC
+    // Linux (and Winsock) let SO_REUSEADDR datagram sockets share a bound
+    // port; BSD requires SO_REUSEPORT for that. Mirror the option.
+    if (ret == 0 && native_level == SOL_SOCKET && native_option == SO_REUSEADDR &&
+        type_ == X_SOCK_DGRAM)
+      ret = setsockopt(handle, SOL_SOCKET, SO_REUSEPORT, &native_value, sizeof(native_value));
+#endif
   }
 #endif
   REXSYS_INFO("XSocket::SetOption: native={} level={:#x} option={:#x} length={} result={}",
@@ -411,7 +554,19 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
     return X_STATUS_UNSUCCESSFUL;
   }
   int available = 0;
+#if REX_PLATFORM_MAC
+  // Linux FIONREAD on a datagram socket reports the next datagram's size;
+  // Darwin's reports every queued byte. SO_NREAD gives the Linux value.
+  int ret;
+  if (type_ == X_SOCK_DGRAM) {
+    socklen_t available_length = sizeof(available);
+    ret = getsockopt(handle, SOL_SOCKET, SO_NREAD, &available, &available_length);
+  } else {
+    ret = ioctl(handle, FIONREAD, &available);
+  }
+#else
   int ret = ioctl(handle, FIONREAD, &available);
+#endif
   if (ret == 0) {
     rex::be<uint32_t> value = uint32_t(available);
     std::memcpy(arg_ptr, &value, sizeof(value));
@@ -451,7 +606,13 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
   if (!operation) return X_STATUS_UNSUCCESSFUL;
   const auto handle = operation.handle();
   int ret;
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_MAC
+  sockaddr_storage native_name{};
+  socklen_t native_name_length = 0;
+  if (!StageNativeSockaddr(name, name_len, native_name, native_name_length))
+    return X_STATUS_UNSUCCESSFUL;
+#endif
+#if REX_PLATFORM_POSIX_ONLINE
   // UDP only associates an address: no handshake or blocking connect wait,
   // and no native mode change. Connected/listening TCP also needs no handshake.
   sockaddr_storage peer{}; socklen_t peer_length = sizeof(peer);
@@ -463,7 +624,11 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
   int error;
   if (association_only) {
     if (operation.retired()) { ClosedNativeSocket(); return X_STATUS_UNSUCCESSFUL; }
+#if REX_PLATFORM_MAC
+    ret = connect(handle, reinterpret_cast<sockaddr*>(&native_name), native_name_length);
+#else
     ret = connect(handle, reinterpret_cast<sockaddr*>(name), name_len);
+#endif
     error = errno;
   } else {
     // connect has no per-call MSG_DONTWAIT. Exclude native send/receive entry
@@ -483,7 +648,11 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
     blocking = !(original_flags & O_NONBLOCK);
     if (blocking && fcntl(handle, F_SETFL, original_flags | O_NONBLOCK) < 0)
       return X_STATUS_UNSUCCESSFUL;
+#if REX_PLATFORM_MAC
+    ret = connect(handle, reinterpret_cast<sockaddr*>(&native_name), native_name_length);
+#else
     ret = connect(handle, reinterpret_cast<sockaddr*>(name), name_len);
+#endif
     error = errno;
     if (blocking && fcntl(handle, F_SETFL, original_flags) < 0) {
       error = errno; ret = -1; blocking = false;
@@ -511,7 +680,11 @@ X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
           remaining.tv_nsec = std::chrono::duration_cast<std::chrono::nanoseconds>(left - seconds).count();
           wait = &remaining;
         }
+#if REX_PLATFORM_MAC
+        const int ready = rex::net::mac::PollTimespec(descriptors.data(), descriptors.size(), wait);
+#else
         const int ready = ppoll(descriptors.data(), descriptors.size(), wait, nullptr);
+#endif
         if (operation.retired()) { error = ENOTSOCK; break; }
         if (ready < 0) { error = errno; break; }
         if (!ready) { error = EINPROGRESS; break; }
@@ -538,7 +711,15 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
   const auto operation = AcquireNativeLease();
   if (!operation) return X_STATUS_UNSUCCESSFUL;
   const auto handle = operation.handle();
+#if REX_PLATFORM_MAC
+  sockaddr_storage native_name{};
+  socklen_t native_name_length = 0;
+  if (!StageNativeSockaddr(name, name_len, native_name, native_name_length))
+    return X_STATUS_UNSUCCESSFUL;
+  int ret = bind(handle, reinterpret_cast<sockaddr*>(&native_name), native_name_length);
+#else
   int ret = bind(handle, (sockaddr*)name, name_len);
+#endif
   if (ret < 0) {
     return X_STATUS_UNSUCCESSFUL;
   }
@@ -612,11 +793,25 @@ object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
   if (operation.retired()) { ClosedNativeSocket(); return nullptr; }
   sockaddr n_sockaddr;
   socklen_t n_name_len = sizeof(sockaddr);
+#if REX_PLATFORM_MAC
+  uintptr_t ret = MacAccept(int(handle), operation.cancellation_handle(),
+                            [&] { return operation.retired(); }, &n_sockaddr, &n_name_len);
+#else
   uintptr_t ret =
 #if REX_PLATFORM_GNU_LINUX
       accept4(handle, &n_sockaddr, &n_name_len, SOCK_CLOEXEC);
 #else
       accept(handle, &n_sockaddr, &n_name_len);
+#endif
+#endif
+#if REX_PLATFORM_MAC
+  // accept4(SOCK_CLOEXEC) and MSG_NOSIGNAL stand-ins for the accepted socket.
+  if (ret != uintptr_t(-1) && !rex::net::mac::ConfigureSocketDescriptor(int(ret))) {
+    const int error = errno;
+    rex::net::socket_close(ret);
+    errno = error;
+    ret = uintptr_t(-1);
+  }
 #endif
   if (operation.retired()) {
     if (ret != uintptr_t(-1)) rex::net::socket_close(ret);
@@ -660,6 +855,9 @@ object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
     std::lock_guard lifetime_lock(native_lifetime_mutex_);
     if (!operation.retired()) {
       std::memcpy(name, &n_sockaddr, n_name_len);
+#if REX_PLATFORM_MAC
+      PublishNativeSockaddr(n_sockaddr, name);
+#endif
       *name_len = n_name_len;
       return child;
     }
@@ -740,7 +938,7 @@ int XSocket::RecvFromNative(const NativeLease& operation, uint8_t* buf, uint32_t
   // Stage ordinary UDP too: membership may become scoped during this receive.
   // Keep a complete56-byte NAT control frame plus one oversize byte, even
   // when the guest requests fewer bytes or only polls with a zero-length buffer.
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_POSIX_ONLINE || REX_PLATFORM_WIN32
   // Membership may become scoped while a receive is blocked. Always retain
   // the complete bounded wire datagram so that a fitting plaintext is not lost.
   const uint32_t receive_capacity = type_ == X_SOCK_DGRAM ? 65536u : buf_len;
@@ -760,6 +958,11 @@ int XSocket::RecvFromNative(const NativeLease& operation, uint8_t* buf, uint32_t
     iovec local{receive_data, count}, remote{buf, count};
     const auto written = process_vm_writev(getpid(), &local, 1, &remote, 1, 0);
     if (written == static_cast<ssize_t>(count)) return true;
+    FailSocket(EFAULT);
+    return false;
+#elif REX_PLATFORM_MAC
+    // Mirror process_vm_writev: a bad guest pointer fails as EFAULT, never faults.
+    if (rex::net::mac::WriteSelf(buf, receive_data, count)) return true;
     FailSocket(EFAULT);
     return false;
 #elif REX_PLATFORM_WIN32
@@ -799,13 +1002,23 @@ int XSocket::RecvFromNative(const NativeLease& operation, uint8_t* buf, uint32_t
   };
 
 retry_native_receive:
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_POSIX_ONLINE || REX_PLATFORM_WIN32
   if (type_ == X_SOCK_DGRAM) receive_data = receive_storage.data();
 #endif
   if (operation.retired()) return ClosedNativeSocket();
   xam::NatProbeTick(handle);
   sockaddr_in nfrom{};
   socklen_t nfromlen = sizeof(sockaddr_in);
+#if REX_PLATFORM_MAC
+  // The 64 KiB staging buffer holds any IPv4 datagram, so no MSG_TRUNC probe
+  // is needed. A blocking datagram receive must still observe Close.
+  int ret = type_ == X_SOCK_DGRAM
+      ? MacDatagramReceive(int(handle), operation.cancellation_handle(),
+                           [&] { return operation.retired(); }, receive_data, receive_capacity,
+                           int(flags), (sockaddr*)&nfrom, &nfromlen)
+      : int(recvfrom(handle, reinterpret_cast<char*>(receive_data), receive_capacity, flags,
+                     (sockaddr*)&nfrom, &nfromlen));
+#else
   int ret = recvfrom(handle, reinterpret_cast<char*>(receive_data), receive_capacity,
 #if REX_PLATFORM_GNU_LINUX
                      flags | (type_ == X_SOCK_DGRAM ? MSG_TRUNC : 0),
@@ -813,6 +1026,7 @@ retry_native_receive:
                      flags,
 #endif
                      (sockaddr*)&nfrom, &nfromlen);
+#endif
   if (operation.retired()) return ClosedNativeSocket();
   if (ret < 0) return ret;
   if (ret > 0 && uint32_t(ret) <= receive_capacity &&
@@ -838,7 +1052,7 @@ retry_native_receive:
       goto retry_native_receive;
     }
   }
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_POSIX_ONLINE || REX_PLATFORM_WIN32
   if (scoped && type_ == X_SOCK_DGRAM) {
     if (!logical || uint32_t(ret) > receive_capacity ||
         !xam::OpenGameplayDatagram(handle, *logical,
@@ -907,7 +1121,7 @@ bool XSocket::PumpNatControl() {
   socklen_t source_length = sizeof(source);
   const int peeked = recvfrom(handle, reinterpret_cast<char*>(packet.data()),
                               int(packet.size()), MSG_PEEK
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
                               | MSG_DONTWAIT
 #endif
                               ,
@@ -920,7 +1134,7 @@ bool XSocket::PumpNatControl() {
   source_length = sizeof(source);
   const int received = recvfrom(handle, reinterpret_cast<char*>(packet.data()),
                                 int(packet.size()),
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
                                 MSG_DONTWAIT,
 #else
                                 0,
@@ -1014,7 +1228,7 @@ int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
   const auto handle = operation.handle();
   std::shared_lock connect_window(native_connect_window_mutex_);
   if (operation.retired()) return ClosedNativeSocket();
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_POSIX_ONLINE || REX_PLATFORM_WIN32
   if (type_ == X_SOCK_DGRAM && xam::IsAuthorizedGameplaySocket(handle)) {
     sockaddr_in native{}; socklen_t length = sizeof(native);
     if (getpeername(handle, reinterpret_cast<sockaddr*>(&native), &length) < 0) { FailSocket(EDESTADDRREQ); return -1; }
@@ -1044,7 +1258,7 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
   const auto handle = operation.handle();
   std::shared_lock connect_window(native_connect_window_mutex_);
   if (operation.retired()) return ClosedNativeSocket();
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_POSIX_ONLINE || REX_PLATFORM_WIN32
   // Validate the complete IPv4 destination before routing or burning a nonce.
   // Never pass an untrusted length for our fixed-size native stack object.
   N_XSOCKADDR_IN staged_to{};
@@ -1056,6 +1270,11 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
 #if REX_PLATFORM_GNU_LINUX
     iovec local{&staged_to, sizeof(staged_to)}, remote{to, sizeof(staged_to)};
     if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) != ssize_t(sizeof(staged_to))) {
+      FailSocket(EFAULT);
+      return -1;
+    }
+#elif REX_PLATFORM_MAC
+    if (!rex::net::mac::ReadSelf(&staged_to, to, sizeof(staged_to))) {
       FailSocket(EFAULT);
       return -1;
     }
@@ -1126,7 +1345,7 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
     }
   }
 
-#if REX_PLATFORM_GNU_LINUX || REX_PLATFORM_WIN32
+#if REX_PLATFORM_POSIX_ONLINE || REX_PLATFORM_WIN32
   if (type_ == X_SOCK_DGRAM && xam::IsAuthorizedGameplaySocket(handle)) {
     if (!to) {
       socklen_t length = sizeof(nto);
@@ -1153,7 +1372,7 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
                 | MSG_NOSIGNAL
 #endif
                 , to ? (sockaddr*)&nto : nullptr,
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
                   to ? sizeof(nto) : 0);
 #else
                   to_len);

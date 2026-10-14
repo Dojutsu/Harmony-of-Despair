@@ -423,6 +423,27 @@ struct SessionManagerDependencies {
 std::optional<uint64_t> ResolveRexGlueLocalUserXuid(
     uint32_t local_user_index, std::optional<uint64_t> current_profile_xuid);
 
+// libc++ (macOS) has no std::atomic<std::shared_ptr<T>>; give it the same
+// load/exchange surface over the shared_ptr atomic free functions.
+#if defined(_LIBCPP_VERSION)
+template <typename T>
+class AtomicSharedPtr {
+ public:
+  std::shared_ptr<T> load(std::memory_order order) const {
+    return std::atomic_load_explicit(&value_, order);
+  }
+  std::shared_ptr<T> exchange(std::shared_ptr<T> value, std::memory_order order) {
+    return std::atomic_exchange_explicit(&value_, std::move(value), order);
+  }
+
+ private:
+  std::shared_ptr<T> value_;
+};
+#else
+template <typename T>
+using AtomicSharedPtr = std::atomic<std::shared_ptr<T>>;
+#endif
+
 class XSession final : public XObject {
  public:
   static const XObject::Type kObjectType = XObject::Type::Session;
@@ -433,7 +454,7 @@ class XSession final : public XObject {
   void set_record(std::shared_ptr<SessionRecord> record);
 
  private:
-  std::atomic<std::shared_ptr<SessionRecord>> record_;
+  AtomicSharedPtr<SessionRecord> record_;
 };
 
 enum class RuntimeInviteUpdateResult {

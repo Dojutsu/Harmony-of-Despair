@@ -11,6 +11,10 @@
 #include <windows.h>
 #elif REX_PLATFORM_GNU_LINUX
 #include <unistd.h>
+#elif REX_PLATFORM_MAC
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#include <unistd.h>
 #endif
 
 namespace rex::system::xam {
@@ -106,6 +110,26 @@ OnlineStatus::OnlineStatus(uint64_t xuid, std::string name, std::filesystem::pat
     }
     if (!process_start_time_.empty()) {
       process_id_ = static_cast<uint32_t>(::getpid());
+      path_ = directory / ("online-status-" + std::to_string(process_id_) + ".json");
+      worker_ = std::thread([this] { Run(); });
+    }
+  }
+#elif REX_PLATFORM_MAC
+  if (!directory.empty()) {
+    // macOS has no /proc. The kernel's process start time (p_starttime, wall
+    // clock at fork) is stable for the life of the process and distinguishes
+    // a reused PID. Published as decimal microseconds since the Unix epoch,
+    // kept as text like the other platforms' values.
+    const pid_t pid = ::getpid();
+    int request[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+    kinfo_proc info{};
+    size_t size = sizeof(info);
+    if (::sysctl(request, 4, &info, &size, nullptr, 0) == 0 && size == sizeof(info) &&
+        info.kp_proc.p_starttime.tv_sec > 0) {
+      const auto& started = info.kp_proc.p_starttime;
+      process_start_time_ = std::to_string(uint64_t(started.tv_sec) * 1000000u +
+                                           uint64_t(started.tv_usec));
+      process_id_ = static_cast<uint32_t>(pid);
       path_ = directory / ("online-status-" + std::to_string(process_id_) + ".json");
       worker_ = std::thread([this] { Run(); });
     }

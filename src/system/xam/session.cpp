@@ -17,9 +17,14 @@
 #include <rex/thread.h>
 #include <rex/system/xam/nat_probe.h>
 
-#if REX_PLATFORM_GNU_LINUX
+#if REX_PLATFORM_POSIX_ONLINE
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#endif
+#if REX_PLATFORM_MAC
+#include <ifaddrs.h>
+#include <net/if.h>
+#include "../net_posix_compat.h"
 #endif
 
 #if REX_PLATFORM_WIN32
@@ -354,7 +359,7 @@ std::optional<std::array<uint8_t, 16>> InviteLanMac(
   std::array<uint8_t, 16> result{};
   std::copy_n(digest.begin(), result.size(), result.begin());
   return result;
-#elif REX_PLATFORM_GNU_LINUX
+#elif REX_PLATFORM_POSIX_ONLINE
   if (attempt_id.size() != 32 ||
       !std::all_of(attempt_id.begin(), attempt_id.end(), [](char value) {
         return (value >= '0' && value <= '9') ||
@@ -546,6 +551,15 @@ int ReceiveDatagram(SOCKET socket, char* buffer, size_t size, int flags,
   // prefix can look exactly like a valid discovery packet. Preserve Winsock's
   // rejection of an oversized datagram instead of parsing a truncated frame.
   const auto received = recvfrom(socket, buffer, size, flags | MSG_TRUNC, source, source_length);
+  if (received > static_cast<decltype(received)>(size)) {
+    errno = EMSGSIZE;
+    return -1;
+  }
+  return static_cast<int>(received);
+#elif REX_PLATFORM_MAC
+  // Same Winsock-style rejection; Darwin reports truncation only via recvmsg.
+  const auto received = rex::net::mac::ReceiveReportingTruncation(socket, buffer, size, flags,
+                                                                 source, source_length);
   if (received > static_cast<decltype(received)>(size)) {
     errno = EMSGSIZE;
     return -1;
@@ -1286,6 +1300,11 @@ class LanDiscoveryService::Impl {
       return false;
     int yes = 1;
     setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&yes), sizeof(yes));
+#if REX_PLATFORM_MAC
+    // BSD only shares a wildcard UDP port between listeners with SO_REUSEPORT;
+    // Linux grants that with SO_REUSEADDR alone (several local instances).
+    setsockopt(socket, SOL_SOCKET, SO_REUSEPORT, &yes, sizeof(yes));
+#endif
     // Limited-broadcast reception requires a wildcard listener on Windows.
     // Outgoing search/join sockets and all advertised/gameplay addresses are
     // still bound to the explicitly selected physical interface.
@@ -2759,6 +2778,38 @@ uint32_t LanDiscoveryService::DetermineLanIpv4() {
     REXSYS_ERROR("Invalid configured LAN bind address '{}'", configured);
     return htonl(INADDR_LOOPBACK);
   }
+#if REX_PLATFORM_MAC
+  {
+    // macOS host names are usually "<name>.local", whose lookup goes through
+    // mDNS and may stall or yield nothing. Enumerate the interfaces instead,
+    // with the same preference: the first bindable non-loopback IPv4, replaced
+    // by the first directly routable private LAN address.
+    ifaddrs* interfaces = nullptr;
+    if (getifaddrs(&interfaces) == 0) {
+      uint32_t result = htonl(INADDR_LOOPBACK);
+      for (auto* item = interfaces; item; item = item->ifa_next) {
+        if (!item->ifa_addr || item->ifa_addr->sa_family != AF_INET ||
+            !(item->ifa_flags & IFF_UP) || !(item->ifa_flags & IFF_RUNNING) ||
+            (item->ifa_flags & IFF_LOOPBACK))
+          continue;
+        const auto* address = reinterpret_cast<const sockaddr_in*>(item->ifa_addr);
+        if (address->sin_addr.s_addr == htonl(INADDR_LOOPBACK) ||
+            !IsLocallyBindableIpv4(address->sin_addr.s_addr))
+          continue;
+        if (result == htonl(INADDR_LOOPBACK))
+          result = address->sin_addr.s_addr;
+        if (IsPrivateLanIpv4(address->sin_addr.s_addr)) {
+          result = address->sin_addr.s_addr;
+          break;
+        }
+      }
+      freeifaddrs(interfaces);
+      if (result != htonl(INADDR_LOOPBACK))
+        return result;
+    }
+    // Fall through to the host-name lookup below.
+  }
+#endif
   char hostname[256]{};
   if (gethostname(hostname, sizeof(hostname)) != 0)
     return htonl(INADDR_LOOPBACK);
