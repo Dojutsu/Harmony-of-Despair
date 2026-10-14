@@ -372,6 +372,9 @@ class LanDiscoveryService {
   bool IsAdvertising() const;
   std::vector<SessionRecord> Search(uint32_t timeout_ms, uint32_t max_results,
                                     uint32_t local_user_index = 0);
+  // Online team search: the directory's open, searchable lobbies. Empty for
+  // LAN, private-invitation and legacy diagnostic modes.
+  std::vector<DirectoryListing> SearchListings(uint64_t exclude_host_xuid);
   std::optional<DirectoryInviteJoinAttempt> IssueConfiguredInviteAttempt(
       std::string_view code, uint32_t title_id);
   void ReleaseConfiguredInviteAttempt(const DirectoryTraversalAttempt& attempt);
@@ -468,6 +471,12 @@ class SessionManager {
       uint32_t local_user_index, uint32_t title_id);
   bool CompleteAcceptedInviteJoin(uint32_t local_user_index, uint64_t local_xuid,
                                   const std::shared_ptr<SessionRecord>& session);
+  // Team search: remember the lobbies last shown to the title, and join one
+  // the title picked through the same admission an invite code uses.
+  void RememberSearchListings(std::vector<DirectoryListing> listings);
+  bool IsSearchListing(const std::array<uint8_t, 8>& xbox_session_id) const;
+  bool JoinSearchListing(const std::array<uint8_t, 8>& xbox_session_id,
+                         std::chrono::milliseconds timeout = std::chrono::seconds(15));
 
  private:
   struct ConfiguredInviteOperation;
@@ -515,6 +524,10 @@ class SessionManager {
   std::optional<uint64_t> runtime_invite_override_xuid_;
   uint64_t next_configured_invite_operation_token_ = 0;
   uint64_t configured_invite_claim_token_ = 0;
+  // Set just before a search join starts its invite-code operation.
+  bool search_join_next_ = false;
+  mutable std::mutex search_listings_mutex_;
+  std::vector<DirectoryListing> search_listings_;
   std::atomic<bool> async_shutdown_{false};
   mutable std::mutex async_shutdown_mutex_;
   bool async_shutdown_complete_ = false;

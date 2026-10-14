@@ -152,6 +152,21 @@ object_ref<XSession> LookupArbitrationSession(KernelState* state, uint32_t nativ
     if (candidate->guest_object() == native_address) return candidate;
   return {};
 }
+// Copies a host-published integer property value over the searcher's own
+// request entry with the same id, so results describe the host's lobby.
+void ApplyListingProperty(uint8_t* entry, const DirectoryListing& listing) {
+  const uint32_t id = memory::load_and_swap<uint32_t>(entry);
+  const uint8_t type = entry[8];
+  for (const auto& [property_id, value] : listing.properties) {
+    if (property_id != id)
+      continue;
+    if ((type == 1 && value.size() == 4) || (type == 2 && value.size() == 8) ||
+        (type == 3 && value.size() == 8) || (type == 5 && value.size() == 4))
+      std::memcpy(entry + 16, value.data(), value.size());
+    return;
+  }
+}
+
 X_HRESULT WriteSearchResults(KernelState* state, uint32_t output_ptr, uint32_t output_size,
                              uint32_t max_results, bool refresh_network,
                              const std::vector<std::array<uint8_t, 8>>* requested_ids = nullptr,
@@ -160,6 +175,7 @@ X_HRESULT WriteSearchResults(KernelState* state, uint32_t output_ptr, uint32_t o
   auto* manager = state->session_manager();
   manager->discovery().SetTitleId(state->title_id());
   size_t discovered_count = 0;
+  std::vector<DirectoryListing> listings;
   if (refresh_network) {
     // Entering search is a transition out of the local host flow. Tear down
     // any abandoned advertisement before broadcasting so this instance can't
@@ -172,6 +188,8 @@ X_HRESULT WriteSearchResults(KernelState* state, uint32_t output_ptr, uint32_t o
     discovered_count = discovered.size();
     for (auto& found : discovered)
       manager->registry().UpsertDiscovered(std::move(found));
+    listings = manager->discovery().SearchListings(state->user_profile()->xuid());
+    manager->RememberSearchListings(listings);
   }
   // The configured XUID is the logical local-host identity. Filtering by it
   // also excludes the same session rediscovered through loopback or a second
@@ -183,7 +201,38 @@ X_HRESULT WriteSearchResults(KernelState* state, uint32_t output_ptr, uint32_t o
              requested_ids->end();
     });
   }
-  size_t count = std::min<size_t>(sessions.size(), max_results);
+  struct Entry {
+    SessionInfo info;
+    uint64_t host_xuid = 0;
+    uint32_t open_public = 0, open_private = 0, filled_public = 0, filled_private = 0;
+    const DirectoryListing* listing = nullptr;
+  };
+  std::vector<Entry> entries;
+  for (const auto& session : sessions) {
+    std::lock_guard session_lock(*session->mutex);
+    entries.push_back({session->info, session->host_xuid, session->OpenPublicSlots(),
+                       session->OpenPrivateSlots(), session->FilledPublicSlots(),
+                       session->FilledPrivateSlots(), nullptr});
+  }
+  for (const auto& listing : listings) {
+    if (std::any_of(entries.begin(), entries.end(),
+                    [&](const auto& entry) { return entry.info.id == listing.xbox_session_id; }))
+      continue;
+    Entry entry;
+    entry.info.id = listing.xbox_session_id;
+    entry.info.key = listing.key;
+    entry.info.host_address = {listing.host_ipv4, listing.host_port};
+    entry.info.ethernet_address = listing.ethernet_address;
+    entry.info.online_address = listing.online_address;
+    entry.host_xuid = listing.host_xuid;
+    entry.open_public = listing.open_public_slots;
+    entry.open_private = listing.open_private_slots;
+    entry.filled_public = listing.filled_public_slots;
+    entry.filled_private = listing.filled_private_slots;
+    entry.listing = &listing;
+    entries.push_back(entry);
+  }
+  size_t count = std::min<size_t>(entries.size(), max_results);
   if ((property_count && !properties_ptr) || (context_count && !contexts_ptr))
     return X_E_INVALIDARG;
   const size_t property_bytes = size_t(property_count) * kGuestUserPropertySize;
@@ -202,9 +251,10 @@ X_HRESULT WriteSearchResults(KernelState* state, uint32_t output_ptr, uint32_t o
   size_t required = sizeof(GuestSearchHeader) + count * sizeof(GuestSearchResult) +
                     count * metadata_bytes_per_result;
   REXKRNL_INFO(
-      "XSession search results: discovered={} remote={} selected={} max={} output={:08X} "
-      "size={} required={}",
-      discovered_count, sessions.size(), count, max_results, output_ptr, output_size, required);
+      "XSession search results: discovered={} remote={} listed={} selected={} max={} "
+      "output={:08X} size={} required={}",
+      discovered_count, sessions.size(), listings.size(), count, max_results, output_ptr,
+      output_size, required);
   if (!output_ptr || output_size < required) {
     REXKRNL_INFO("XSession search results rejected: insufficient buffer");
     return X_ERROR_INSUFFICIENT_BUFFER;
@@ -218,18 +268,21 @@ X_HRESULT WriteSearchResults(KernelState* state, uint32_t output_ptr, uint32_t o
   uint32_t metadata_ptr =
       output_ptr + uint32_t(sizeof(GuestSearchHeader) + count * sizeof(GuestSearchResult));
   for (size_t i = 0; i < count; ++i) {
-    std::lock_guard session_lock(*sessions[i]->mutex);
-    StoreSessionInfo(&results[i].info, sessions[i]->info);
-    results[i].open_public_slots = sessions[i]->OpenPublicSlots();
-    results[i].open_private_slots = sessions[i]->OpenPrivateSlots();
-    results[i].filled_public_slots = sessions[i]->FilledPublicSlots();
-    results[i].filled_private_slots = sessions[i]->FilledPrivateSlots();
+    const auto& entry = entries[i];
+    StoreSessionInfo(&results[i].info, entry.info);
+    results[i].open_public_slots = entry.open_public;
+    results[i].open_private_slots = entry.open_private;
+    results[i].filled_public_slots = entry.filled_public;
+    results[i].filled_private_slots = entry.filled_private;
     results[i].property_count = property_count;
     results[i].context_count = context_count;
     if (property_bytes) {
       results[i].properties_ptr = metadata_ptr;
-      std::memcpy(state->memory()->TranslateVirtual(metadata_ptr), requested_properties.data(),
-                  property_bytes);
+      auto* properties = state->memory()->TranslateVirtual(metadata_ptr);
+      std::memcpy(properties, requested_properties.data(), property_bytes);
+      if (entry.listing)
+        for (uint16_t p = 0; p < property_count; ++p)
+          ApplyListingProperty(properties + p * kGuestUserPropertySize, *entry.listing);
       metadata_ptr += uint32_t(property_bytes);
     }
     if (context_bytes) {
@@ -240,10 +293,18 @@ X_HRESULT WriteSearchResults(KernelState* state, uint32_t output_ptr, uint32_t o
     }
     REXKRNL_INFO(
         "XSession search result[{}]: host_xuid={:016X} address={:08X}:{} open_public={} "
-        "filled_public={}",
-        i, sessions[i]->host_xuid, sessions[i]->info.host_address.ipv4,
-        sessions[i]->info.host_address.port, sessions[i]->OpenPublicSlots(),
-        sessions[i]->FilledPublicSlots());
+        "filled_public={} listed={}",
+        i, entry.host_xuid, entry.info.host_address.ipv4, entry.info.host_address.port,
+        entry.open_public, entry.filled_public, entry.listing != nullptr);
+    if (entry.listing) {
+      for (const auto& [id, value] : entry.listing->contexts)
+        REXKRNL_INFO("SEARCH_DIAG result[{}] host context id={:08X} value={:08X}", i, id, value);
+      for (const auto& [id, value] : entry.listing->properties) {
+        std::string hex;
+        for (uint8_t byte : value) hex += fmt::format("{:02X}", byte);
+        REXKRNL_INFO("SEARCH_DIAG result[{}] host property id={:08X} value={}", i, id, hex);
+      }
+    }
   }
   REXKRNL_INFO("XSession search results returned: count={} status={:08X}", count,
                uint32_t(X_E_SUCCESS));
@@ -274,6 +335,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                     context_value);
       REXKRNL_INFO("XGIUserSetContextEx: user={} id={:08X} value={:08X}", user_index,
                    context_id, context_value);
+      if (user_index == 0)
+        rex::system::xam::SetDirectoryListingContext(context_id, context_value);
       return X_E_SUCCESS;
     }
     case 0x000B0007: {
@@ -285,6 +348,15 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                     value_size, value_ptr);
       REXKRNL_INFO("XGIUserSetPropertyEx: user={} id={:08X} size={} value={:08X}", user_index,
                    property_id, value_size, value_ptr);
+      if (user_index == 0 && value_ptr && value_size && value_size <= 64 &&
+          memory_->LookupHeap(value_ptr) && memory_->LookupHeap(value_ptr + value_size - 1)) {
+        const auto* value = memory_->TranslateVirtual<const uint8_t*>(value_ptr);
+        std::string hex;
+        for (uint32_t i = 0; i < value_size; ++i) hex += fmt::format("{:02X}", value[i]);
+        REXKRNL_INFO("SEARCH_DIAG property id={:08X} bytes={}", property_id, hex);
+        rex::system::xam::SetDirectoryListingProperty(property_id,
+                                                      std::span<const uint8_t>(value, value_size));
+      }
       return X_E_SUCCESS;
     }
     case 0x000B0008: {
@@ -379,6 +451,14 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
         REXKRNL_INFO("XGISessionCreateImpl: client session id={:02X}{:02X} host={:08X}:{}",
                      info.id[0], info.id[1], info.host_address.ipv4, info.host_address.port);
         session = manager.registry().Find(info.id);
+        if (!session && manager.IsSearchListing(info.id)) {
+          // A team picked from online search: get admitted the way an invite
+          // code would, then join the exact session the host reports.
+          REXKRNL_INFO("SEARCH_DIAG JOIN_FROM_SEARCH_BEGIN");
+          if (manager.JoinSearchListing(info.id))
+            session = manager.registry().Find(info.id);
+          REXKRNL_INFO("SEARCH_DIAG JOIN_FROM_SEARCH_RESULT found={}", session != nullptr);
+        }
         if (!session) {
           REXKRNL_WARN("INVITE_DIAG JOIN_BY_INFO_REGISTRY_NOT_FOUND");
           REXKRNL_ERROR("XGISessionCreateImpl: join-by-info session was not found");
@@ -685,15 +765,17 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
           proc_index, user_index, num_results, num_props, num_ctx, results_buffer_size,
           search_results_ptr, num_users);
       if (num_props && props_ptr) {
-        auto* property = memory_->TranslateVirtual(props_ptr);
-        REXKRNL_INFO(
-            "XSessionSearchEx property[0] raw={:08X} {:08X} {:08X} {:08X} {:08X} {:08X}",
-            memory::load_and_swap<uint32_t>(property + 0),
-            memory::load_and_swap<uint32_t>(property + 4),
-            memory::load_and_swap<uint32_t>(property + 8),
-            memory::load_and_swap<uint32_t>(property + 12),
-            memory::load_and_swap<uint32_t>(property + 16),
-            memory::load_and_swap<uint32_t>(property + 20));
+        for (uint16_t i = 0; i < num_props; ++i) {
+          auto* property = memory_->TranslateVirtual(props_ptr + i * uint32_t(kGuestUserPropertySize));
+          REXKRNL_INFO(
+              "XSessionSearchEx property[{}] raw={:08X} {:08X} {:08X} {:08X} {:08X} {:08X}", i,
+              memory::load_and_swap<uint32_t>(property + 0),
+              memory::load_and_swap<uint32_t>(property + 4),
+              memory::load_and_swap<uint32_t>(property + 8),
+              memory::load_and_swap<uint32_t>(property + 12),
+              memory::load_and_swap<uint32_t>(property + 16),
+              memory::load_and_swap<uint32_t>(property + 20));
+        }
       }
       if (num_ctx && ctx_ptr) {
         auto* contexts = memory_->TranslateVirtual(ctx_ptr);

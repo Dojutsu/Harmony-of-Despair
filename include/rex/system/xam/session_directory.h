@@ -13,6 +13,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <rex/cvar.h>
@@ -66,6 +67,40 @@ struct DirectorySession {
   std::string build_id;
   std::vector<DirectoryCandidate> connectivity_candidates;
 };
+
+// A lobby the host chose to make findable through in-game team search. The
+// Xbox session fields are the same ones a searcher would receive from the
+// host's discovery reply; joining still goes through the invite-code
+// admission, so a listing alone grants nothing.
+struct DirectoryListing {
+  std::string session_id;
+  std::string invite_code;
+  std::string server_name;
+  std::array<uint8_t, 8> xbox_session_id{};
+  std::array<uint8_t, 16> key{};
+  uint32_t host_ipv4 = 0;  // Network byte order.
+  uint16_t host_port = 0;
+  std::array<uint8_t, 6> ethernet_address{};
+  std::array<uint8_t, 20> online_address{};
+  uint64_t host_xuid = 0;
+  uint32_t open_public_slots = 0;
+  uint32_t open_private_slots = 0;
+  uint32_t filled_public_slots = 0;
+  uint32_t filled_private_slots = 0;
+  std::vector<std::pair<uint32_t, uint32_t>> contexts;
+  std::vector<std::pair<uint32_t, std::vector<uint8_t>>> properties;
+};
+
+// Host-side title search attributes (XUserSetContext/XUserSetProperty for
+// local user 0), published with the hosted lobby's listing.
+void SetDirectoryListingContext(uint32_t context_id, uint32_t value);
+void SetDirectoryListingProperty(uint32_t property_id, std::span<const uint8_t> value);
+void ClearDirectoryListingAttributes();
+// Searchable lobbies from a GET /sessions body, excluding the caller's own.
+std::vector<DirectoryListing> ParseDirectoryListingResponse(std::string_view body,
+                                                            uint32_t title_id,
+                                                            std::string_view build_id,
+                                                            uint64_t exclude_host_xuid);
 
 struct DirectoryTraversalAttempt {
   std::string session_id;
@@ -440,6 +475,8 @@ class SessionDirectoryClient {
                     std::shared_ptr<HostAdmissionGrantStore> admission_grants = {});
   void StopHosting();
   std::vector<DirectorySession> List(uint32_t title_id) const;
+  std::vector<DirectoryListing> ListSearchable(uint32_t title_id,
+                                               uint64_t exclude_host_xuid) const;
   void RequestList(uint32_t title_id) const;
   std::optional<std::vector<DirectorySession>> CachedList(uint32_t title_id) const;
   std::optional<DirectorySession> ResolveInviteCode(std::string_view code, uint32_t title_id) const;

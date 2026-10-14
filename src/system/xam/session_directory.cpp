@@ -9,12 +9,14 @@
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <iomanip>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -1200,6 +1202,187 @@ std::optional<HttpResult> Request(std::string_view, std::wstring_view, std::stri
 }
 #endif
 
+constexpr size_t kMaxListingAttributes = 32;
+constexpr size_t kMaxListingPropertyBytes = 64;
+
+std::mutex& ListingAttributeMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+std::map<uint32_t, uint32_t>& ListingContexts() {
+  static std::map<uint32_t, uint32_t> value;
+  return value;
+}
+std::map<uint32_t, std::vector<uint8_t>>& ListingProperties() {
+  static std::map<uint32_t, std::vector<uint8_t>> value;
+  return value;
+}
+
+std::string ListingHex(std::span<const uint8_t> bytes) {
+  static constexpr char kDigits[] = "0123456789abcdef";
+  std::string result;
+  result.reserve(bytes.size() * 2);
+  for (uint8_t byte : bytes) {
+    result.push_back(kDigits[byte >> 4]);
+    result.push_back(kDigits[byte & 15]);
+  }
+  return result;
+}
+
+std::optional<std::vector<uint8_t>> ListingUnhex(const nlohmann::json& value, size_t min_bytes,
+                                                 size_t max_bytes) {
+  if (!value.is_string())
+    return std::nullopt;
+  const auto& text = value.get_ref<const std::string&>();
+  if (text.size() % 2 || text.size() < min_bytes * 2 || text.size() > max_bytes * 2)
+    return std::nullopt;
+  auto nibble = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  };
+  std::vector<uint8_t> result(text.size() / 2);
+  for (size_t i = 0; i < result.size(); ++i) {
+    int high = nibble(text[2 * i]), low = nibble(text[2 * i + 1]);
+    if (high < 0 || low < 0)
+      return std::nullopt;
+    result[i] = uint8_t(high << 4 | low);
+  }
+  return result;
+}
+
+template <size_t N>
+bool ListingArray(const nlohmann::json& object, const char* name, std::array<uint8_t, N>& out) {
+  auto found = object.find(name);
+  if (found == object.end())
+    return false;
+  auto bytes = ListingUnhex(*found, N, N);
+  if (!bytes)
+    return false;
+  std::copy(bytes->begin(), bytes->end(), out.begin());
+  return true;
+}
+
+bool ListingCount(const nlohmann::json& object, const char* name, uint32_t& out) {
+  auto found = object.find(name);
+  if (found == object.end() || !found->is_number_unsigned() || found->get<uint64_t>() > 64)
+    return false;
+  out = uint32_t(found->get<uint64_t>());
+  return true;
+}
+
+nlohmann::json ListingPayload(const SessionRecord& session) {
+  // Caller holds session.mutex.
+  nlohmann::json contexts = nlohmann::json::array();
+  nlohmann::json properties = nlohmann::json::array();
+  {
+    std::lock_guard lock(ListingAttributeMutex());
+    for (const auto& [id, value] : ListingContexts())
+      contexts.push_back({id, value});
+    for (const auto& [id, value] : ListingProperties())
+      properties.push_back({id, ListingHex(value)});
+  }
+  std::array<uint8_t, 4> ipv4{};
+  std::memcpy(ipv4.data(), &session.info.host_address.ipv4, ipv4.size());
+  const uint32_t open_public = session.OpenPublicSlots();
+  return {
+      {"searchable", session.state == SessionState::kLobby && open_public > 0},
+      {"xbox_session", ListingHex(session.info.id)},
+      {"key", ListingHex(session.info.key)},
+      {"host_ipv4", ListingHex(ipv4)},
+      {"host_port", session.info.host_address.port},
+      {"ethernet", ListingHex(session.info.ethernet_address)},
+      {"online", ListingHex(session.info.online_address)},
+      {"host_xuid", fmt::format("{:016X}", session.host_xuid)},
+      {"open_public", open_public},
+      {"open_private", session.OpenPrivateSlots()},
+      {"filled_public", session.FilledPublicSlots()},
+      {"filled_private", session.FilledPrivateSlots()},
+      {"contexts", std::move(contexts)},
+      {"properties", std::move(properties)},
+  };
+}
+
+std::optional<DirectoryListing> ParseDirectoryListing(const nlohmann::json& item,
+                                                      uint32_t title_id,
+                                                      std::string_view build_id) {
+  try {
+    auto session = ParseDirectorySession(item, title_id, build_id);
+    if (!session)
+      return std::nullopt;
+    auto code = item.find("invite_code");
+    auto listing = item.find("listing");
+    if (code == item.end() || !code->is_string() || listing == item.end() ||
+        !listing->is_object())
+      return std::nullopt;
+    auto normalized = NormalizeInviteCode(code->get_ref<const std::string&>());
+    auto searchable = listing->find("searchable");
+    if (!normalized || searchable == listing->end() || !searchable->is_boolean() ||
+        !searchable->get<bool>())
+      return std::nullopt;
+    DirectoryListing result;
+    result.session_id = session->session_id;
+    result.invite_code = *normalized;
+    result.server_name = session->server_name;
+    std::array<uint8_t, 4> ipv4{};
+    std::array<uint8_t, 8> xuid{};
+    if (!ListingArray(*listing, "xbox_session", result.xbox_session_id) ||
+        !ListingArray(*listing, "key", result.key) || !ListingArray(*listing, "host_ipv4", ipv4) ||
+        !ListingArray(*listing, "ethernet", result.ethernet_address) ||
+        !ListingArray(*listing, "online", result.online_address))
+      return std::nullopt;
+    std::memcpy(&result.host_ipv4, ipv4.data(), ipv4.size());
+    auto port = listing->find("host_port");
+    if (port == listing->end() || !port->is_number_unsigned() || port->get<uint64_t>() > 65535)
+      return std::nullopt;
+    result.host_port = uint16_t(port->get<uint64_t>());
+    auto host_xuid = listing->find("host_xuid");
+    if (host_xuid == listing->end() || !host_xuid->is_string() ||
+        host_xuid->get_ref<const std::string&>().size() != 16)
+      return std::nullopt;
+    auto xuid_bytes = ListingUnhex(*host_xuid, 8, 8);
+    if (!xuid_bytes)
+      return std::nullopt;
+    for (uint8_t byte : *xuid_bytes)
+      result.host_xuid = result.host_xuid << 8 | byte;
+    if (!result.host_xuid ||
+        !ListingCount(*listing, "open_public", result.open_public_slots) ||
+        !ListingCount(*listing, "open_private", result.open_private_slots) ||
+        !ListingCount(*listing, "filled_public", result.filled_public_slots) ||
+        !ListingCount(*listing, "filled_private", result.filled_private_slots) ||
+        !result.open_public_slots)
+      return std::nullopt;
+    if (auto contexts = listing->find("contexts");
+        contexts != listing->end() && contexts->is_array()) {
+      for (const auto& entry : *contexts) {
+        if (result.contexts.size() >= kMaxListingAttributes || !entry.is_array() ||
+            entry.size() != 2 || !entry[0].is_number_unsigned() || !entry[1].is_number_unsigned() ||
+            entry[0].get<uint64_t>() > UINT32_MAX || entry[1].get<uint64_t>() > UINT32_MAX)
+          continue;
+        result.contexts.emplace_back(uint32_t(entry[0].get<uint64_t>()),
+                                     uint32_t(entry[1].get<uint64_t>()));
+      }
+    }
+    if (auto properties = listing->find("properties");
+        properties != listing->end() && properties->is_array()) {
+      for (const auto& entry : *properties) {
+        if (result.properties.size() >= kMaxListingAttributes || !entry.is_array() ||
+            entry.size() != 2 || !entry[0].is_number_unsigned() ||
+            entry[0].get<uint64_t>() > UINT32_MAX)
+          continue;
+        auto bytes = ListingUnhex(entry[1], 0, kMaxListingPropertyBytes);
+        if (!bytes)
+          continue;
+        result.properties.emplace_back(uint32_t(entry[0].get<uint64_t>()), std::move(*bytes));
+      }
+    }
+    return result;
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
 nlohmann::json RegistrationPayload(const SessionRecord& session, uint32_t title_id,
                                    uint16_t discovery_port) {
   std::lock_guard lock(*session.mutex);
@@ -1219,9 +1402,54 @@ nlohmann::json RegistrationPayload(const SessionRecord& session, uint32_t title_
                                {"address", REXCVAR_GET(session_directory_publish_address)},
                                {"discovery_port", discovery_port},
                                {"gameplay_port", gameplay_port}}})},
+      {"listing", ListingPayload(session)},
   };
 }
 }  // namespace
+
+void SetDirectoryListingContext(uint32_t context_id, uint32_t value) {
+  std::lock_guard lock(ListingAttributeMutex());
+  auto& contexts = ListingContexts();
+  if (contexts.size() < kMaxListingAttributes || contexts.contains(context_id))
+    contexts[context_id] = value;
+}
+
+void SetDirectoryListingProperty(uint32_t property_id, std::span<const uint8_t> value) {
+  if (value.size() > kMaxListingPropertyBytes)
+    return;
+  std::lock_guard lock(ListingAttributeMutex());
+  auto& properties = ListingProperties();
+  if (properties.size() < kMaxListingAttributes || properties.contains(property_id))
+    properties[property_id].assign(value.begin(), value.end());
+}
+
+void ClearDirectoryListingAttributes() {
+  std::lock_guard lock(ListingAttributeMutex());
+  ListingContexts().clear();
+  ListingProperties().clear();
+}
+
+std::vector<DirectoryListing> ParseDirectoryListingResponse(std::string_view body,
+                                                            uint32_t title_id,
+                                                            std::string_view build_id,
+                                                            uint64_t exclude_host_xuid) {
+  std::vector<DirectoryListing> result;
+  auto document = nlohmann::json::parse(body, nullptr, false);
+  if (document.is_discarded() || !document.is_object() || !document.contains("sessions") ||
+      !document["sessions"].is_array())
+    return result;
+  for (const auto& item : document["sessions"]) {
+    auto listing = ParseDirectoryListing(item, title_id, build_id);
+    if (!listing || (exclude_host_xuid && listing->host_xuid == exclude_host_xuid))
+      continue;
+    if (std::any_of(result.begin(), result.end(), [&](const auto& existing) {
+          return existing.xbox_session_id == listing->xbox_session_id;
+        }))
+      continue;
+    result.push_back(std::move(*listing));
+  }
+  return result;
+}
 
 std::optional<std::string> NormalizeDirectoryInviteCode(std::string_view value) {
   return NormalizeInviteCode(value);
@@ -1688,6 +1916,26 @@ class SessionDirectoryClient::Impl {
         result.push_back(std::move(*session));
     }
     REXSYS_INFO("Session directory: query returned {} compatible session(s)", result.size());
+    return result;
+  }
+
+  std::vector<DirectoryListing> ListSearchable(uint32_t value_title_id,
+                                               uint64_t exclude_host_xuid) const {
+    const auto& url = REXCVAR_GET(session_directory_url);
+    const auto& build_id = REXCVAR_GET(session_directory_build_id);
+    if (url.empty() || build_id.empty())
+      return {};
+    std::string path = "/sessions?title_id=" + TitleIdString(value_title_id) +
+                       "&protocol_version=1&build_id=" + build_id + "&searchable=1";
+    auto response = Request(url, L"GET", path, "");
+    if (!response || response->status != 200) {
+      REXSYS_WARN("SEARCH_DIAG directory list unavailable status={}",
+                  response ? response->status : 0);
+      return {};
+    }
+    auto result =
+        ParseDirectoryListingResponse(response->body, value_title_id, build_id, exclude_host_xuid);
+    REXSYS_INFO("SEARCH_DIAG directory returned {} open team(s)", result.size());
     return result;
   }
 
@@ -2868,6 +3116,10 @@ void SessionDirectoryClient::StopHosting() {
 }
 std::vector<DirectorySession> SessionDirectoryClient::List(uint32_t title_id) const {
   return impl_->List(title_id);
+}
+std::vector<DirectoryListing> SessionDirectoryClient::ListSearchable(
+    uint32_t title_id, uint64_t exclude_host_xuid) const {
+  return impl_->ListSearchable(title_id, exclude_host_xuid);
 }
 void SessionDirectoryClient::RequestList(uint32_t title_id) const {
   impl_->RequestList(title_id);

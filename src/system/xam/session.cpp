@@ -2134,6 +2134,12 @@ LanDiscoveryService::DiscoverConfiguredInvite(
   cleanup();
   return std::nullopt;
 }
+std::vector<DirectoryListing> LanDiscoveryService::SearchListings(uint64_t exclude_host_xuid) {
+  if (impl_->private_configured || impl_->legacy_diagnostics ||
+      REXCVAR_GET(session_directory_url).empty())
+    return {};
+  return directory_.ListSearchable(impl_->title_id, exclude_host_xuid);
+}
 std::vector<SessionRecord> LanDiscoveryService::Search(uint32_t timeout_ms, uint32_t max_results,
                                                        uint32_t local_user_index) {
   (void)local_user_index;
@@ -2855,6 +2861,9 @@ struct SessionManager::ConfiguredInviteOperation {
   // One successful notification belongs to this operation token/title generation.
   // Lease renewal or client-session teardown must not notify the title again.
   bool handoff_notified = false;
+  // Started by in-game team search: the title joins by the session it picked
+  // from the search results, so no accepted-invite notification is sent.
+  bool search_join = false;
 };
 
 SessionManager::SessionManager(KernelState* state, uint16_t discovery_port,
@@ -3053,7 +3062,8 @@ void SessionManager::TryPublishAcceptedInvite(
     defer("IDENTITY_OR_TITLE_CHANGED");
     return;
   }
-  const auto listeners = accepting_listener_count_(kXnLiveInviteAccepted);
+  const auto listeners =
+      operation->search_join ? size_t(1) : accepting_listener_count_(kXnLiveInviteAccepted);
   if (!listeners) {
     defer("NO_ACCEPTING_LISTENER");
     return;
@@ -3125,6 +3135,15 @@ void SessionManager::TryPublishAcceptedInvite(
   REXSYS_INFO("INVITE_DIAG op={} gen={} SESSION_REGISTRY_INSTALL_SUCCESS SESSION_REGISTRY_LOOKUP_SUCCESS",
               operation->identity.operation_token,
               operation->identity.title_generation);
+  if (operation->search_join) {
+    // The title is already waiting in its own join call for this session.
+    REXSYS_INFO("SEARCH_DIAG op={} gen={} SEARCH_JOIN_READY",
+                operation->identity.operation_token,
+                operation->identity.title_generation);
+    operation->handoff_notified = true;
+    configured_invite_state_ = ConfiguredInviteLifecycleState::kPublished;
+    return;
+  }
   const auto identity = AcceptedIdentity(ready);
   if (!accepted_invites_.Publish(identity, *record)) {
     auto existing = accepted_invites_.Snapshot(identity.local_user_index);
@@ -3387,6 +3406,8 @@ bool SessionManager::StartConfiguredInviteOperation(uint32_t title_id) {
     identity.local_xuid = *local_xuid;
     identity.invite_code = *normalized;
     operation = std::make_shared<ConfiguredInviteOperation>(std::move(identity));
+    operation->search_join = search_join_next_;
+    search_join_next_ = false;
     configured_invite_operation_ = operation;
     configured_invite_claim_token_ = operation->identity.operation_token;
     configured_invite_state_ = ConfiguredInviteLifecycleState::kClaimed;
@@ -3791,6 +3812,8 @@ void SessionManager::OnTitleTransition(uint32_t title_id) {
 }
 
 void SessionManager::OnTitleTermination() {
+  ClearDirectoryListingAttributes();
+  RememberSearchListings({});
   std::lock_guard control_lock(configured_invite_control_mutex_);
   CancelConfiguredInviteOperation();
   accepted_invites_.Clear();
@@ -3834,5 +3857,72 @@ std::optional<ReadyConfiguredInvite>
 SessionManager::ready_configured_invite() const {
   std::lock_guard lock(configured_invite_mutex_);
   return ready_configured_invite_;
+}
+void SessionManager::RememberSearchListings(std::vector<DirectoryListing> listings) {
+  std::lock_guard lock(search_listings_mutex_);
+  search_listings_ = std::move(listings);
+}
+
+bool SessionManager::IsSearchListing(const std::array<uint8_t, 8>& xbox_session_id) const {
+  std::lock_guard lock(search_listings_mutex_);
+  return std::any_of(search_listings_.begin(), search_listings_.end(), [&](const auto& listing) {
+    return listing.xbox_session_id == xbox_session_id;
+  });
+}
+
+bool SessionManager::JoinSearchListing(const std::array<uint8_t, 8>& xbox_session_id,
+                                       std::chrono::milliseconds timeout) {
+  std::string code;
+  {
+    std::lock_guard lock(search_listings_mutex_);
+    auto found = std::find_if(search_listings_.begin(), search_listings_.end(),
+                              [&](const auto& listing) {
+                                return listing.xbox_session_id == xbox_session_id;
+                              });
+    if (found == search_listings_.end())
+      return false;
+    code = found->invite_code;
+  }
+  {
+    std::lock_guard lock(configured_invite_mutex_);
+    search_join_next_ = true;
+  }
+  const auto started = UpdateRuntimeInviteCode(code);
+  {
+    std::lock_guard lock(configured_invite_mutex_);
+    search_join_next_ = false;
+  }
+  if (started != RuntimeInviteUpdateResult::kStarted) {
+    REXSYS_WARN("SEARCH_DIAG SEARCH_JOIN_NOT_STARTED result={}", static_cast<int>(started));
+    return false;
+  }
+  REXSYS_INFO("SEARCH_DIAG SEARCH_JOIN_STARTED");
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    const auto state = configured_invite_state();
+    if (state == ConfiguredInviteLifecycleState::kPublished) {
+      if (registry_.Find(xbox_session_id)) {
+        REXSYS_INFO("SEARCH_DIAG SEARCH_JOIN_ADMITTED");
+        return true;
+      }
+      // The host has since replaced that lobby; the listing was stale.
+      if (auto ready = ready_configured_invite();
+          ready && ready->xbox_session_id != xbox_session_id)
+        break;
+    }
+    if (state == ConfiguredInviteLifecycleState::kFailed ||
+        state == ConfiguredInviteLifecycleState::kExpired ||
+        state == ConfiguredInviteLifecycleState::kCancelled ||
+        state == ConfiguredInviteLifecycleState::kCompleted ||
+        async_shutdown_.load(std::memory_order_acquire))
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  REXSYS_WARN("SEARCH_DIAG SEARCH_JOIN_FAILED state={}",
+              static_cast<uint32_t>(configured_invite_state()));
+  // Leave nothing behind that a later search, invite code or hosted lobby
+  // would trip over.
+  UpdateRuntimeInviteCode("");
+  return false;
 }
 }  // namespace rex::system::xam

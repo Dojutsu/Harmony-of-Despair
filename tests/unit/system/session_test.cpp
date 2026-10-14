@@ -228,6 +228,10 @@ TEST_CASE("Linux directory hosting retries hostile registration and heartbeat re
   REQUIRE(registration_bodies.size() == 2);
   CHECK(registration_bodies[0] == registration_bodies[1]);
   CHECK(registration_bodies[0].find("\"host_instance_token\":\"") != std::string::npos);
+  // An open lobby is published as findable by in-game team search.
+  CHECK(registration_bodies[0].find("\"listing\":{") != std::string::npos);
+  CHECK(registration_bodies[0].find("\"searchable\":true") != std::string::npos);
+  CHECK(registration_bodies[0].find("\"host_xuid\":\"0000000000001001\"") != std::string::npos);
   {
     std::lock_guard lock(*hosted->mutex);
     CHECK(hosted->status_invite_code.empty());
