@@ -29,7 +29,6 @@
 
 #include <fcntl.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -53,11 +52,13 @@ inline bool ReadSelf(void* destination, const void* source, size_t length) noexc
   auto* from = static_cast<const uint8_t*>(source);
   while (length) {
     const size_t chunk = std::min(length, kSelfCopyChunk);
-    mach_vm_size_t copied = 0;
-    const kern_return_t result = mach_vm_read_overwrite(
-        mach_task_self(), static_cast<mach_vm_address_t>(reinterpret_cast<uintptr_t>(from)),
-        static_cast<mach_vm_size_t>(chunk),
-        static_cast<mach_vm_address_t>(reinterpret_cast<uintptr_t>(to)), &copied);
+    // vm_* rather than mach_vm_*: the iOS SDK rejects mach_vm.h, and on
+    // 64-bit Darwin the vm_* address and size types are 64-bit as well.
+    vm_size_t copied = 0;
+    const kern_return_t result = vm_read_overwrite(
+        mach_task_self(), static_cast<vm_address_t>(reinterpret_cast<uintptr_t>(from)),
+        static_cast<vm_size_t>(chunk), static_cast<vm_address_t>(reinterpret_cast<uintptr_t>(to)),
+        &copied);
     if (result != KERN_SUCCESS || copied != chunk) return false;
     to += chunk;
     from += chunk;
@@ -74,8 +75,8 @@ inline bool WriteSelf(void* destination, const void* source, size_t length) noex
   auto* from = static_cast<const uint8_t*>(source);
   while (length) {
     const size_t chunk = std::min(length, kSelfCopyChunk);
-    const kern_return_t result = mach_vm_write(
-        mach_task_self(), static_cast<mach_vm_address_t>(reinterpret_cast<uintptr_t>(to)),
+    const kern_return_t result = vm_write(
+        mach_task_self(), static_cast<vm_address_t>(reinterpret_cast<uintptr_t>(to)),
         static_cast<vm_offset_t>(reinterpret_cast<uintptr_t>(from)),
         static_cast<mach_msg_type_number_t>(chunk));
     if (result != KERN_SUCCESS) return false;

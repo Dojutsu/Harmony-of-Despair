@@ -219,9 +219,18 @@ if(REXGLUE_USE_VULKAN)
             set_target_properties(vulkan PROPERTIES EXCLUDE_FROM_ALL FALSE)
         endif()
 
+        if(IOS)
+            # MoltenVK's CMake build asks for AppKit unconditionally; UIKit
+            # is its iOS counterpart.
+            find_library(APPKIT_LIBRARY UIKit REQUIRED)
+        endif()
         set(MVK_BUILD_SHADER_CONVERTER_TOOL OFF CACHE BOOL "" FORCE)
         set(MVK_EXCLUDE_SPIRV_TOOLS ON CACHE BOOL "" FORCE)
         add_subdirectory(moltenvk)
+        if(IOS)
+            # On macOS AppKit brings CoreGraphics in; UIKit does not.
+            target_link_libraries(MoltenVK PRIVATE "-framework CoreGraphics")
+        endif()
     endif()
 endif()
 

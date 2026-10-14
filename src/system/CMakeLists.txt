@@ -147,7 +147,8 @@ elseif(APPLE)
     if(IOS)
         # iOS has no libcurl; the session directory uses NSURLSession instead.
         target_sources(rexruntime PRIVATE xam/http_apple.mm)
-        set_source_files_properties(xam/http_apple.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        set_source_files_properties(xam/http_apple.mm PROPERTIES
+            COMPILE_OPTIONS "-fobjc-arc" SKIP_PRECOMPILE_HEADERS ON)
         target_link_libraries(rexruntime PRIVATE "-framework Foundation")
     else()
         find_package(CURL REQUIRED)
