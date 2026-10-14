@@ -1,5 +1,8 @@
 #include "dlc_manifest.h"
+#include <filesystem>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
