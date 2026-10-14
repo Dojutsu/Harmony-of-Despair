@@ -1,8 +1,9 @@
 // NSURLSession transport for the session directory on iOS, which has no
 // libcurl. Mirrors the curl options in session_directory.cpp (no redirects, no
 // proxy for loopback HTTP, bounded response size), but with cellular-sized
-// timeouts and one reused session per scheme: a fresh DNS + TCP + TLS setup on
-// a phone's cellular link regularly takes longer than the desktop's 1 s budget.
+// timeouts and reused sessions: a fresh DNS + TCP + TLS setup on a phone's
+// cellular link regularly takes longer than the desktop's 1 s budget. The lobby
+// list (the one request a player waits on to see games) gets the longest limit.
 
 #import <Foundation/Foundation.h>
 
@@ -36,23 +37,32 @@ bool AppleHttpRequest(const std::string& url, const std::string& method, std::st
 
     // Loopback HTTP is a local-only testing exception; never route it through a proxy.
     const bool plain_http = [ns_url.scheme isEqualToString:@"http"];
-    static NSURLSession* sessions[2] = {};
+    // The searchable lobby listing is what Quick/Custom Search waits on.
+    const bool lobby_list = method == "GET" && url.find("searchable=1") != std::string::npos;
+    // [scheme][limit]: index bit 0 = plain HTTP, bit 1 = lobby list.
+    static NSURLSession* sessions[4] = {};
     static dispatch_once_t once;
     dispatch_once(&once, ^{
       RexNoRedirectDelegate* delegate = [RexNoRedirectDelegate new];
-      for (int i = 0; i < 2; ++i) {
+      for (int i = 0; i < 4; ++i) {
         NSURLSessionConfiguration* config =
             [NSURLSessionConfiguration ephemeralSessionConfiguration];
-        config.timeoutIntervalForRequest = 3.0;  // idle; NSURLSession has no connect timeout
-        config.timeoutIntervalForResource = 4.0;  // total, as the PC and Android clients
+        if (i & 2) {
+          // A cold cellular connection can take several seconds to answer.
+          config.timeoutIntervalForRequest = 8.0;
+          config.timeoutIntervalForResource = 8.0;
+        } else {
+          config.timeoutIntervalForRequest = 3.0;  // idle; NSURLSession has no connect timeout
+          config.timeoutIntervalForResource = 4.0;  // total, as the PC and Android clients
+        }
         config.HTTPAdditionalHeaders = @{@"User-Agent" : @"HarmonyRecomp/1"};
-        if (i == 1) config.connectionProxyDictionary = @{};
+        if (i & 1) config.connectionProxyDictionary = @{};
         sessions[i] = [NSURLSession sessionWithConfiguration:config
                                                     delegate:delegate
                                                delegateQueue:nil];
       }
     });
-    NSURLSession* session = sessions[plain_http ? 1 : 0];
+    NSURLSession* session = sessions[(plain_http ? 1 : 0) | (lobby_list ? 2 : 0)];
 
     NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:ns_url];
     request.HTTPMethod = [NSString stringWithUTF8String:method.c_str()];
