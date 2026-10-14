@@ -28,6 +28,9 @@ sed -e "s|\$(PRODUCT_BUNDLE_IDENTIFIER)|${BUNDLE_ID:-net.dojutsu.harmony.ios}|" 
     -e "s|\$(CURRENT_PROJECT_VERSION)|${version}|" \
     -e "s|\$(IPHONEOS_DEPLOYMENT_TARGET)|${IOS_DEPLOYMENT_TARGET:-17.0}|" \
     "$(dirname "$0")/Info.plist" > "$app/Info.plist"
+# Xcode fills UIDeviceFamily from TARGETED_DEVICE_FAMILY; add it here instead.
+/usr/libexec/PlistBuddy -c 'Add :UIDeviceFamily array' -c 'Add :UIDeviceFamily:0 integer 1' \
+  -c 'Add :UIDeviceFamily:1 integer 2' "$app/Info.plist"
 plutil -lint "$app/Info.plist" >/dev/null
 
 if [ -n "$icon_png" ] && [ -f "$icon_png" ]; then
