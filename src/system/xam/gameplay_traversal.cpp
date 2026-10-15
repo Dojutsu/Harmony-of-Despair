@@ -2,6 +2,7 @@
 #include <rex/system/xam/private_lan_invitation.h>
 
 #include <algorithm>
+#include <map>
 #include <mutex>
 #include <set>
 #include <unordered_map>
@@ -111,6 +112,62 @@ bool MemberCurrent(const Scope& scope) {
 bool Current(const Scope& scope) {
   return MemberCurrent(scope) && !scope.authorization.member_nonce.empty() &&
          Clock::now() < scope.authorization.expires_at;
+}
+
+// GAMEPLAY_ROUTE_DIAG only: names the first condition that keeps a scope from
+// being Current(), mirroring MemberCurrent()/Current(). Ids are shortened to
+// prefixes; credentials and nonces are never logged.
+std::string ShortId(std::string_view id) { return std::string(id.substr(0, 8)); }
+uint64_t SessionIdValue(const std::array<uint8_t, 8>& id) {
+  uint64_t value = 0;
+  for (const auto byte : id) value = (value << 8) | byte;
+  return value;
+}
+std::string NotCurrentReason(const Scope& scope) {
+  const auto session = scope.session.lock();
+  if (!session) return "no_session";
+  if (scope.closed) return "closed";
+  std::lock_guard lock(*session->mutex);
+  if (session->state == SessionState::kDeleted) return "deleted";
+  if (session->private_lan_invitation && !session->private_lan_invitation->Current())
+    return "private_invitation_not_current";
+  const auto member = std::find_if(session->members.begin(), session->members.end(),
+      [&](const auto& value) { return value.xuid == scope.xuid && value.local; });
+  if (member == session->members.end())
+    return fmt::format("no_local_member members={}", session->members.size());
+  if (scope.authorization.member_nonce.empty()) return "empty_member_nonce";
+  if (scope.authorization.xbox_session != session->info.id)
+    return fmt::format("xbox_session_mismatch auth={:016X} session={:016X}",
+                       SessionIdValue(scope.authorization.xbox_session),
+                       SessionIdValue(session->info.id));
+  if (scope.authorization.host_xuid != session->host_xuid)
+    return fmt::format("host_xuid_mismatch auth={:016X} session={:016X}",
+                       scope.authorization.host_xuid, session->host_xuid);
+  if (scope.xuid != session->host_xuid) {
+    const auto& binding = member->gameplay_admission;
+    if (!binding) return "missing_gameplay_admission";
+    if (binding->directory_session_id != scope.authorization.directory_session)
+      return fmt::format("directory_session_mismatch auth={} member={}",
+                         ShortId(scope.authorization.directory_session),
+                         ShortId(binding->directory_session_id));
+    if (binding->attempt_id != scope.authorization.admission_attempt)
+      return fmt::format("attempt_mismatch auth={} member={}",
+                         ShortId(scope.authorization.admission_attempt),
+                         ShortId(binding->attempt_id));
+    if (binding->admission_generation != scope.authorization.admission_generation)
+      return fmt::format("generation_mismatch auth={} member={}",
+                         ShortId(scope.authorization.admission_generation),
+                         ShortId(binding->admission_generation));
+  }
+  if (Clock::now() >= scope.authorization.expires_at) return "expired";
+  return "current";
+}
+bool RouteDiagDue(std::unordered_map<uint64_t, Clock::time_point>& last, uint64_t key) {
+  const auto now = Clock::now();
+  auto& at = last[key];
+  if (at != Clock::time_point{} && now - at < std::chrono::seconds(1)) return false;
+  at = now;
+  return true;
 }
 
 bool PeerCurrent(const Scope& scope, const GameplayPeerAuthorization& peer) {
@@ -545,6 +602,30 @@ bool IsAuthorizedGameplaySocket(uint64_t socket) {
   });
 }
 
+bool GameplaySocketScopeCurrent(uint64_t socket) {
+  std::lock_guard lock(gameplay_mutex);
+  Reap();
+  return std::any_of(scopes.begin(), scopes.end(),
+                     [&](const auto& s) { return s.socket == socket && Current(s); });
+}
+
+namespace {
+// Advertised host endpoints recorded at the public-route rewrite, keyed by the
+// exact Xbox session and host. Guarded by gameplay_mutex; bounded.
+std::map<std::pair<std::array<uint8_t, 8>, uint64_t>, LanAddress> advertised_hosts;
+constexpr size_t kMaximumAdvertisedHosts = 64;
+}  // namespace
+
+void RecordAdvertisedHostAddress(const std::array<uint8_t, 8>& xbox_session, uint64_t host_xuid,
+                                 LanAddress advertised) {
+  if (!host_xuid || !advertised.ipv4) return;
+  std::lock_guard lock(gameplay_mutex);
+  if (advertised_hosts.size() >= kMaximumAdvertisedHosts &&
+      !advertised_hosts.contains({xbox_session, host_xuid}))
+    advertised_hosts.clear();
+  advertised_hosts.insert_or_assign({xbox_session, host_xuid}, advertised);
+}
+
 std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress requested) {
   std::lock_guard lock(gameplay_mutex);
   Reap();
@@ -553,12 +634,30 @@ std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress
     auto session = scope.session.lock();
     if (!session) return std::nullopt;
     LanAddress original_host;
-    { std::lock_guard session_lock(*session->mutex); original_host = session->info.host_address; }
+    std::optional<LanAddress> advertised_host;
+    {
+      std::lock_guard session_lock(*session->mutex);
+      original_host = session->info.host_address;
+      const auto found = advertised_hosts.find({session->info.id, session->host_xuid});
+      if (found != advertised_hosts.end()) advertised_host = found->second;
+    }
+    // The advertised endpoint names only this joiner's host, at its exact
+    // advertised address and either its advertised port or the guest port.
+    const bool advertised_match = advertised_host && scope.xuid != session->host_xuid &&
+        requested.ipv4 == advertised_host->ipv4 &&
+        (requested.port == advertised_host->port || requested.port == scope.guest_port);
     if (!Current(scope)) {
+      static std::unordered_map<uint64_t, Clock::time_point> last_logged;  // gameplay_mutex
+      if (RouteDiagDue(last_logged, socket))
+        REXSYS_INFO("GAMEPLAY_ROUTE_DIAG scope_not_current socket={} xuid={:016X} reason={} "
+                    "requested={:08X}:{} host_original={:08X}:{}",
+                    socket, scope.xuid, NotCurrentReason(scope), ntohl(requested.ipv4),
+                    requested.port, ntohl(original_host.ipv4), original_host.port);
       // A pending or expired admitted client must not send its initial host
       // handshake through an unauthenticated endpoint fallback.
       if (scope.xuid != session->host_xuid && requested.ipv4 == original_host.ipv4)
         return requested;
+      if (advertised_match) return LanAddress{advertised_host->ipv4, requested.port};
       continue;
     }
     for (const auto& peer : scope.authorization.peers) {
@@ -568,14 +667,96 @@ std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress
       // Its exact host endpoint remains a valid initial destination for this
       // client only; it is never a fallback for another member or session.
       const bool initial_host = scope.xuid != scope.authorization.host_xuid &&
-          peer.xuid == scope.authorization.host_xuid && requested.ipv4 == original_host.ipv4 &&
-          (requested.port == scope.guest_port || requested.port == original_host.port);
+          peer.xuid == scope.authorization.host_xuid &&
+          ((requested.ipv4 == original_host.ipv4 &&
+            (requested.port == scope.guest_port || requested.port == original_host.port)) ||
+           (advertised_match && session->host_xuid == scope.authorization.host_xuid));
       if (exact_alias) scope.tables->guest_aliases.erase(peer.logical.ipv4);
       else if (initial_host) scope.tables->guest_aliases[peer.logical.ipv4] = requested.ipv4;
       if (exact_alias || initial_host) return LanAddress{peer.logical.ipv4, scope.guest_port};
     }
   }
   return std::nullopt;
+}
+
+std::optional<LanAddress> GameplaySelfLogicalAddress(uint64_t local_xuid) {
+  std::lock_guard lock(gameplay_mutex);
+  Reap();
+  for (const auto& scope : scopes) {
+    if (scope.xuid != local_xuid || !Current(scope) ||
+        scope.xuid == scope.authorization.host_xuid ||
+        !IsGameplayLogicalAddress(scope.authorization.logical.ipv4))
+      continue;
+    auto session = scope.session.lock();
+    if (!session) continue;
+    std::lock_guard session_lock(*session->mutex);
+    if (advertised_hosts.contains({session->info.id, session->host_xuid}))
+      return scope.authorization.logical;
+  }
+  return std::nullopt;
+}
+
+namespace {
+// Members the title has joined by XGISessionJoinRemote, and when a joiner first
+// held back a reliable message from a member it has not. Guarded by
+// gameplay_mutex; bounded.
+std::set<std::pair<std::array<uint8_t, 8>, uint64_t>> title_joined_remote;
+std::map<std::pair<std::array<uint8_t, 8>, uint64_t>, std::chrono::steady_clock::time_point>
+    title_join_waits;
+constexpr size_t kMaximumTitleJoins = 256;
+// About seven relayed round trips to a cellular host; a title that never joins
+// a member only sees its first reliable messages delayed by this much.
+constexpr auto kTitleJoinWait = std::chrono::milliseconds(1500);
+}  // namespace
+
+void RecordTitleJoinedRemote(const std::array<uint8_t, 8>& xbox_session, uint64_t xuid) {
+  std::lock_guard lock(gameplay_mutex);
+  if (title_joined_remote.size() >= kMaximumTitleJoins) title_joined_remote.clear();
+  if (title_joined_remote.insert({xbox_session, xuid}).second)
+    REXSYS_INFO("GAMEPLAY_TITLE_JOINED_REMOTE xuid={:016X} held={}", xuid,
+                title_join_waits.contains({xbox_session, xuid}));
+  title_join_waits.erase({xbox_session, xuid});
+}
+
+bool GameplayHoldUntilTitleJoined(uint64_t socket, LanAddress logical,
+                                  std::span<const uint8_t> plaintext) {
+  // Reliable title frames carry C0 and a sequence number after their two-byte
+  // length; handshakes, acknowledgements and goodbyes do not, and always pass.
+  // Sequence 0 is the link's opening exchange, which the title needs before it
+  // asks its host about the newcomer at all; only later frames are held.
+  if (plaintext.size() < 4 || plaintext[2] != 0xC0 || plaintext[3] == 0) return false;
+  std::lock_guard lock(gameplay_mutex);
+  Reap();
+  for (const auto& scope : scopes) {
+    if (scope.socket != socket || !Current(scope) || scope.xuid == scope.authorization.host_xuid)
+      continue;
+    const auto peer = std::find_if(scope.authorization.peers.begin(), scope.authorization.peers.end(),
+        [&](const auto& current) {
+          return current.logical.ipv4 == logical.ipv4 && PeerCurrent(scope, current);
+        });
+    if (peer == scope.authorization.peers.end()) continue;
+    if (peer->xuid == scope.authorization.host_xuid) return false;
+    auto session = scope.session.lock();
+    if (!session) return false;
+    std::pair<std::array<uint8_t, 8>, uint64_t> key;
+    {
+      std::lock_guard session_lock(*session->mutex);
+      // Same-house hosts confirm within milliseconds; only a public route races.
+      if (!advertised_hosts.contains({session->info.id, session->host_xuid})) return false;
+      key = {session->info.id, peer->xuid};
+    }
+    if (title_joined_remote.contains(key)) return false;
+    const auto now = std::chrono::steady_clock::now();
+    if (title_join_waits.size() >= kMaximumTitleJoins) title_join_waits.clear();
+    const auto [wait, first] = title_join_waits.try_emplace(key, now);
+    if (now - wait->second >= kTitleJoinWait) return false;
+    if (first)
+      REXSYS_INFO("GAMEPLAY_TITLE_JOIN_WAIT holding reliable messages from {:08X} xuid={:016X} "
+                  "until the title joins it",
+                  ntohl(logical.ipv4), peer->xuid);
+    return true;
+  }
+  return false;
 }
 
 std::optional<uint32_t> GameplayGuestSourceAlias(uint64_t socket, LanAddress logical) {
@@ -617,6 +798,26 @@ bool OpenGameplayDatagram(uint64_t socket, LanAddress logical,
   return false;
 }
 
+std::string_view GameplayOpenFailureReason(uint64_t socket, LanAddress logical) {
+  std::lock_guard lock(gameplay_mutex);
+  Reap();
+  bool scope_found = false, peer_found = false;
+  for (auto& scope : scopes) {
+    if (scope.socket != socket) continue;
+    if (!Current(scope)) continue;
+    scope_found = true;
+    for (const auto& peer : scope.authorization.peers) {
+      if (peer.logical.ipv4 != logical.ipv4) continue;
+      if (logical.port != scope.guest_port) return "guest_port_mismatch";
+      if (!PeerCurrent(scope, peer)) return "peer_not_current";
+      peer_found = true;
+      if (!scope.ciphers().contains(peer.traversal.attempt_id)) return "no_cipher";
+    }
+  }
+  if (!scope_found) return "no_current_scope";
+  return peer_found ? "authentication_or_replay" : "unknown_peer";
+}
+
 std::optional<GameplayXnAddr> GameplayXnAddrToLogical(
     const std::array<uint8_t, 8>& session_id, const XnAddrIdentity& identity) {
   std::lock_guard lock(gameplay_mutex);
@@ -625,7 +826,7 @@ std::optional<GameplayXnAddr> GameplayXnAddrToLogical(
     if (!Current(scope) || scope.authorization.xbox_session != session_id) continue;
     for (const auto& peer : scope.authorization.peers)
       if (PeerCurrent(scope, peer) && ReconstructXnAddrIdentity(peer.xuid) == identity)
-        return GameplayXnAddr{session_id, peer.xuid, peer.logical};
+        return GameplayXnAddr{session_id, peer.xuid, peer.logical, scope.authorization.host_xuid};
   }
   return std::nullopt;
 }
@@ -640,7 +841,8 @@ std::optional<GameplayXnAddr> GameplayLogicalToXnAddr(uint32_t ipv4) {
       if (peer.logical.ipv4 == ipv4 && PeerCurrent(scope, peer)) {
         if (result && (result->session_id != scope.authorization.xbox_session || result->xuid != peer.xuid))
           return std::nullopt;
-        result = GameplayXnAddr{scope.authorization.xbox_session, peer.xuid, peer.logical};
+        result = GameplayXnAddr{scope.authorization.xbox_session, peer.xuid, peer.logical,
+                                scope.authorization.host_xuid};
       }
   }
   return result;

@@ -5,8 +5,10 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include <rex/cvar.h>
 #include <rex/system/xam/session.h>
 
 namespace rex::system {
@@ -14,6 +16,10 @@ class XSocket;
 }
 
 namespace rex::system::xam {
+
+REXCVAR_DECLARE(bool, nat_relay_enabled);
+REXCVAR_DECLARE(uint32_t, nat_relay_after_ms);
+REXCVAR_DECLARE(uint32_t, nat_gameplay_relay_after_ms);
 
 enum class NatProbeRole : uint8_t { kDiscovery = 0, kGameplay = 1 };
 
@@ -83,6 +89,8 @@ bool NatProbeCommitAuthenticatedLanPeers(uint64_t socket,
     bool (*commit)(void*) noexcept,void* context) noexcept;
 void NatProbeRemoveGameplayIdentity(uint64_t socket, std::string_view attempt_id);
 std::optional<LanAddress> NatProbeGameplayDestination(uint64_t socket, LanAddress logical);
+// Diagnostics: why NatProbeGameplayDestination() has no route ("routable" when it has one).
+std::string_view NatProbeGameplayDestinationReason(uint64_t socket, LanAddress logical);
 bool NatProbeIsPendingGameplaySource(uint64_t socket, LanAddress native);
 void NatProbeRecordGameplayTraffic(uint64_t socket, LanAddress native, size_t bytes, bool sent);
 void NatProbeSetLogicalGameplayPeer(std::string_view attempt_id, LanAddress logical);

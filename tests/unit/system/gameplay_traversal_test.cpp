@@ -26,12 +26,14 @@
 #include <cstdlib>
 #include <cstdio>
 #include <set>
+#include <sstream>
 #include <rex/system/xam/session_directory.h>
 
 namespace rex::kernel::xam {
 struct XNADDR;
 u32 NetDll_XNetXnAddrToInAddr_entry(u32, ppc_ptr_t<XNADDR>, mapped_void, mapped_void);
 u32 NetDll_XNetInAddrToXnAddr_entry(u32, u32, ppc_ptr_t<XNADDR>, mapped_void);
+u32 NetDll_XNetRegisterKey_entry(u32, mapped_void, mapped_void);
 }
 namespace rex::system::xam {
 TEST_CASE("gameplay directory worker survives manual admission and joins at shutdown",
@@ -482,9 +484,14 @@ TEST_CASE("XNet entries round trip admission aliases with exact session and XUID
     CHECK(session_id==session->info.id);
     CHECK(std::equal(input.begin()+10,input.end(),inverse.begin()+10));
     CHECK(inverse[8]==3);CHECK(inverse[9]==232); // guest port 1000, big endian
+    // Joiners in 3+ player lobbies hand back other members' runtime-built
+    // addresses with an XID that differs from the peer session id; the unique
+    // logical address must still resolve.
     auto wrong=session->info.id;wrong[0]^=1;
+    address=0;
     CHECK(NetDll_XNetXnAddrToInAddr_entry(1,ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(inverse.data())),
-        mapped_void::from_host(wrong.data()),mapped_void::from_host(&address))!=0);
+        mapped_void::from_host(wrong.data()),mapped_void::from_host(&address))==0);
+    CHECK(address==peer.logical.ipv4);
     // The host relays a third player's address with its own identity bytes;
     // the unique logical address still resolves, with or without an XID.
     auto relayed=inverse;std::fill(relayed.begin()+10,relayed.end(),uint8_t(0x5A));
@@ -496,7 +503,47 @@ TEST_CASE("XNet entries round trip admission aliases with exact session and XUID
     CHECK(NetDll_XNetXnAddrToInAddr_entry(1,ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(relayed.data())),
         mapped_void{},mapped_void::from_host(&address))==0);
     CHECK(address==peer.logical.ipv4);
+    // The reverse lookup echoes the XID the title used for this member, so the
+    // title doesn't take its own peer for a member of another session.
+    std::array<uint8_t,36> echoed{};std::array<uint8_t,8> echoed_id{};
+    REQUIRE(NetDll_XNetInAddrToXnAddr_entry(1,ntohl(address),
+        ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(echoed.data())),mapped_void::from_host(echoed_id.data()))==0);
+    CHECK(echoed_id==wrong);
+    CHECK(std::equal(input.begin()+10,input.end(),echoed.begin()+10));
   }
+}
+TEST_CASE("XNet reverse lookups report the title's own XID for session members", "[gameplay][network][xnet]") {
+  using namespace rex::kernel::xam;
+  // A later session reusing earlier logical addresses with other members does
+  // not inherit a remembered XID.
+  SessionRegistry next_registry;auto next=next_registry.Create(1,"Host",{htonl(INADDR_LOOPBACK),30742},1,3,3);
+  auto next_auth=Ticket(next);
+  REQUIRE(InstallGameplayAuthorization(next,next_auth));
+  auto reverse=[&](const GameplayPeerAuthorization& peer) {
+    std::array<uint8_t,36> out{};std::array<uint8_t,8> id{};
+    REQUIRE(NetDll_XNetInAddrToXnAddr_entry(1,ntohl(peer.logical.ipv4),
+        ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(out.data())),mapped_void::from_host(id.data()))==0);
+    return id;
+  };
+  // Before the title names any member, a member that reaches it first is
+  // reported with the title's registered session key, as the host relays it.
+  std::array<uint8_t,8> key_id{0x82,0x7B,0x3F,0xF4,0,0,0,0x14};std::array<uint8_t,16> key{};
+  REQUIRE(NetDll_XNetRegisterKey_entry(1,mapped_void::from_host(key_id.data()),mapped_void::from_host(key.data()))==0);
+  CHECK(reverse(next_auth.peers[0])==key_id);
+  CHECK(reverse(next_auth.peers[1])==key_id);
+  // Once the title has named one member of this session with its own XID, a
+  // member it has not looked up yet (a newcomer) is reported with that XID too.
+  auto title_xid=next->info.id;title_xid[7]^=0x55;
+  auto identity=ReconstructXnAddrIdentity(next_auth.peers[0].xuid);
+  std::array<uint8_t,36> member{};
+  std::memcpy(member.data(),&next_auth.peers[0].logical.ipv4,4);std::memcpy(member.data()+4,&next_auth.peers[0].logical.ipv4,4);
+  std::memcpy(member.data()+10,identity.ethernet_address.data(),6);std::memcpy(member.data()+16,identity.online_address.data(),20);
+  uint32_t resolved=0;
+  REQUIRE(NetDll_XNetXnAddrToInAddr_entry(1,ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(member.data())),
+      mapped_void::from_host(title_xid.data()),mapped_void::from_host(&resolved))==0);
+  CHECK(resolved==next_auth.peers[0].logical.ipv4);
+  CHECK(reverse(next_auth.peers[0])==title_xid);
+  CHECK(reverse(next_auth.peers[1])==title_xid);
 }
 TEST_CASE("XSocket protects admitted peer payloads and refuses scoped raw fallback", "[gameplay][network][socket]") {
   Udp a,b,lan;
@@ -1061,3 +1108,438 @@ TEST_CASE("private LAN roster cipher routes and authority publish as one transac
 }
 } // namespace rex::system::xam
 #endif
+namespace rex::system::xam {
+namespace {
+std::array<uint8_t,56> RegisteredWithRelay(const GameplayPeerAuthorization& peer, LanAddress endpoint,
+                                           uint16_t relay_port) {
+  auto bytes=Registered(peer,endpoint);
+  auto port=htons(relay_port);std::memcpy(bytes.data()+52,&port,2);
+  return bytes;
+}
+// Pins the gameplay relay delay for one test, so the real-time probe pump
+// cannot switch to the relay before the test's own simulated ticks expect it.
+struct GameplayRelayDelay {
+  uint32_t previous=REXCVAR_GET(nat_gameplay_relay_after_ms);
+  explicit GameplayRelayDelay(uint32_t value) { REXCVAR_SET(nat_gameplay_relay_after_ms,value); }
+  ~GameplayRelayDelay() { REXCVAR_SET(nat_gameplay_relay_after_ms,previous); }
+};
+struct RelayFixture {
+  SessionRegistry registry;
+  std::shared_ptr<SessionRecord> session=registry.Create(1,"Host",{htonl(INADDR_LOOPBACK),30742},1,3,3);
+  GameplayAuthorization auth=Ticket(session);
+  Udp socket;
+  LanAddress direct{htonl(0xC6336401),43000};  // Unreachable public endpoint (TEST-NET-2).
+  LanAddress relay{htonl(INADDR_LOOPBACK),30801};
+  RelayFixture() {
+    socket.Attach();
+    REQUIRE(InstallGameplayAuthorization(session,auth));
+    REQUIRE(BindGameplaySocket(session,1,uint64_t(socket.socket),1000));
+  }
+  bool Offer(uint16_t relay_port) {
+    auto registration=RegisteredWithRelay(auth.peers[0],direct,relay_port);
+    return NatProbeConsume(socket.socket,registration.data(),56,htonl(INADDR_LOOPBACK),39188);
+  }
+  std::optional<LanAddress> Peer() {
+    for(const auto& attempt:NatProbePeerAttempts(socket.socket,false))
+      if(attempt.attempt_id==auth.peers[0].traversal.attempt_id) return attempt.peer;
+    return std::nullopt;
+  }
+};
+}
+TEST_CASE("unacknowledged direct gameplay path falls back to the server relay", "[gameplay][network][relay]") {
+  GameplayRelayDelay delay(1000);
+  RelayFixture fixture;
+  REQUIRE(fixture.Offer(fixture.relay.port));
+  NatProbeTickAt(fixture.socket.socket,Clock::now());
+  CHECK(fixture.Peer()==fixture.direct);
+  NatProbeTickAt(fixture.socket.socket,Clock::now()+std::chrono::milliseconds(1100));
+  REQUIRE(fixture.Peer()==fixture.relay);
+  CHECK(NatProbeIsPendingGameplaySource(fixture.socket.socket,fixture.relay));
+  CHECK_FALSE(NatProbeGameplayDestination(fixture.socket.socket,fixture.auth.peers[0].logical));
+  // Later server responses keep reporting the direct endpoint; the relay stays.
+  REQUIRE(fixture.Offer(fixture.relay.port));
+  CHECK(fixture.Peer()==fixture.relay);
+  auto ack=Registered(fixture.auth.peers[0],fixture.relay,4);
+  REQUIRE(NatProbeConsume(fixture.socket.socket,ack.data(),56,fixture.relay.ipv4,fixture.relay.port));
+  CHECK(NatProbeGameplayDestination(fixture.socket.socket,fixture.auth.peers[0].logical)==fixture.relay);
+  CHECK(NatProbeNormalizeGameplaySource(fixture.socket.socket,fixture.relay)==fixture.auth.peers[0].logical);
+}
+TEST_CASE("relay registration and punches reach the assigned relay port", "[gameplay][network][relay]") {
+  GameplayRelayDelay delay(1000);
+  Udp relay_socket;
+  RelayFixture fixture;
+  fixture.relay=relay_socket.address;
+  REQUIRE(fixture.Offer(fixture.relay.port));
+  auto receive=[&](uint8_t type) {
+    for(int i=0;i<50;++i) {
+      std::array<uint8_t,64> bytes{};
+      const auto count=recv(relay_socket.socket,reinterpret_cast<char*>(bytes.data()),int(bytes.size()),0);
+      if(count==56&&std::memcmp(bytes.data(),"HNAT",4)==0&&bytes[5]==type) return true;
+      if(count<0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return false;
+  };
+  NatProbeTickAt(fixture.socket.socket,Clock::now());
+  CHECK(receive(1));  // Credential-bearing registration teaches the relay this socket's mapping.
+  CHECK_FALSE(receive(3));  // No punch to the relay while the direct path still has time.
+  NatProbeTickAt(fixture.socket.socket,Clock::now()+std::chrono::milliseconds(1100));
+  CHECK(receive(3));
+}
+TEST_CASE("peer punch from the relay address switches this side to the relay", "[gameplay][network][relay]") {
+  RelayFixture fixture;
+  REQUIRE(fixture.Offer(fixture.relay.port));
+  auto punch=Registered(fixture.auth.peers[0],fixture.relay,3);
+  CHECK(NatProbeIsControlPacket(fixture.socket.socket,punch.data(),56,fixture.relay.ipv4,fixture.relay.port));
+  REQUIRE(NatProbeConsume(fixture.socket.socket,punch.data(),56,fixture.relay.ipv4,fixture.relay.port));
+  CHECK(fixture.Peer()==fixture.relay);
+  // A different port on the server is not this side's relay.
+  RelayFixture other;
+  REQUIRE(other.Offer(other.relay.port));
+  auto stray=Registered(other.auth.peers[0],{other.relay.ipv4,30999},3);
+  CHECK_FALSE(NatProbeIsControlPacket(other.socket.socket,stray.data(),56,other.relay.ipv4,30999));
+  CHECK(other.Peer()==other.direct);
+}
+TEST_CASE("gameplay links fall back to the relay quickly", "[gameplay][network][relay]") {
+  // Same-house candidates answer well inside the default delay.
+  CHECK(REXCVAR_GET(nat_gameplay_relay_after_ms)==400);
+  CHECK(REXCVAR_GET(nat_relay_after_ms)==1000);
+  RelayFixture fixture;
+  REQUIRE(fixture.Offer(fixture.relay.port));
+  const auto start=Clock::now();
+  NatProbeTickAt(fixture.socket.socket,start);
+  NatProbeTickAt(fixture.socket.socket,start+std::chrono::milliseconds(450));
+  CHECK(fixture.Peer()==fixture.relay);
+}
+TEST_CASE("a same-house gameplay peer keeps the longer relay delay", "[gameplay][network][relay]") {
+  // The server saw this side at the peer's public address: both are behind the
+  // same home router, whose home-network candidates need the full budget.
+  RelayFixture fixture;
+  auto registration=RegisteredWithRelay(fixture.auth.peers[0],fixture.direct,fixture.relay.port);
+  std::memcpy(registration.data()+40,&fixture.direct.ipv4,4);
+  const auto observed_port=htons(41000);std::memcpy(registration.data()+44,&observed_port,2);
+  REQUIRE(NatProbeConsume(fixture.socket.socket,registration.data(),56,htonl(INADDR_LOOPBACK),39188));
+  const auto start=Clock::now();
+  NatProbeTickAt(fixture.socket.socket,start);
+  NatProbeTickAt(fixture.socket.socket,start+std::chrono::milliseconds(450));
+  CHECK(fixture.Peer()==fixture.direct);
+  NatProbeTickAt(fixture.socket.socket,start+std::chrono::milliseconds(1100));
+  CHECK(fixture.Peer()==fixture.relay);
+}
+TEST_CASE("a late direct packet after the relay switch is answered through the relay", "[gameplay][network][relay]") {
+  Udp relay_socket;
+  RelayFixture fixture;
+  fixture.relay=relay_socket.address;
+  REQUIRE(fixture.Offer(fixture.relay.port));
+  const auto start=Clock::now();
+  NatProbeTickAt(fixture.socket.socket,start);
+  NatProbeTickAt(fixture.socket.socket,start+std::chrono::milliseconds(450));
+  REQUIRE(fixture.Peer()==fixture.relay);
+  auto drain=[&] {
+    std::array<uint8_t,64> bytes{};
+    while(recv(relay_socket.socket,reinterpret_cast<char*>(bytes.data()),int(bytes.size()),0)>0) {}
+  };
+  auto receive=[&](uint8_t type) {
+    for(int i=0;i<50;++i) {
+      std::array<uint8_t,64> bytes{};
+      const auto count=recv(relay_socket.socket,reinterpret_cast<char*>(bytes.data()),int(bytes.size()),0);
+      if(count==56&&std::memcmp(bytes.data(),"HNAT",4)==0&&bytes[5]==type) return true;
+      if(count<0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return false;
+  };
+  drain();
+  // The peer has not switched yet: its direct punch is answered with an ack
+  // through the relay, which makes it switch as well.
+  auto punch=Registered(fixture.auth.peers[0],fixture.direct,3);
+  CHECK(NatProbeIsControlPacket(fixture.socket.socket,punch.data(),56,fixture.direct.ipv4,fixture.direct.port));
+  REQUIRE(NatProbeConsume(fixture.socket.socket,punch.data(),56,fixture.direct.ipv4,fixture.direct.port));
+  CHECK(receive(4));
+  CHECK(fixture.Peer()==fixture.relay);
+  drain();
+  auto ack=Registered(fixture.auth.peers[0],fixture.direct,4);
+  CHECK(NatProbeIsControlPacket(fixture.socket.socket,ack.data(),56,fixture.direct.ipv4,fixture.direct.port));
+  REQUIRE(NatProbeConsume(fixture.socket.socket,ack.data(),56,fixture.direct.ipv4,fixture.direct.port));
+  CHECK(receive(3));
+  CHECK(fixture.Peer()==fixture.relay);
+  CHECK_FALSE(NatProbeGameplayDestination(fixture.socket.socket,fixture.auth.peers[0].logical));
+  // Any other source is still refused.
+  auto stray=Registered(fixture.auth.peers[0],{fixture.direct.ipv4,43001},3);
+  CHECK_FALSE(NatProbeIsControlPacket(fixture.socket.socket,stray.data(),56,fixture.direct.ipv4,43001));
+}
+TEST_CASE("an unacknowledged relay link refreshes its relay registration quickly", "[gameplay][network][relay]") {
+  Udp relay_socket;
+  RelayFixture fixture;
+  fixture.relay=relay_socket.address;
+  REQUIRE(fixture.Offer(fixture.relay.port));
+  auto count_registrations=[&] {
+    int found=0;
+    for(int i=0;i<20;++i) {
+      std::array<uint8_t,64> bytes{};
+      const auto count=recv(relay_socket.socket,reinterpret_cast<char*>(bytes.data()),int(bytes.size()),0);
+      if(count==56&&std::memcmp(bytes.data(),"HNAT",4)==0&&bytes[5]==1) ++found;
+      if(count<0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return found;
+  };
+  const auto start=Clock::now();
+  NatProbeTickAt(fixture.socket.socket,start);
+  NatProbeTickAt(fixture.socket.socket,start+std::chrono::milliseconds(450));
+  REQUIRE(fixture.Peer()==fixture.relay);
+  count_registrations();
+  NatProbeTickAt(fixture.socket.socket,start+std::chrono::milliseconds(750));
+  CHECK(count_registrations()>=1);  // A 1 s refresh would send none here.
+}
+TEST_CASE("no relay offer or disabled relay keeps the direct path", "[gameplay][network][relay]") {
+  {
+    RelayFixture fixture;
+    REQUIRE(fixture.Offer(0));
+    NatProbeTickAt(fixture.socket.socket,Clock::now()+std::chrono::seconds(5));
+    CHECK(fixture.Peer()==fixture.direct);
+  }
+  {
+    REXCVAR_SET(nat_relay_enabled,false);
+    RelayFixture fixture;
+    REQUIRE(fixture.Offer(fixture.relay.port));
+    NatProbeTickAt(fixture.socket.socket,Clock::now()+std::chrono::seconds(5));
+    CHECK(fixture.Peer()==fixture.direct);
+    REXCVAR_SET(nat_relay_enabled,true);
+  }
+}
+}
+namespace rex::system::xam {
+#if !REX_PLATFORM_WIN32
+// Manual end-to-end check against a real directory/relay server. The harness
+// supplies two issued gameplay link credentials and, to model carrier NAT,
+// blocks direct UDP between the two fixed client ports.
+// RELAY_E2E="server_port link host_cap client_cap port0 port1 expect(relay|direct)"
+TEST_CASE("gameplay link reaches its peer through a real relay server", "[.relay-e2e]") {
+  const char* config=std::getenv("RELAY_E2E");
+  REQUIRE(config);
+  std::istringstream input(config);
+  uint32_t server_port=0,ports[2]{};std::string link,caps[2],expect;
+  input>>server_port>>link>>caps[0]>>caps[1]>>ports[0]>>ports[1]>>expect;
+  REQUIRE(input);
+  int sockets[2];
+  LanAddress logical[2]={{htonl(0xf0000001),1000},{htonl(0xf0000002),1000}};
+  for(int i=0;i<2;++i) {
+    sockets[i]=::socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP);
+    sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    addr.sin_port=htons(uint16_t(ports[i]));
+    REQUIRE(::bind(sockets[i],reinterpret_cast<sockaddr*>(&addr),sizeof(addr))==0);
+    REQUIRE(fcntl(sockets[i],F_SETFL,fcntl(sockets[i],F_GETFL,0)|O_NONBLOCK)==0);
+    NatProbeAttach(uint64_t(sockets[i]),NatProbeRole::kGameplay,{addr.sin_addr.s_addr,uint16_t(ports[i])});
+    REQUIRE(NatProbeInstallGameplayIdentity({link,caps[i],"127.0.0.1",uint16_t(server_port),uint8_t(i)},
+        uint64_t(sockets[i]),logical[1-i],Clock::now()+std::chrono::seconds(60)));
+  }
+  auto pump=[&] {
+    for(int i=0;i<2;++i) {
+      NatProbeTick(uint64_t(sockets[i]));
+      for(;;) {
+        std::array<uint8_t,1600> bytes{};sockaddr_in from{};SockLen length=sizeof(from);
+        const auto count=recvfrom(sockets[i],bytes.data(),bytes.size(),0,reinterpret_cast<sockaddr*>(&from),&length);
+        if(count<=0) break;
+        NatProbeConsume(uint64_t(sockets[i]),bytes.data(),size_t(count),from.sin_addr.s_addr,ntohs(from.sin_port));
+      }
+    }
+  };
+  std::optional<LanAddress> routes[2];
+  const auto started=Clock::now();
+  while(Clock::now()-started<std::chrono::seconds(10)&&!(routes[0]&&routes[1])) {
+    pump();
+    for(int i=0;i<2;++i) routes[i]=NatProbeGameplayDestination(uint64_t(sockets[i]),logical[1-i]);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  const auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-started).count();
+  INFO("connected after " << elapsed << " ms");
+  REQUIRE(routes[0]);REQUIRE(routes[1]);
+  for(int i=0;i<2;++i) {
+    if(expect=="relay") CHECK(routes[i]->port!=ports[1-i]);
+    else CHECK(routes[i]->port==ports[1-i]);
+  }
+  // A datagram from side 1 arrives at side 0 from side 0's route and maps to side 1.
+  sockaddr_in target{};target.sin_family=AF_INET;target.sin_addr.s_addr=routes[1]->ipv4;
+  target.sin_port=htons(routes[1]->port);
+  REQUIRE(sendto(sockets[1],"payload",7,0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==7);
+  bool delivered=false;
+  for(int attempt=0;attempt<200&&!delivered;++attempt) {
+    std::array<uint8_t,64> bytes{};sockaddr_in from{};SockLen length=sizeof(from);
+    const auto count=recvfrom(sockets[0],bytes.data(),bytes.size(),0,reinterpret_cast<sockaddr*>(&from),&length);
+    if(count==7&&std::memcmp(bytes.data(),"payload",7)==0) {
+      const LanAddress source{from.sin_addr.s_addr,ntohs(from.sin_port)};
+      CHECK(source==*routes[0]);
+      CHECK(NatProbeNormalizeGameplaySource(uint64_t(sockets[0]),source)==logical[1]);
+      delivered=true;
+    } else std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  CHECK(delivered);
+  WARN("relay-e2e mode=" << expect << " connected_ms=" << elapsed);
+  for(int i=0;i<2;++i) { NatProbeDetach(uint64_t(sockets[i])); close(sockets[i]); }
+}
+#endif
+}
+namespace rex::system::xam {
+TEST_CASE("public-route joiner reaches its host through the advertised LAN address", "[gameplay][session][network]") {
+  // On a cellular/relay (public) route the joiner's SessionInfo::host_address is
+  // the host's public endpoint, while the title keeps sending to the LAN
+  // endpoint it was advertised in the listing.
+  const LanAddress advertised{htonl(0x0A000030),30742};
+  const LanAddress public_host{htonl(0xC6336402),30742};  // TEST-NET-2
+  SessionRegistry registry;
+  auto session=registry.Create(1,"Host",public_host,1,3,3);
+  auto binding=std::make_shared<const GameplayAdmissionBinding>(GameplayAdmissionBinding{
+      "gameplay-test",std::string(32,'a'),std::string(32,'b')});
+  {
+    std::lock_guard lock(*session->mutex);
+    for(auto& member:session->members) member.local=false;
+    session->members.push_back({2,"Joiner",0,true,false,false,binding});
+  }
+  GameplayAuthorization auth;
+  auth.directory_session="gameplay-test"; auth.xbox_session=session->info.id;
+  auth.host_xuid=1; auth.xuid=2;
+  auth.admission_attempt=binding->attempt_id; auth.admission_generation=binding->admission_generation;
+  auth.member_nonce=std::string(32,'1'); auth.member_capability=std::string(32,'2');
+  auth.logical={htonl(0xf0000002),1000}; auth.expires_at=Clock::now()+std::chrono::seconds(40);
+  GameplayPeerAuthorization host;
+  host.traffic_key.fill(1); // Public deterministic test material only.
+  host.xuid=1; host.member_nonce=std::string(32,'3');
+  host.admission_attempt=std::string(32,'c'); host.admission_generation=std::string(32,'d');
+  host.logical={htonl(0xf0000001),1000};
+  host.traversal={std::string(32,'4'),std::string(32,'5'),"127.0.0.1",39188,0};
+  auth.peers.push_back(host);
+  Udp socket;socket.Attach();
+  REQUIRE(InstallGameplayAuthorization(session,auth));
+  REQUIRE(BindGameplaySocket(session,2,uint64_t(socket.socket),1000));
+  const LanAddress native{htonl(INADDR_LOOPBACK),42010};
+  auto registration=Registered(host,native);
+  REQUIRE(NatProbeConsume(socket.socket,registration.data(),56,htonl(INADDR_LOOPBACK),39188));
+  auto ack=Registered(host,native,4);
+  REQUIRE(NatProbeConsume(socket.socket,ack.data(),56,native.ipv4,native.port));
+  REQUIRE(NatProbeGameplayDestination(socket.socket,host.logical)==native);
+
+  // Without the recorded advertised endpoint the LAN address has no route.
+  CHECK_FALSE(GameplayLogicalDestination(socket.socket,{advertised.ipv4,1000}));
+  // A joiner on a home-network route keeps reporting its own LAN address.
+  CHECK_FALSE(GameplaySelfLogicalAddress(2));
+  // Another host or session never lends its advertised address.
+  RecordAdvertisedHostAddress(session->info.id,9,advertised);
+  auto other_session=session->info.id;other_session[0]^=1;
+  RecordAdvertisedHostAddress(other_session,1,advertised);
+  CHECK_FALSE(GameplayLogicalDestination(socket.socket,{advertised.ipv4,1000}));
+
+  CHECK_FALSE(GameplaySelfLogicalAddress(2));
+  RecordAdvertisedHostAddress(session->info.id,1,advertised);
+  // On the public route the joiner reports the logical address the others know it by.
+  CHECK(GameplaySelfLogicalAddress(2)==auth.logical);
+  CHECK_FALSE(GameplaySelfLogicalAddress(1));
+  CHECK(GameplayLogicalDestination(socket.socket,{advertised.ipv4,1000})==host.logical);
+  CHECK(GameplayLogicalDestination(socket.socket,{advertised.ipv4,advertised.port})==host.logical);
+  CHECK(GameplayGuestSourceAlias(socket.socket,host.logical)==advertised.ipv4);
+  // Only the exact advertised address and port (or the guest port) resolve.
+  CHECK_FALSE(GameplayLogicalDestination(socket.socket,{htonl(0x0A000031),1000}));
+  CHECK_FALSE(GameplayLogicalDestination(socket.socket,{advertised.ipv4,4444}));
+  // The public endpoint keeps working as before.
+  CHECK(GameplayLogicalDestination(socket.socket,{public_host.ipv4,1000})==host.logical);
+}
+TEST_CASE("a public-route joiner holds a newcomer's reliable messages until the title joins it", "[gameplay][session][network]") {
+  // With the host on cellular, the title's confirmation of a newcomer crosses
+  // the relay twice; the newcomer's own intro can arrive first, and the title
+  // ends the link if it sees that intro before XGISessionJoinRemote.
+  const LanAddress advertised{htonl(0x0A000040),30742};
+  const LanAddress public_host{htonl(0xC6336403),30742};  // TEST-NET-2
+  SessionRegistry registry;
+  auto session=registry.Create(1,"Host",public_host,1,4,4);
+  auto binding=std::make_shared<const GameplayAdmissionBinding>(GameplayAdmissionBinding{
+      "gameplay-hold",std::string(32,'a'),std::string(32,'b')});
+  {
+    std::lock_guard lock(*session->mutex);
+    for(auto& member:session->members) member.local=false;
+    session->members.push_back({2,"Joiner",0,true,false,false,binding});
+  }
+  GameplayAuthorization auth;
+  auth.directory_session="gameplay-hold"; auth.xbox_session=session->info.id;
+  auth.host_xuid=1; auth.xuid=2;
+  auth.admission_attempt=binding->attempt_id; auth.admission_generation=binding->admission_generation;
+  auth.member_nonce=std::string(32,'1'); auth.member_capability=std::string(32,'2');
+  auth.logical={htonl(0xf0000012),1000}; auth.expires_at=Clock::now()+std::chrono::seconds(40);
+  GameplayPeerAuthorization host;
+  host.traffic_key.fill(1); // Public deterministic test material only.
+  host.xuid=1; host.member_nonce=std::string(32,'3');
+  host.admission_attempt=std::string(32,'c'); host.admission_generation=std::string(32,'d');
+  host.logical={htonl(0xf0000011),1000};
+  host.traversal={std::string(32,'4'),std::string(32,'5'),"127.0.0.1",39188,0};
+  auto newcomer=host;
+  newcomer.traffic_key.fill(2);
+  newcomer.xuid=3; newcomer.member_nonce=std::string(32,'6');
+  newcomer.admission_attempt=std::string(32,'e'); newcomer.admission_generation=std::string(32,'f');
+  newcomer.logical={htonl(0xf0000013),1000};
+  newcomer.traversal={std::string(32,'7'),std::string(32,'8'),"127.0.0.1",39188,0};
+  auth.peers.push_back(host);
+  auth.peers.push_back(newcomer);
+  Udp socket;socket.Attach();
+  REQUIRE(InstallGameplayAuthorization(session,auth));
+  REQUIRE(BindGameplaySocket(session,2,uint64_t(socket.socket),1000));
+  const auto sock=uint64_t(socket.socket);
+  const std::vector<uint8_t> intro{0x00,0x19,0xC0,0x01,0x00,0x01,0xE3};
+  const std::vector<uint8_t> handshake{0x00,0x04,0x06,0x00,0x00,0x01};
+
+  // A same-house host confirms within milliseconds: nothing is held.
+  CHECK_FALSE(GameplayHoldUntilTitleJoined(sock,newcomer.logical,intro));
+  RecordAdvertisedHostAddress(session->info.id,1,advertised);
+  // On a public route the newcomer's reliable messages wait for the title...
+  CHECK(GameplayHoldUntilTitleJoined(sock,newcomer.logical,intro));
+  // ...but its handshake, its opening sequence-0 exchange (which the title
+  // needs before it asks the host), and anything from the host, always pass.
+  CHECK_FALSE(GameplayHoldUntilTitleJoined(sock,newcomer.logical,handshake));
+  const std::vector<uint8_t> opening{0x00,0xB2,0xC0,0x00,0x00,0x00,0xE1,0x00};
+  CHECK_FALSE(GameplayHoldUntilTitleJoined(sock,newcomer.logical,opening));
+  CHECK_FALSE(GameplayHoldUntilTitleJoined(sock,host.logical,intro));
+  // Another session's join of the same member does not count.
+  auto other_session=session->info.id;other_session[0]^=1;
+  RecordTitleJoinedRemote(other_session,3);
+  CHECK(GameplayHoldUntilTitleJoined(sock,newcomer.logical,intro));
+  RecordTitleJoinedRemote(session->info.id,3);
+  CHECK_FALSE(GameplayHoldUntilTitleJoined(sock,newcomer.logical,intro));
+}
+
+TEST_CASE("a newcomer the title never joins is held for a bounded time only", "[gameplay][session][network]") {
+  const LanAddress advertised{htonl(0x0A000050),30742};
+  const LanAddress public_host{htonl(0xC6336404),30742};  // TEST-NET-2
+  SessionRegistry registry;
+  auto session=registry.Create(1,"Host",public_host,1,4,4);
+  auto binding=std::make_shared<const GameplayAdmissionBinding>(GameplayAdmissionBinding{
+      "gameplay-hold-bound",std::string(32,'a'),std::string(32,'b')});
+  {
+    std::lock_guard lock(*session->mutex);
+    for(auto& member:session->members) member.local=false;
+    session->members.push_back({2,"Joiner",0,true,false,false,binding});
+  }
+  GameplayAuthorization auth;
+  auth.directory_session="gameplay-hold-bound"; auth.xbox_session=session->info.id;
+  auth.host_xuid=1; auth.xuid=2;
+  auth.admission_attempt=binding->attempt_id; auth.admission_generation=binding->admission_generation;
+  auth.member_nonce=std::string(32,'1'); auth.member_capability=std::string(32,'2');
+  auth.logical={htonl(0xf0000022),1000}; auth.expires_at=Clock::now()+std::chrono::seconds(40);
+  GameplayPeerAuthorization host;
+  host.traffic_key.fill(1); // Public deterministic test material only.
+  host.xuid=1; host.member_nonce=std::string(32,'3');
+  host.admission_attempt=std::string(32,'c'); host.admission_generation=std::string(32,'d');
+  host.logical={htonl(0xf0000021),1000};
+  host.traversal={std::string(32,'4'),std::string(32,'5'),"127.0.0.1",39188,0};
+  auto newcomer=host;
+  newcomer.traffic_key.fill(2);
+  newcomer.xuid=3; newcomer.member_nonce=std::string(32,'6');
+  newcomer.admission_attempt=std::string(32,'e'); newcomer.admission_generation=std::string(32,'f');
+  newcomer.logical={htonl(0xf0000023),1000};
+  newcomer.traversal={std::string(32,'7'),std::string(32,'8'),"127.0.0.1",39188,0};
+  auth.peers.push_back(host);
+  auth.peers.push_back(newcomer);
+  Udp socket;socket.Attach();
+  REQUIRE(InstallGameplayAuthorization(session,auth));
+  REQUIRE(BindGameplaySocket(session,2,uint64_t(socket.socket),1000));
+  RecordAdvertisedHostAddress(session->info.id,1,advertised);
+  const std::vector<uint8_t> intro{0x00,0x19,0xC0,0x01,0x00,0x01,0xE3};
+  CHECK(GameplayHoldUntilTitleJoined(uint64_t(socket.socket),newcomer.logical,intro));
+  std::this_thread::sleep_for(std::chrono::milliseconds(1600));
+  CHECK_FALSE(GameplayHoldUntilTitleJoined(uint64_t(socket.socket),newcomer.logical,intro));
+}
+}

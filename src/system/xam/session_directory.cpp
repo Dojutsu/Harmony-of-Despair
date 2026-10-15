@@ -253,6 +253,18 @@ ClientAdmissionApplyResult ClientAdmissionLeaseState::ApplyResponse(
     Terminalize();
     return ClientAdmissionApplyResult::kInvalidated;
   }
+  // The host completes the directory attempt as soon as it has admitted this
+  // player, which can land between the title's join and its join completion.
+  // That is the success path, not a revocation: keep the ready admission so
+  // join completion can publish it, and stop polling. The lease deadline still
+  // bounds how long it is kept.
+  if (operation.action == ClientAdmissionAction::kStatus && admission.phase == "terminal" &&
+      admission.terminal_reason == "completed" && admission.attempt_id == attempt_id_ &&
+      admission.purpose == purpose_ && leased() && host_ready_ &&
+      admission.admission_generation == admission_generation_) {
+    host_completed_ = true;
+    return ClientAdmissionApplyResult::kApplied;
+  }
   if (admission.attempt_id != attempt_id_ || admission.purpose != purpose_ ||
       admission.phase == "terminal") {
     Terminalize();
@@ -352,6 +364,7 @@ void ClientAdmissionLeaseState::Invalidate() {
   renewal_deadline_ = {};
   host_ready_ = false;
   has_ever_been_ready_ = false;
+  host_completed_ = false;
   renewal_uncertainty_.reset();
   session_confirmed_ = false;
   pending_session_.reset();
@@ -376,6 +389,7 @@ void ClientAdmissionLeaseState::Terminalize() {
   lease_deadline_ = {};
   renewal_deadline_ = {};
   host_ready_ = false;
+  host_completed_ = false;
   renewal_uncertainty_.reset();
   session_confirmed_ = false;
   pending_session_.reset();
@@ -383,7 +397,7 @@ void ClientAdmissionLeaseState::Terminalize() {
 }
 
 ClientAdmissionAction ClientAdmissionLeaseState::NextAction(Clock::time_point now) const {
-  if (!bound() || (leased() && now >= lease_deadline_))
+  if (!bound() || host_completed_ || (leased() && now >= lease_deadline_))
     return ClientAdmissionAction::kNone;
   if (!leased())
     return ClientAdmissionAction::kArm;
@@ -1045,7 +1059,8 @@ std::optional<HttpResult> Request(std::string_view base_url, std::wstring_view m
     return std::nullopt;
   // Directory failure must not stall the guest's existing LAN search or
   // session teardown. These are per-stage bounds; gameplay never uses HTTP.
-  WinHttpSetTimeouts(session, 500, 500, 500, 1000);
+  // Cellular DNS+TCP+TLS routinely exceeds 1 s, so allow a few seconds.
+  WinHttpSetTimeouts(session, 2000, 2000, 1000, 4000);
   DWORD connect_retries = 0;
   WinHttpSetOption(session, WINHTTP_OPTION_CONNECT_RETRIES, &connect_retries,
                    sizeof(connect_retries));
@@ -1180,8 +1195,8 @@ std::optional<HttpResult> Request(std::string_view base_url, std::wstring_view m
       !set_option(CURLOPT_USERAGENT, "HarmonyRecomp/1") ||
       !set_option(CURLOPT_HTTPHEADER, headers) ||
       !set_option(CURLOPT_CUSTOMREQUEST, method_ascii.c_str()) ||
-      !set_option(CURLOPT_CONNECTTIMEOUT_MS, 500L) ||
-      !set_option(CURLOPT_TIMEOUT_MS, 1000L) ||
+      !set_option(CURLOPT_CONNECTTIMEOUT_MS, 3000L) ||
+      !set_option(CURLOPT_TIMEOUT_MS, 4000L) ||
       !set_option(CURLOPT_NOSIGNAL, 1L) ||
       !set_option(CURLOPT_FOLLOWLOCATION, 0L) ||
       !set_option(CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS) ||
@@ -1534,6 +1549,9 @@ std::optional<DirectoryAdmissionState> ParseDirectoryAdmissionResponse(std::stri
         result.admission_generation = generation->get<std::string>();
         result.lease_revision = revision->get<uint64_t>();
       }
+      auto reason = document.find("terminal_reason");
+      if (result.phase == "terminal" && reason != document.end() && reason->is_string())
+        result.terminal_reason = reason->get<std::string>();
     } else {
       return std::nullopt;
     }
@@ -3055,7 +3073,12 @@ class SessionDirectoryClient::Impl {
           if (found->second.socket_owner) found->second.socket_owner->cancelled = true;
           client_admission_cancellations.push_back(cancellation_before_apply);
           client_admissions.erase(found);
-          REXSYS_WARN("Session directory: authoritative client admission state invalidated");
+          REXSYS_WARN("Session directory: authoritative client admission state invalidated "
+                      "action={} status={} phase={} host_ready={} revision={}",
+                      static_cast<int>(operation.action),
+                      response.status ? int64_t(*response.status) : int64_t(-1),
+                      admission ? admission->phase : std::string("<none>"),
+                      admission && admission->host_ready, admission ? admission->lease_revision : 0);
         }
     }
   }

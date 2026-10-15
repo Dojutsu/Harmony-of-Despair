@@ -16,6 +16,7 @@
 #include <rex/system/kernel_state.h>
 #include <rex/thread.h>
 #include <rex/system/xam/nat_probe.h>
+#include <rex/system/xam/gameplay_traversal.h>
 
 #if REX_PLATFORM_POSIX_ONLINE
 #include <openssl/evp.h>
@@ -2128,9 +2129,13 @@ LanDiscoveryService::DiscoverConfiguredInvite(
                                             responding))
         continue;
       decoded->discovery_address = responding;
-      if (!candidate->lan)
+      if (!candidate->lan) {
+        // The title keeps the advertised endpoint; remember it for this host only.
+        RecordAdvertisedHostAddress(decoded->info.id, decoded->host_xuid,
+                                    decoded->info.host_address);
         decoded->info.host_address = {authoritative_ipv4.s_addr,
                                       endpoint->gameplay_port};
+      }
       decoded->traversal_session_id = attempt.session_id;
       decoded->traversal_attempt_id = attempt.attempt_id;
       decoded->traversal_capability = attempt.capability;
@@ -2584,12 +2589,24 @@ std::optional<SessionRecord> LanDiscoveryService::Join(const SessionRecord& sess
     const auto join_socket = admission_lease ? SOCKET(admission_lease->socket()) :
         (impl_->client_socket != kInvalidSocket ? impl_->client_socket : binding->socket);
     const bool already_has_credential = NonzeroToken(binding->credential);
+    const auto join_deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     result = Exchange(session, &member, kJoin, impl_->title_id, impl_->port, timeout_ms,join_socket,binding,
                       admission_lease ? &*admission_lease : nullptr, &expired_join);
-    if (result && !already_has_credential)
+    if (result && !already_has_credential) {
+      // The confirmation gets whatever is left of the join budget: through a
+      // relay on a cellular link one round trip alone can take ~300 ms.
+      const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+          join_deadline - std::chrono::steady_clock::now());
+      // The host completes the directory attempt once it accepts the first
+      // join, which can retire this admission while the confirmation is still
+      // in flight. The confirmation is authenticated by the credential the host
+      // just issued, and admission_lease keeps join_socket open, so it no longer
+      // needs the lease to stay active.
       result = Exchange(*result,&member,kJoin,impl_->title_id,impl_->port,
-                        std::min(timeout_ms,250u),join_socket,binding,
-                        admission_lease ? &*admission_lease : nullptr, &expired_join);
+                        uint32_t(std::max<int64_t>(remaining.count(), 250)),join_socket,binding,
+                        nullptr, &expired_join);
+    }
     if (result) binding->confirmed = true;
   }
   if (expired_join) {

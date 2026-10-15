@@ -272,7 +272,37 @@ struct XNetStartupParams {
 static XNetStartupParams xnet_startup_params = {};
 static std::mutex xnet_registry_mutex;
 static std::unordered_map<uint32_t, XNADDR> xnet_address_registry;
+// The XID a title associated with a directory-assigned gameplay peer. Titles
+// key other members by their own session XID, which need not equal the
+// runtime's peer session id; echo theirs back so a later XNetInAddrToXnAddr
+// doesn't look like a different session. Keyed by logical address and checked
+// against the peer's xuid and session so a reused logical address can't inherit it.
+struct GameplayTitleXid { uint64_t xuid = 0; std::array<uint8_t, 8> session{}, xid{}; };
+static std::unordered_map<uint32_t, GameplayTitleXid> gameplay_title_xids;
+// The XID a title uses for the other members of a runtime session, for members
+// it has not looked up itself yet (a newcomer that reaches it first). Keyed by
+// the runtime session id.
+static std::unordered_map<uint64_t, std::array<uint8_t, 8>> gameplay_session_title_xids;
+uint64_t GameplaySessionKey(const std::array<uint8_t, 8>& id) {
+  uint64_t key = 0;
+  for (auto byte : id) key = (key << 8) | byte;
+  return key;
+}
+void RecordGameplayTitleXid(const GameplayXnAddr& peer, const void* xid) {
+  GameplayTitleXid recorded{peer.xuid, peer.session_id};
+  std::memcpy(recorded.xid.data(), xid, recorded.xid.size());
+  std::lock_guard lock(xnet_registry_mutex);
+  if (gameplay_title_xids.size() > 64) gameplay_title_xids.clear();
+  gameplay_title_xids[peer.logical.ipv4] = recorded;
+  if (recorded.xid != peer.session_id) {
+    if (gameplay_session_title_xids.size() > 16) gameplay_session_title_xids.clear();
+    gameplay_session_title_xids[GameplaySessionKey(peer.session_id)] = recorded.xid;
+  }
+}
 static std::unordered_map<uint64_t, std::array<uint8_t, 16>> xnet_key_registry;
+// The key id the title registered last, as its raw guest bytes: titles name
+// their session members by it.
+static std::optional<std::array<uint8_t, 8>> xnet_last_registered_key_id;
 
 std::array<uint8_t, 6> SyntheticEthernetAddress(uint32_t address) {
   // The XNet address is the stable peer key available to this API. Preserve
@@ -389,7 +419,7 @@ bool TryCompleteRecvFrom(PendingRecvFrom& pending, bool wait) {
       ioctlsocket(static_cast<SOCKET>(diagnostic_operation.handle()), FIONREAD, &available) == 0 &&
       available != 0 && !pending.readiness_logged) {
     pending.readiness_logged = true;
-    REXKRNL_INFO(
+    if (REXCVAR_GET(net_packet_trace)) REXKRNL_INFO(
         "NetDll_WSARecvFrom: native datagram ready socket={:08X} native={} bytes={} "
         "overlapped={:08X}",
         pending.socket_handle, socket->native_handle(), available, pending.overlapped_ptr);
@@ -401,7 +431,7 @@ bool TryCompleteRecvFrom(PendingRecvFrom& pending, bool wait) {
   uint32_t native_from_length = sizeof(XSOCKADDR_IN);
   if (!pending.native_call_logged) {
     pending.native_call_logged = true;
-    REXKRNL_INFO(
+    if (REXCVAR_GET(net_packet_trace)) REXKRNL_INFO(
         "NetDll_WSARecvFrom: native receive socket={:08X} native={} flags={:#x} "
         "buffer_count=1 buffer_length={} from_length={} overlapped={:08X}",
         pending.socket_handle, socket->native_handle(), pending.flags, pending.buffer_length,
@@ -446,7 +476,7 @@ bool TryCompleteRecvFrom(PendingRecvFrom& pending, bool wait) {
   }
   pending.complete = true;
   const auto* payload = memory->TranslateVirtual(pending.buffer_ptr);
-  REXKRNL_INFO(
+  if (REXCVAR_GET(net_packet_trace)) REXKRNL_INFO(
       "NetDll_WSARecvFrom: completed overlapped receive socket={:08X} overlapped={:08X} "
       "bytes={} source={:08X}:{} from_length={} flags=0 event={:08X} "
       "prefix={:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
@@ -671,7 +701,7 @@ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_
       pending_recvs[pending.overlapped_ptr] = pending;
     }
     EnsurePendingRecvPump();
-    REXKRNL_INFO(
+    if (REXCVAR_GET(net_packet_trace)) REXKRNL_INFO(
         "NetDll_WSARecvFrom: queued overlapped receive socket={:08X} overlapped={:08X} "
         "buffer={:08X} length={} flags_ptr={:08X} flags_initial={:#x} from={:08X} "
         "from_length={:08X} "
@@ -754,7 +784,7 @@ u32 NetDll_WSAGetOverlappedResult_entry(u32 caller, u32 socket_handle,
   *bytes_transferred = pending.transferred;
   if (flags_ptr)
     *flags_ptr = pending.completion_flags;
-  REXKRNL_INFO(
+  if (REXCVAR_GET(net_packet_trace)) REXKRNL_INFO(
       "NetDll_WSAGetOverlappedResult: completed socket={:08X} overlapped={:08X} bytes={}",
       socket_handle, overlapped_ptr.guest_address(), pending.transferred);
   XThread::SetLastError(0);
@@ -1070,7 +1100,7 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
       return failed(kWsaFault, "send_guest_range");
     }
   }
-  REXKRNL_INFO(
+  if (REXCVAR_GET(net_packet_trace)) REXKRNL_INFO(
       "NetDll_WSASendTo: socket={:08X} destination={:08X}:{} bytes={} overlapped={:08X}",
       socket_handle, uint32_t(native_to.sin_addr), uint16_t(native_to.sin_port), result,
       overlapped.guest_address());
@@ -1198,9 +1228,33 @@ u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
   if (!addr_ptr) {
     return XnAddrStatus::XNET_GET_XNADDR_NONE;
   }
-  addr_ptr->ina.s_addr = LanDiscoveryService::DetermineLanIpv4();
+  uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
+  const uint32_t lan = LanDiscoveryService::DetermineLanIpv4();
+  addr_ptr->ina.s_addr = lan;
   addr_ptr->inaOnline.s_addr = addr_ptr->ina.s_addr;
   addr_ptr->wPortOnline = 3074;
+  // A joiner that reaches its host over a public route is known to every other
+  // member by its directory-assigned logical address, not its home-network one.
+  const auto self = rex::system::xam::GameplaySelfLogicalAddress(xuid);
+  if (self) {
+    addr_ptr->ina.s_addr = self->ipv4;
+    addr_ptr->inaOnline.s_addr = self->ipv4;
+    addr_ptr->wPortOnline = self->port;
+  }
+  {
+    // Diagnostics: when the title asks, and which address it was given.
+    static std::mutex logged_mutex;
+    static uint32_t logged_address = 0;
+    static uint32_t calls = 0;
+    std::lock_guard lock(logged_mutex);
+    ++calls;
+    if (logged_address != addr_ptr->ina.s_addr) {
+      logged_address = addr_ptr->ina.s_addr;
+      REXKRNL_INFO("XNetGetTitleXnAddr: caller={:08X} reported {:08X}{} (lan {:08X}) call={}",
+                   uint32_t(caller), ntohl(addr_ptr->ina.s_addr),
+                   self ? " gameplay logical" : "", ntohl(lan), calls);
+    }
+  }
 
   // TODO(gibbed): A proper mac address.
   // RakNet's 360 version appears to depend on abEnet to create "random" 64-bit
@@ -1213,7 +1267,6 @@ u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
   // https://github.com/facebookarchive/RakNet/blob/master/Source/RakPeer.cpp#L4467
   // "Mac address is a poor solution because you can't have multiple connections
   // from the same system"
-  uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
   const auto identity = rex::system::xam::ReconstructXnAddrIdentity(xuid);
   std::memcpy(addr_ptr->abEnet, identity.ethernet_address.data(),
               identity.ethernet_address.size());
@@ -1287,6 +1340,7 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
     std::memcpy(identity.ethernet_address.data(), xn_addr->abEnet, identity.ethernet_address.size());
     std::memcpy(identity.online_address.data(), xn_addr->abOnline, identity.online_address.size());
     if (auto peer = GameplayXnAddrToLogical(session_id, identity)) {
+      RecordGameplayTitleXid(*peer, xid.host_address());
       std::memcpy(in_addr.host_address(), &peer->logical.ipv4, sizeof(uint32_t));
       return 0;
     }
@@ -1295,9 +1349,9 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
   if (IsGameplayLogicalAddress(address)) {
     // A third player's XNADDR arrives from the host already carrying the
     // directory-assigned logical address; GameplayLogicalToXnAddr refuses
-    // ambiguous matches. An XID naming another session still fails for an
-    // XNADDR this runtime built itself; one rebuilt by the host (identity bytes
-    // differ) is accepted on the unique logical match, with the XIDs logged.
+    // ambiguous matches. The title's XID for other members need not equal the
+    // runtime's peer session id, so a unique current logical match resolves
+    // whatever the XID says; a mismatch is only logged.
     auto peer = GameplayLogicalToXnAddr(address);
     if (peer && xid && std::memcmp(xid.host_address(), peer->session_id.data(),
                                    peer->session_id.size()) != 0) {
@@ -1312,10 +1366,10 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
       }
       REXKRNL_WARN("XNetXnAddrToInAddr: logical {:08X} title xid {:016X} differs from peer session {:016X} ({})",
                    ntohl(address), title_xid, peer_session,
-                   own_identity ? "rejected, runtime-built address" : "accepted, host-built address");
-      if (own_identity) peer.reset();
+                   own_identity ? "accepted, runtime-built address" : "accepted, host-built address");
     }
     if (peer) {
+      if (xid) RecordGameplayTitleXid(*peer, xid.host_address());
       std::memcpy(in_addr.host_address(), &peer->logical.ipv4, sizeof(uint32_t));
       return 0;
     }
@@ -1346,7 +1400,37 @@ u32 NetDll_XNetInAddrToXnAddr_entry(u32 caller, u32 address, ppc_ptr_t<XNADDR> x
     const auto identity = ReconstructXnAddrIdentity(peer->xuid);
     std::memcpy(xn_addr->abEnet, identity.ethernet_address.data(), identity.ethernet_address.size());
     std::memcpy(xn_addr->abOnline, identity.online_address.data(), identity.online_address.size());
-    if (xid) std::memcpy(xid.host_address(), peer->session_id.data(), peer->session_id.size());
+    if (xid) {
+      auto session = peer->session_id;
+      {
+        std::lock_guard lock(xnet_registry_mutex);
+        auto found = gameplay_title_xids.find(peer->logical.ipv4);
+        if (found != gameplay_title_xids.end() && found->second.xuid == peer->xuid &&
+            found->second.session == peer->session_id) {
+          session = found->second.xid;
+        } else if (auto title = gameplay_session_title_xids.find(GameplaySessionKey(peer->session_id));
+                   title != gameplay_session_title_xids.end()) {
+          session = title->second;
+        } else if (peer->xuid != peer->host_xuid && xnet_last_registered_key_id) {
+          // A member the title has not named yet (a newcomer that reached it
+          // first): titles key other members by their registered session key.
+          session = *xnet_last_registered_key_id;
+        }
+      }
+      if (session != peer->session_id) {
+        static std::unordered_map<uint32_t, uint64_t> logged;
+        std::lock_guard lock(xnet_registry_mutex);
+        if (logged.size() > 64) logged.clear();
+        if (logged[peer->logical.ipv4] != GameplaySessionKey(session)) {
+          logged[peer->logical.ipv4] = GameplaySessionKey(session);
+          REXKRNL_INFO("XNetInAddrToXnAddr: logical {:08X} reported with title xid {:016X} "
+                       "instead of peer session {:016X}",
+                       ntohl(peer->logical.ipv4), GameplaySessionKey(session),
+                       GameplaySessionKey(peer->session_id));
+        }
+      }
+      std::memcpy(xid.host_address(), session.data(), session.size());
+    }
     return 0;
   }
   if (IsGameplayLogicalAddress(htonl(address))) return 0x2741;
@@ -1371,6 +1455,9 @@ u32 NetDll_XNetRegisterKey_entry(u32 caller, mapped_void key_id, mapped_void key
   std::memcpy(value.data(), key.host_address(), value.size());
   std::lock_guard lock(xnet_registry_mutex);
   xnet_key_registry[LoadKeyId(key_id)] = value;
+  std::array<uint8_t, 8> raw_key_id{};
+  std::memcpy(raw_key_id.data(), key_id.host_address(), raw_key_id.size());
+  xnet_last_registered_key_id = raw_key_id;
   return 0;
 }
 u32 NetDll_XNetReplaceKey_entry(u32 caller, mapped_void key_id, mapped_void key) {

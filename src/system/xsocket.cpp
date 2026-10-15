@@ -14,8 +14,12 @@
 #include <chrono>
 #include <cstring>
 #include <vector>
+#include <mutex>
+#include <string_view>
+#include <unordered_map>
 
 #include <rex/kernel/xam/module.h>
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
 #include <rex/system/kernel_state.h>
@@ -51,7 +55,71 @@
 #endif
 #endif
 
+REXCVAR_DEFINE_BOOL(net_packet_trace, false, "Network",
+                    "Log every guest network send/receive and the first small title messages "
+                    "per link (diagnostics; very noisy)");
+
 namespace rex::system {
+namespace {
+// Inbound gameplay datagrams the runtime refuses are otherwise invisible: a
+// title only sees its peer go quiet. Log each (socket, reason, source) at most
+// twice a second, with how many were refused since the last line.
+void LogGameplayReceiveDrop(uint64_t socket, std::string_view reason, xam::LanAddress source,
+                            std::optional<xam::LanAddress> logical, size_t bytes) {
+  struct Entry { std::chrono::steady_clock::time_point last{}; uint32_t suppressed = 0; };
+  static std::mutex mutex;
+  static std::unordered_map<std::string, Entry> entries;
+  const auto key = std::to_string(socket) + ":" + std::string(reason) + ":" +
+                   std::to_string(source.ipv4) + ":" + std::to_string(source.port);
+  const auto now = std::chrono::steady_clock::now();
+  uint32_t suppressed = 0;
+  {
+    std::lock_guard lock(mutex);
+    if (entries.size() > 256) entries.clear();
+    auto& entry = entries[key];
+    if (entry.last != std::chrono::steady_clock::time_point{} &&
+        now - entry.last < std::chrono::milliseconds(500)) {
+      ++entry.suppressed;
+      return;
+    }
+    suppressed = entry.suppressed;
+    entry = {now, 0};
+  }
+  REXSYS_WARN("GAMEPLAY_RX_DROP socket={} reason={} native={:08X}:{} logical={:08X}:{} bytes={} "
+              "suppressed={}",
+              socket, reason, ntohl(source.ipv4), source.port,
+              logical ? ntohl(logical->ipv4) : 0u, logical ? logical->port : 0, bytes, suppressed);
+}
+
+// Diagnostics: the first small title messages on each gameplay link, in full.
+// Titles end links over a few short control messages; their bytes show why.
+void LogGameplayTitlePayload(uint64_t socket, std::string_view direction, xam::LanAddress logical,
+                             const uint8_t* data, size_t bytes) {
+  constexpr size_t kMaximumBytes = 64;
+  constexpr uint32_t kMaximumPerLink = 40;
+  if (!REXCVAR_GET(net_packet_trace) || !data || bytes > kMaximumBytes) return;
+  static std::mutex mutex;
+  static std::unordered_map<std::string, uint32_t> counts;
+  {
+    std::lock_guard lock(mutex);
+    if (counts.size() > 256) counts.clear();
+    auto& count = counts[std::to_string(socket) + ":" + std::string(direction) + ":" +
+                         std::to_string(logical.ipv4)];
+    if (count >= kMaximumPerLink) return;
+    ++count;
+  }
+  static constexpr char kHex[] = "0123456789ABCDEF";
+  std::string hex;
+  hex.reserve(bytes * 2);
+  for (size_t i = 0; i < bytes; ++i) {
+    hex.push_back(kHex[data[i] >> 4]);
+    hex.push_back(kHex[data[i] & 15]);
+  }
+  REXSYS_INFO("GAMEPLAY_TITLE_PAYLOAD socket={} {} logical={:08X}:{} bytes={} data={}", socket,
+              direction, ntohl(logical.ipv4), logical.port, bytes, hex);
+}
+}  // namespace
+
 
 namespace {
 int ClosedNativeSocket() {
@@ -212,6 +280,7 @@ std::optional<std::vector<uint8_t>> ProtectedGameplayWire(uint64_t socket,
   }
   auto wire = xam::SealGameplayDatagram(socket, logical, staged);
   if (!wire) FailSocket(EWOULDBLOCK);
+  else LogGameplayTitlePayload(socket, "tx", logical, staged.data(), staged.size());
   return wire;
 }
 #endif
@@ -1037,6 +1106,8 @@ retry_native_receive:
   }
   if (ret >= 0 && xam::NatProbeIsPendingGameplaySource(handle,
           {nfrom.sin_addr.s_addr, ntohs(nfrom.sin_port)})) {
+    LogGameplayReceiveDrop(handle, "pending_source", {nfrom.sin_addr.s_addr, ntohs(nfrom.sin_port)},
+                           std::nullopt, size_t(ret));
     if (!reject_datagram()) return -1;
     goto retry_native_receive;
   }
@@ -1048,6 +1119,7 @@ retry_native_receive:
   if (ret >= 0) {
     logical = xam::NatProbeNormalizeGameplaySource(handle, native_source);
     if (scoped && !logical) {
+      LogGameplayReceiveDrop(handle, "no_logical_source", native_source, std::nullopt, size_t(ret));
       if (!reject_datagram()) return -1;
       goto retry_native_receive;
     }
@@ -1058,12 +1130,24 @@ retry_native_receive:
         !xam::OpenGameplayDatagram(handle, *logical,
             std::span<const uint8_t>(receive_data, size_t(ret)), authenticated_plaintext,
             !(flags & MSG_PEEK))) {
+      LogGameplayReceiveDrop(handle,
+          logical ? xam::GameplayOpenFailureReason(handle, *logical) : "no_logical_source",
+          native_source, logical, size_t(ret));
       if (!reject_datagram()) return -1;
       goto retry_native_receive;
     }
     // Authentication and replay admission precede any guest-visible bytes.
     ret = int(authenticated_plaintext.size());
     receive_data = authenticated_plaintext.data();
+    if (!(flags & MSG_PEEK))
+      LogGameplayTitlePayload(handle, "rx", *logical, authenticated_plaintext.data(),
+                              authenticated_plaintext.size());
+    if (xam::GameplayHoldUntilTitleJoined(handle, *logical, authenticated_plaintext)) {
+      LogGameplayReceiveDrop(handle, "member_not_joined_by_title", native_source, logical,
+                             authenticated_plaintext.size());
+      if (!reject_datagram()) return -1;
+      goto retry_native_receive;
+    }
   }
   if (ret > 0 && uint32_t(ret) > buf_len) {
     // Preserve ordinary Winsock-style truncation, but scoped errors expose no bytes.
@@ -1251,6 +1335,31 @@ int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
               );
 }
 
+namespace {
+// GAMEPLAY_ROUTE_DIAG: at most one unroutable-send line per socket per second.
+void LogUnroutableGameplaySend(uint64_t handle, const sockaddr_in& requested,
+                               std::optional<xam::LanAddress> logical, std::string_view reason) {
+  static std::mutex mutex;
+  static std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> last;
+  {
+    std::lock_guard lock(mutex);
+    const auto now = std::chrono::steady_clock::now();
+    auto& at = last[handle];
+    if (at != std::chrono::steady_clock::time_point{} && now - at < std::chrono::seconds(1)) return;
+    at = now;
+  }
+  if (logical)
+    REXSYS_INFO("GAMEPLAY_ROUTE_DIAG send_unroutable socket={} requested={:08X}:{} "
+                "logical={:08X}:{} reason={}",
+                handle, ntohl(requested.sin_addr.s_addr), ntohs(requested.sin_port),
+                ntohl(logical->ipv4), logical->port, reason);
+  else
+    REXSYS_INFO("GAMEPLAY_ROUTE_DIAG send_unroutable socket={} requested={:08X}:{} "
+                "logical=none reason={}",
+                handle, ntohl(requested.sin_addr.s_addr), ntohs(requested.sin_port), reason);
+}
+}  // namespace
+
 int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* to,
                     uint32_t to_len) {
   const auto operation = AcquireNativeLease();
@@ -1311,6 +1420,9 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
           {nto.sin_addr.s_addr, uint16_t(to->sin_port)});
       auto peer = logical ? xam::NatProbeGameplayDestination(handle, *logical) : std::nullopt;
       if (!peer && (logical || xam::IsGameplayLogicalAddress(nto.sin_addr.s_addr))) {
+        LogUnroutableGameplaySend(handle, nto, logical,
+            logical ? xam::NatProbeGameplayDestinationReason(handle, *logical)
+                    : std::string_view("no_logical_destination"));
 #if REX_PLATFORM_WIN32
         WSASetLastError(WSAEWOULDBLOCK);
 #else
@@ -1353,7 +1465,11 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
       protected_logical = xam::NatProbeNormalizeGameplaySource(handle,
           {nto.sin_addr.s_addr, ntohs(nto.sin_port)});
     }
-    if (!protected_logical) { FailSocket(EWOULDBLOCK); return -1; }
+    if (!protected_logical) {
+      if (to) LogUnroutableGameplaySend(handle, nto, std::nullopt, "no_logical_destination");
+      FailSocket(EWOULDBLOCK);
+      return -1;
+    }
     auto wire = ProtectedGameplayWire(handle, *protected_logical, buf, buf_len);
     if (!wire) return -1;
     if (operation.retired()) return ClosedNativeSocket();

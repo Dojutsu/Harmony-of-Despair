@@ -21,6 +21,11 @@
 #include <rex/system/xobject.h>
 #include <rex/types.h>
 
+#include <rex/cvar.h>
+
+// Per-packet network diagnostics (off by default).
+REXCVAR_DECLARE(bool, net_packet_trace);
+
 namespace rex::system {
 
 struct XSOCKADDR {

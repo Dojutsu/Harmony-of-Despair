@@ -14,6 +14,7 @@
 
 #include <rex/kernel/xam/apps/xgi_app.h>
 #include <rex/logging.h>
+#include <rex/system/xam/gameplay_traversal.h>
 #include <rex/system/xam/session.h>
 #include <rex/system/xam/session_arbitration_guest.h>
 #include <rex/memory/mapping_lease.h>
@@ -613,6 +614,9 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
           return X_E_SUCCESS;
         }
       }
+      if (!is_local)
+        for (const auto& member : members)
+          rex::system::xam::RecordTitleJoinedRemote(session->info.id, member.xuid);
       if (!is_local ||
           session->host_xuid == kernel_state_->user_profile()->xuid())
         return kernel_state_->session_manager()->registry().JoinBatch(session,
@@ -629,8 +633,10 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       REXKRNL_INFO(
           "XGISessionJoinLocal: requesting LAN join xuid={:016X} host={:016X}",
           xuid, session->host_xuid);
+      // Two round trips (join, then confirmation); relayed cellular paths
+      // need several hundred milliseconds for each.
       auto updated = kernel_state_->session_manager()->discovery().Join(
-          *session, member, 500);
+          *session, member, 2000);
       if (!updated) {
         REXKRNL_WARN("INVITE_DIAG XGI_JOIN_RESULT=FAIL_NETWORK_OR_HOST_ADMISSION private_request={}",
                      member.private_slot);

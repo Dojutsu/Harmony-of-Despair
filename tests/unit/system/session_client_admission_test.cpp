@@ -1152,6 +1152,49 @@ TEST_CASE("authoritative failures and expiry remove the candidate",
         ClientAdmissionResponseDisposition::kInvalidate);
 }
 
+TEST_CASE("host completion after readiness keeps the admission for join completion",
+          "[session][directory][client-admission]") {
+  const auto start = Clock::time_point(std::chrono::seconds(100));
+  auto exact = ExactDiscovery();
+  auto completed = [](const char* reason) {
+    DirectoryAdmissionState terminal = Admission(1, true);
+    terminal.phase = "terminal";
+    terminal.admission_expires_in_ms = 0;
+    terminal.host_ready = false;
+    terminal.terminal_reason = reason;
+    return terminal;
+  };
+  SECTION("completed after ready is the success path") {
+    ClientAdmissionLeaseState state;
+    REQUIRE(state.BindExactDiscovery(kUser, kToken, kTitle, kLocalXuid, InviteAttempt(), exact));
+    REQUIRE(ApplyArm(state, Admission(), start) == ClientAdmissionApplyResult::kApplied);
+    REQUIRE(ApplyStatus(state, Admission(1, true), start) == ClientAdmissionApplyResult::kApplied);
+    CHECK(ApplyStatus(state, completed("completed"), start + std::chrono::milliseconds(300)) ==
+          ClientAdmissionApplyResult::kApplied);
+    CHECK(state.bound());
+    CHECK(state.host_completed());
+    CHECK(state.ReadyCandidate(kTitle, kLocalXuid, start + std::chrono::milliseconds(400)));
+    CHECK(state.NextAction(start + std::chrono::milliseconds(400)) == ClientAdmissionAction::kNone);
+  }
+  SECTION("completed before ready still invalidates") {
+    ClientAdmissionLeaseState state;
+    REQUIRE(state.BindExactDiscovery(kUser, kToken, kTitle, kLocalXuid, InviteAttempt(), exact));
+    REQUIRE(ApplyArm(state, Admission(), start) == ClientAdmissionApplyResult::kApplied);
+    CHECK(ApplyStatus(state, completed("completed"), start) ==
+          ClientAdmissionApplyResult::kInvalidated);
+    CHECK_FALSE(state.bound());
+  }
+  SECTION("revoked after ready still invalidates") {
+    ClientAdmissionLeaseState state;
+    REQUIRE(state.BindExactDiscovery(kUser, kToken, kTitle, kLocalXuid, InviteAttempt(), exact));
+    REQUIRE(ApplyArm(state, Admission(), start) == ClientAdmissionApplyResult::kApplied);
+    REQUIRE(ApplyStatus(state, Admission(1, true), start) == ClientAdmissionApplyResult::kApplied);
+    CHECK(ApplyStatus(state, completed("revoked"), start) ==
+          ClientAdmissionApplyResult::kInvalidated);
+    CHECK_FALSE(state.bound());
+  }
+}
+
 TEST_CASE("arm and renewal responses cannot claim host readiness",
           "[session][directory][client-admission]") {
   const auto start = Clock::time_point(std::chrono::seconds(100));
