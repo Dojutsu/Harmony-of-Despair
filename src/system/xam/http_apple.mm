@@ -3,7 +3,9 @@
 // proxy for loopback HTTP, bounded response size), but with cellular-sized
 // timeouts and reused sessions: a fresh DNS + TCP + TLS setup on a phone's
 // cellular link regularly takes longer than the desktop's 1 s budget. The lobby
-// list (the one request a player waits on to see games) gets the longest limit.
+// list (what a player waits on to see games) and the gameplay claim/status/sync
+// calls (which keep in-game authorization and the host's group lease alive) get
+// the longest limit.
 
 #import <Foundation/Foundation.h>
 
@@ -37,9 +39,17 @@ bool AppleHttpRequest(const std::string& url, const std::string& method, std::st
 
     // Loopback HTTP is a local-only testing exception; never route it through a proxy.
     const bool plain_http = [ns_url.scheme isEqualToString:@"http"];
-    // The searchable lobby listing is what Quick/Custom Search waits on.
+    // The searchable lobby listing is what Quick/Custom Search waits on; the
+    // gameplay claim/status/revoke POSTs renew a live player's authorization and
+    // the host's sync POST renews the group lease (both on directory workers).
     const bool lobby_list = method == "GET" && url.find("searchable=1") != std::string::npos;
-    // [scheme][limit]: index bit 0 = plain HTTP, bit 1 = lobby list.
+    const bool gameplay_claim = method == "POST" &&
+        (url.find("/gameplay/claim") != std::string::npos ||
+         url.find("/gameplay/status") != std::string::npos ||
+         url.find("/gameplay/revoke") != std::string::npos ||
+         url.find("/gameplay/sync") != std::string::npos);
+    const bool long_limit = lobby_list || gameplay_claim;
+    // [scheme][limit]: index bit 0 = plain HTTP, bit 1 = long limit.
     static NSURLSession* sessions[4] = {};
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -62,7 +72,7 @@ bool AppleHttpRequest(const std::string& url, const std::string& method, std::st
                                                delegateQueue:nil];
       }
     });
-    NSURLSession* session = sessions[(plain_http ? 1 : 0) | (lobby_list ? 2 : 0)];
+    NSURLSession* session = sessions[(plain_http ? 1 : 0) | (long_limit ? 2 : 0)];
 
     NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:ns_url];
     request.HTTPMethod = [NSString stringWithUTF8String:method.c_str()];
