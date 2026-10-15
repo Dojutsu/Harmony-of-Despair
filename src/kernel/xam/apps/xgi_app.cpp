@@ -16,6 +16,7 @@
 #include <rex/kernel/xam/apps/xgi_app.h>
 #include <rex/logging.h>
 #include <rex/system/xam/gameplay_traversal.h>
+#include <rex/system/xam/title_presence.h>
 #include <rex/system/xam/session.h>
 #include <rex/system/xam/session_arbitration_guest.h>
 #include <rex/memory/mapping_lease.h>
@@ -39,6 +40,9 @@ bool InitializeEmptyStatsReadResults(std::span<uint8_t> results) {
 using namespace rex::system;
 
 namespace {
+constexpr uint32_t kContextPresence = 0x8001;  // X_CONTEXT_PRESENCE
+std::atomic<uint32_t> title_presence{0};
+
 // Session calls the title makes around a join, logged for the first few uses of
 // each call site so a short log shows what the title asked for.
 #define SESSION_CALL_DIAG(format, ...)                                     \
@@ -387,8 +391,10 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                     context_value);
       REXKRNL_INFO("XGIUserSetContextEx: user={} id={:08X} value={:08X}", user_index,
                    context_id, context_value);
-      if (user_index == 0)
+      if (user_index == 0) {
         rex::system::xam::SetDirectoryListingContext(context_id, context_value);
+        if (context_id == kContextPresence) title_presence.store(context_value);
+      }
       return X_E_SUCCESS;
     }
     case 0x000B0007: {
@@ -1196,3 +1202,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
 }  // namespace xam
 }  // namespace kernel
 }  // namespace rex
+
+namespace rex::system::xam {
+uint32_t TitlePresenceContext() { return rex::kernel::xam::apps::title_presence.load(); }
+}  // namespace rex::system::xam
