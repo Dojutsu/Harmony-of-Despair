@@ -483,9 +483,14 @@ TEST_CASE("XNet entries round trip admission aliases with exact session and XUID
     CHECK(session_id==session->info.id);
     CHECK(std::equal(input.begin()+10,input.end(),inverse.begin()+10));
     CHECK(inverse[8]==3);CHECK(inverse[9]==232); // guest port 1000, big endian
+    // Joiners in 3+ player lobbies hand back other members' runtime-built
+    // addresses with an XID that differs from the peer session id; the unique
+    // logical address must still resolve.
     auto wrong=session->info.id;wrong[0]^=1;
+    address=0;
     CHECK(NetDll_XNetXnAddrToInAddr_entry(1,ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(inverse.data())),
-        mapped_void::from_host(wrong.data()),mapped_void::from_host(&address))!=0);
+        mapped_void::from_host(wrong.data()),mapped_void::from_host(&address))==0);
+    CHECK(address==peer.logical.ipv4);
     // The host relays a third player's address with its own identity bytes;
     // the unique logical address still resolves, with or without an XID.
     auto relayed=inverse;std::fill(relayed.begin()+10,relayed.end(),uint8_t(0x5A));

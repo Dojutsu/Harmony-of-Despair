@@ -1286,9 +1286,9 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
   if (IsGameplayLogicalAddress(address)) {
     // A third player's XNADDR arrives from the host already carrying the
     // directory-assigned logical address; GameplayLogicalToXnAddr refuses
-    // ambiguous matches. An XID naming another session still fails for an
-    // XNADDR this runtime built itself; one rebuilt by the host (identity bytes
-    // differ) is accepted on the unique logical match, with the XIDs logged.
+    // ambiguous matches. The title's XID for other members need not equal the
+    // runtime's peer session id, so a unique current logical match resolves
+    // whatever the XID says; a mismatch is only logged.
     auto peer = GameplayLogicalToXnAddr(address);
     if (peer && xid && std::memcmp(xid.host_address(), peer->session_id.data(),
                                    peer->session_id.size()) != 0) {
@@ -1303,8 +1303,7 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
       }
       REXKRNL_WARN("XNetXnAddrToInAddr: logical {:08X} title xid {:016X} differs from peer session {:016X} ({})",
                    ntohl(address), title_xid, peer_session,
-                   own_identity ? "rejected, runtime-built address" : "accepted, host-built address");
-      if (own_identity) peer.reset();
+                   own_identity ? "accepted, runtime-built address" : "accepted, host-built address");
     }
     if (peer) {
       std::memcpy(in_addr.host_address(), &peer->logical.ipv4, sizeof(uint32_t));
