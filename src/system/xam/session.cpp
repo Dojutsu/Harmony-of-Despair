@@ -16,6 +16,7 @@
 #include <rex/system/kernel_state.h>
 #include <rex/thread.h>
 #include <rex/system/xam/nat_probe.h>
+#include <rex/system/xam/gameplay_traversal.h>
 
 #if REX_PLATFORM_GNU_LINUX
 #include <openssl/evp.h>
@@ -2109,9 +2110,13 @@ LanDiscoveryService::DiscoverConfiguredInvite(
                                             responding))
         continue;
       decoded->discovery_address = responding;
-      if (!candidate->lan)
+      if (!candidate->lan) {
+        // The title keeps the advertised endpoint; remember it for this host only.
+        RecordAdvertisedHostAddress(decoded->info.id, decoded->host_xuid,
+                                    decoded->info.host_address);
         decoded->info.host_address = {authoritative_ipv4.s_addr,
                                       endpoint->gameplay_port};
+      }
       decoded->traversal_session_id = attempt.session_id;
       decoded->traversal_attempt_id = attempt.attempt_id;
       decoded->traversal_capability = attempt.capability;

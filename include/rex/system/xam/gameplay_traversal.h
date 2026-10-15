@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <memory>
 #include <optional>
@@ -61,6 +62,12 @@ void RevokeGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
 bool GameplayAuthorizationCurrent(const std::shared_ptr<SessionRecord>& session,
                                    uint64_t local_xuid, std::string_view member_nonce);
 bool IsAuthorizedGameplaySocket(uint64_t socket);
+// A public (cellular/relay) route replaces SessionInfo::host_address with the
+// host's public endpoint, but the title keeps addressing the host by the
+// endpoint it was advertised (listing / XNADDR). Recorded once, at that rewrite,
+// for exactly this session and host; it only ever names this joiner's host peer.
+void RecordAdvertisedHostAddress(const std::array<uint8_t, 8>& xbox_session, uint64_t host_xuid,
+                                 LanAddress advertised);
 // Returns an exact peer alias; an unknown/expired scoped destination has no route.
 std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress requested);
 // The address the guest last used to reach this logical peer, when it differs.

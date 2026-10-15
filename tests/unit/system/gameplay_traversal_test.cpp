@@ -1237,3 +1237,61 @@ TEST_CASE("gameplay link reaches its peer through a real relay server", "[.relay
 }
 #endif
 }
+namespace rex::system::xam {
+TEST_CASE("public-route joiner reaches its host through the advertised LAN address", "[gameplay][session][network]") {
+  // On a cellular/relay (public) route the joiner's SessionInfo::host_address is
+  // the host's public endpoint, while the title keeps sending to the LAN
+  // endpoint it was advertised in the listing.
+  const LanAddress advertised{htonl(0x0A000030),30742};
+  const LanAddress public_host{htonl(0xC6336402),30742};  // TEST-NET-2
+  SessionRegistry registry;
+  auto session=registry.Create(1,"Host",public_host,1,3,3);
+  auto binding=std::make_shared<const GameplayAdmissionBinding>(GameplayAdmissionBinding{
+      "gameplay-test",std::string(32,'a'),std::string(32,'b')});
+  {
+    std::lock_guard lock(*session->mutex);
+    for(auto& member:session->members) member.local=false;
+    session->members.push_back({2,"Joiner",0,true,false,false,binding});
+  }
+  GameplayAuthorization auth;
+  auth.directory_session="gameplay-test"; auth.xbox_session=session->info.id;
+  auth.host_xuid=1; auth.xuid=2;
+  auth.admission_attempt=binding->attempt_id; auth.admission_generation=binding->admission_generation;
+  auth.member_nonce=std::string(32,'1'); auth.member_capability=std::string(32,'2');
+  auth.logical={htonl(0xf0000002),1000}; auth.expires_at=Clock::now()+std::chrono::seconds(40);
+  GameplayPeerAuthorization host;
+  host.traffic_key.fill(1); // Public deterministic test material only.
+  host.xuid=1; host.member_nonce=std::string(32,'3');
+  host.admission_attempt=std::string(32,'c'); host.admission_generation=std::string(32,'d');
+  host.logical={htonl(0xf0000001),1000};
+  host.traversal={std::string(32,'4'),std::string(32,'5'),"127.0.0.1",39188,0};
+  auth.peers.push_back(host);
+  Udp socket;socket.Attach();
+  REQUIRE(InstallGameplayAuthorization(session,auth));
+  REQUIRE(BindGameplaySocket(session,2,uint64_t(socket.socket),1000));
+  const LanAddress native{htonl(INADDR_LOOPBACK),42010};
+  auto registration=Registered(host,native);
+  REQUIRE(NatProbeConsume(socket.socket,registration.data(),56,htonl(INADDR_LOOPBACK),39188));
+  auto ack=Registered(host,native,4);
+  REQUIRE(NatProbeConsume(socket.socket,ack.data(),56,native.ipv4,native.port));
+  REQUIRE(NatProbeGameplayDestination(socket.socket,host.logical)==native);
+
+  // Without the recorded advertised endpoint the LAN address has no route.
+  CHECK_FALSE(GameplayLogicalDestination(socket.socket,{advertised.ipv4,1000}));
+  // Another host or session never lends its advertised address.
+  RecordAdvertisedHostAddress(session->info.id,9,advertised);
+  auto other_session=session->info.id;other_session[0]^=1;
+  RecordAdvertisedHostAddress(other_session,1,advertised);
+  CHECK_FALSE(GameplayLogicalDestination(socket.socket,{advertised.ipv4,1000}));
+
+  RecordAdvertisedHostAddress(session->info.id,1,advertised);
+  CHECK(GameplayLogicalDestination(socket.socket,{advertised.ipv4,1000})==host.logical);
+  CHECK(GameplayLogicalDestination(socket.socket,{advertised.ipv4,advertised.port})==host.logical);
+  CHECK(GameplayGuestSourceAlias(socket.socket,host.logical)==advertised.ipv4);
+  // Only the exact advertised address and port (or the guest port) resolve.
+  CHECK_FALSE(GameplayLogicalDestination(socket.socket,{htonl(0x0A000031),1000}));
+  CHECK_FALSE(GameplayLogicalDestination(socket.socket,{advertised.ipv4,4444}));
+  // The public endpoint keeps working as before.
+  CHECK(GameplayLogicalDestination(socket.socket,{public_host.ipv4,1000})==host.logical);
+}
+}

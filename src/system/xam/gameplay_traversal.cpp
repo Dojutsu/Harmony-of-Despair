@@ -2,6 +2,7 @@
 #include <rex/system/xam/private_lan_invitation.h>
 
 #include <algorithm>
+#include <map>
 #include <mutex>
 #include <set>
 #include <unordered_map>
@@ -601,6 +602,23 @@ bool IsAuthorizedGameplaySocket(uint64_t socket) {
   });
 }
 
+namespace {
+// Advertised host endpoints recorded at the public-route rewrite, keyed by the
+// exact Xbox session and host. Guarded by gameplay_mutex; bounded.
+std::map<std::pair<std::array<uint8_t, 8>, uint64_t>, LanAddress> advertised_hosts;
+constexpr size_t kMaximumAdvertisedHosts = 64;
+}  // namespace
+
+void RecordAdvertisedHostAddress(const std::array<uint8_t, 8>& xbox_session, uint64_t host_xuid,
+                                 LanAddress advertised) {
+  if (!host_xuid || !advertised.ipv4) return;
+  std::lock_guard lock(gameplay_mutex);
+  if (advertised_hosts.size() >= kMaximumAdvertisedHosts &&
+      !advertised_hosts.contains({xbox_session, host_xuid}))
+    advertised_hosts.clear();
+  advertised_hosts.insert_or_assign({xbox_session, host_xuid}, advertised);
+}
+
 std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress requested) {
   std::lock_guard lock(gameplay_mutex);
   Reap();
@@ -609,7 +627,18 @@ std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress
     auto session = scope.session.lock();
     if (!session) return std::nullopt;
     LanAddress original_host;
-    { std::lock_guard session_lock(*session->mutex); original_host = session->info.host_address; }
+    std::optional<LanAddress> advertised_host;
+    {
+      std::lock_guard session_lock(*session->mutex);
+      original_host = session->info.host_address;
+      const auto found = advertised_hosts.find({session->info.id, session->host_xuid});
+      if (found != advertised_hosts.end()) advertised_host = found->second;
+    }
+    // The advertised endpoint names only this joiner's host, at its exact
+    // advertised address and either its advertised port or the guest port.
+    const bool advertised_match = advertised_host && scope.xuid != session->host_xuid &&
+        requested.ipv4 == advertised_host->ipv4 &&
+        (requested.port == advertised_host->port || requested.port == scope.guest_port);
     if (!Current(scope)) {
       static std::unordered_map<uint64_t, Clock::time_point> last_logged;  // gameplay_mutex
       if (RouteDiagDue(last_logged, socket))
@@ -621,6 +650,7 @@ std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress
       // handshake through an unauthenticated endpoint fallback.
       if (scope.xuid != session->host_xuid && requested.ipv4 == original_host.ipv4)
         return requested;
+      if (advertised_match) return LanAddress{advertised_host->ipv4, requested.port};
       continue;
     }
     for (const auto& peer : scope.authorization.peers) {
@@ -630,8 +660,10 @@ std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress
       // Its exact host endpoint remains a valid initial destination for this
       // client only; it is never a fallback for another member or session.
       const bool initial_host = scope.xuid != scope.authorization.host_xuid &&
-          peer.xuid == scope.authorization.host_xuid && requested.ipv4 == original_host.ipv4 &&
-          (requested.port == scope.guest_port || requested.port == original_host.port);
+          peer.xuid == scope.authorization.host_xuid &&
+          ((requested.ipv4 == original_host.ipv4 &&
+            (requested.port == scope.guest_port || requested.port == original_host.port)) ||
+           (advertised_match && session->host_xuid == scope.authorization.host_xuid));
       if (exact_alias) scope.tables->guest_aliases.erase(peer.logical.ipv4);
       else if (initial_host) scope.tables->guest_aliases[peer.logical.ipv4] = requested.ipv4;
       if (exact_alias || initial_host) return LanAddress{peer.logical.ipv4, scope.guest_port};
