@@ -629,8 +629,10 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       REXKRNL_INFO(
           "XGISessionJoinLocal: requesting LAN join xuid={:016X} host={:016X}",
           xuid, session->host_xuid);
+      // Two round trips (join, then confirmation); relayed cellular paths
+      // need several hundred milliseconds for each.
       auto updated = kernel_state_->session_manager()->discovery().Join(
-          *session, member, 500);
+          *session, member, 2000);
       if (!updated) {
         REXKRNL_WARN("INVITE_DIAG XGI_JOIN_RESULT=FAIL_NETWORK_OR_HOST_ADMISSION private_request={}",
                      member.private_slot);

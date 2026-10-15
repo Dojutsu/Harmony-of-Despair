@@ -3048,7 +3048,12 @@ class SessionDirectoryClient::Impl {
           if (found->second.socket_owner) found->second.socket_owner->cancelled = true;
           client_admission_cancellations.push_back(cancellation_before_apply);
           client_admissions.erase(found);
-          REXSYS_WARN("Session directory: authoritative client admission state invalidated");
+          REXSYS_WARN("Session directory: authoritative client admission state invalidated "
+                      "action={} status={} phase={} host_ready={} revision={}",
+                      static_cast<int>(operation.action),
+                      response.status ? int64_t(*response.status) : int64_t(-1),
+                      admission ? admission->phase : std::string("<none>"),
+                      admission && admission->host_ready, admission ? admission->lease_revision : 0);
         }
     }
   }
