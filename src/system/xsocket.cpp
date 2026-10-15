@@ -81,6 +81,34 @@ void LogGameplayReceiveDrop(uint64_t socket, std::string_view reason, xam::LanAd
               socket, reason, ntohl(source.ipv4), source.port,
               logical ? ntohl(logical->ipv4) : 0u, logical ? logical->port : 0, bytes, suppressed);
 }
+
+// Diagnostics: the first small title messages on each gameplay link, in full.
+// Titles end links over a few short control messages; their bytes show why.
+void LogGameplayTitlePayload(uint64_t socket, std::string_view direction, xam::LanAddress logical,
+                             const uint8_t* data, size_t bytes) {
+  constexpr size_t kMaximumBytes = 64;
+  constexpr uint32_t kMaximumPerLink = 40;
+  if (!data || bytes > kMaximumBytes) return;
+  static std::mutex mutex;
+  static std::unordered_map<std::string, uint32_t> counts;
+  {
+    std::lock_guard lock(mutex);
+    if (counts.size() > 256) counts.clear();
+    auto& count = counts[std::to_string(socket) + ":" + std::string(direction) + ":" +
+                         std::to_string(logical.ipv4)];
+    if (count >= kMaximumPerLink) return;
+    ++count;
+  }
+  static constexpr char kHex[] = "0123456789ABCDEF";
+  std::string hex;
+  hex.reserve(bytes * 2);
+  for (size_t i = 0; i < bytes; ++i) {
+    hex.push_back(kHex[data[i] >> 4]);
+    hex.push_back(kHex[data[i] & 15]);
+  }
+  REXSYS_INFO("GAMEPLAY_TITLE_PAYLOAD socket={} {} logical={:08X}:{} bytes={} data={}", socket,
+              direction, ntohl(logical.ipv4), logical.port, bytes, hex);
+}
 }  // namespace
 
 
@@ -140,6 +168,7 @@ std::optional<std::vector<uint8_t>> ProtectedGameplayWire(uint64_t socket,
   }
   auto wire = xam::SealGameplayDatagram(socket, logical, staged);
   if (!wire) FailSocket(EWOULDBLOCK);
+  else LogGameplayTitlePayload(socket, "tx", logical, staged.data(), staged.size());
   return wire;
 }
 #endif
@@ -891,6 +920,9 @@ retry_native_receive:
     // Authentication and replay admission precede any guest-visible bytes.
     ret = int(authenticated_plaintext.size());
     receive_data = authenticated_plaintext.data();
+    if (!(flags & MSG_PEEK))
+      LogGameplayTitlePayload(handle, "rx", *logical, authenticated_plaintext.data(),
+                              authenticated_plaintext.size());
   }
   if (ret > 0 && uint32_t(ret) > buf_len) {
     // Preserve ordinary Winsock-style truncation, but scoped errors expose no bytes.

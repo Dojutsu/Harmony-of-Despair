@@ -1219,9 +1219,33 @@ u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
   if (!addr_ptr) {
     return XnAddrStatus::XNET_GET_XNADDR_NONE;
   }
-  addr_ptr->ina.s_addr = LanDiscoveryService::DetermineLanIpv4();
+  uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
+  const uint32_t lan = LanDiscoveryService::DetermineLanIpv4();
+  addr_ptr->ina.s_addr = lan;
   addr_ptr->inaOnline.s_addr = addr_ptr->ina.s_addr;
   addr_ptr->wPortOnline = 3074;
+  // A joiner that reaches its host over a public route is known to every other
+  // member by its directory-assigned logical address, not its home-network one.
+  const auto self = rex::system::xam::GameplaySelfLogicalAddress(xuid);
+  if (self) {
+    addr_ptr->ina.s_addr = self->ipv4;
+    addr_ptr->inaOnline.s_addr = self->ipv4;
+    addr_ptr->wPortOnline = self->port;
+  }
+  {
+    // Diagnostics: when the title asks, and which address it was given.
+    static std::mutex logged_mutex;
+    static uint32_t logged_address = 0;
+    static uint32_t calls = 0;
+    std::lock_guard lock(logged_mutex);
+    ++calls;
+    if (logged_address != addr_ptr->ina.s_addr) {
+      logged_address = addr_ptr->ina.s_addr;
+      REXKRNL_INFO("XNetGetTitleXnAddr: caller={:08X} reported {:08X}{} (lan {:08X}) call={}",
+                   uint32_t(caller), ntohl(addr_ptr->ina.s_addr),
+                   self ? " gameplay logical" : "", ntohl(lan), calls);
+    }
+  }
 
   // TODO(gibbed): A proper mac address.
   // RakNet's 360 version appears to depend on abEnet to create "random" 64-bit
@@ -1234,7 +1258,6 @@ u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
   // https://github.com/facebookarchive/RakNet/blob/master/Source/RakPeer.cpp#L4467
   // "Mac address is a poor solution because you can't have multiple connections
   // from the same system"
-  uint64_t xuid = REX_KERNEL_STATE()->user_profile()->xuid();
   const auto identity = rex::system::xam::ReconstructXnAddrIdentity(xuid);
   std::memcpy(addr_ptr->abEnet, identity.ethernet_address.data(),
               identity.ethernet_address.size());

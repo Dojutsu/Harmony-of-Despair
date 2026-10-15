@@ -672,6 +672,23 @@ std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress
   return std::nullopt;
 }
 
+std::optional<LanAddress> GameplaySelfLogicalAddress(uint64_t local_xuid) {
+  std::lock_guard lock(gameplay_mutex);
+  Reap();
+  for (const auto& scope : scopes) {
+    if (scope.xuid != local_xuid || !Current(scope) ||
+        scope.xuid == scope.authorization.host_xuid ||
+        !IsGameplayLogicalAddress(scope.authorization.logical.ipv4))
+      continue;
+    auto session = scope.session.lock();
+    if (!session) continue;
+    std::lock_guard session_lock(*session->mutex);
+    if (advertised_hosts.contains({session->info.id, session->host_xuid}))
+      return scope.authorization.logical;
+  }
+  return std::nullopt;
+}
+
 std::optional<uint32_t> GameplayGuestSourceAlias(uint64_t socket, LanAddress logical) {
   std::lock_guard lock(gameplay_mutex);
   for (const auto& scope : scopes) {

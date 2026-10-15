@@ -1210,6 +1210,21 @@ TEST_CASE("gameplay links fall back to the relay quickly", "[gameplay][network][
   NatProbeTickAt(fixture.socket.socket,start+std::chrono::milliseconds(450));
   CHECK(fixture.Peer()==fixture.relay);
 }
+TEST_CASE("a same-house gameplay peer keeps the longer relay delay", "[gameplay][network][relay]") {
+  // The server saw this side at the peer's public address: both are behind the
+  // same home router, whose home-network candidates need the full budget.
+  RelayFixture fixture;
+  auto registration=RegisteredWithRelay(fixture.auth.peers[0],fixture.direct,fixture.relay.port);
+  std::memcpy(registration.data()+40,&fixture.direct.ipv4,4);
+  const auto observed_port=htons(41000);std::memcpy(registration.data()+44,&observed_port,2);
+  REQUIRE(NatProbeConsume(fixture.socket.socket,registration.data(),56,htonl(INADDR_LOOPBACK),39188));
+  const auto start=Clock::now();
+  NatProbeTickAt(fixture.socket.socket,start);
+  NatProbeTickAt(fixture.socket.socket,start+std::chrono::milliseconds(450));
+  CHECK(fixture.Peer()==fixture.direct);
+  NatProbeTickAt(fixture.socket.socket,start+std::chrono::milliseconds(1100));
+  CHECK(fixture.Peer()==fixture.relay);
+}
 TEST_CASE("a late direct packet after the relay switch is answered through the relay", "[gameplay][network][relay]") {
   Udp relay_socket;
   RelayFixture fixture;
@@ -1403,13 +1418,19 @@ TEST_CASE("public-route joiner reaches its host through the advertised LAN addre
 
   // Without the recorded advertised endpoint the LAN address has no route.
   CHECK_FALSE(GameplayLogicalDestination(socket.socket,{advertised.ipv4,1000}));
+  // A joiner on a home-network route keeps reporting its own LAN address.
+  CHECK_FALSE(GameplaySelfLogicalAddress(2));
   // Another host or session never lends its advertised address.
   RecordAdvertisedHostAddress(session->info.id,9,advertised);
   auto other_session=session->info.id;other_session[0]^=1;
   RecordAdvertisedHostAddress(other_session,1,advertised);
   CHECK_FALSE(GameplayLogicalDestination(socket.socket,{advertised.ipv4,1000}));
 
+  CHECK_FALSE(GameplaySelfLogicalAddress(2));
   RecordAdvertisedHostAddress(session->info.id,1,advertised);
+  // On the public route the joiner reports the logical address the others know it by.
+  CHECK(GameplaySelfLogicalAddress(2)==auth.logical);
+  CHECK_FALSE(GameplaySelfLogicalAddress(1));
   CHECK(GameplayLogicalDestination(socket.socket,{advertised.ipv4,1000})==host.logical);
   CHECK(GameplayLogicalDestination(socket.socket,{advertised.ipv4,advertised.port})==host.logical);
   CHECK(GameplayGuestSourceAlias(socket.socket,host.logical)==advertised.ipv4);

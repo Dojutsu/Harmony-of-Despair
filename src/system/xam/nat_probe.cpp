@@ -869,10 +869,14 @@ void NatProbeTickLocked(uint64_t socket, State& state,
       if (attempt.peer_known_at == std::chrono::steady_clock::time_point{} &&
           attempt.endpoint.peer().port)
         attempt.peer_known_at = now;
+      // A peer behind this side's own public address is in the same house: its
+      // home-network candidates need the full discovery budget to answer.
+      const bool behind_same_public = attempt.observed.ipv4 &&
+          attempt.endpoint.peer().ipv4 == attempt.observed.ipv4;
       if (!attempt.relayed && !attempt.same_network_peer && attempt.endpoint.peer().port &&
           !attempt.endpoint.acknowledged() &&
           now - attempt.peer_known_at >=
-              std::chrono::milliseconds(state.role == NatProbeRole::kGameplay
+              std::chrono::milliseconds(state.role == NatProbeRole::kGameplay && !behind_same_public
                                             ? REXCVAR_GET(nat_gameplay_relay_after_ms)
                                             : REXCVAR_GET(nat_relay_after_ms)))
         SwitchToRelay(attempt, state.role, "direct_unacknowledged");

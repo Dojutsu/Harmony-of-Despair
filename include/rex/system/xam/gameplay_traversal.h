@@ -68,6 +68,10 @@ bool IsAuthorizedGameplaySocket(uint64_t socket);
 // for exactly this session and host; it only ever names this joiner's host peer.
 void RecordAdvertisedHostAddress(const std::array<uint8_t, 8>& xbox_session, uint64_t host_xuid,
                                  LanAddress advertised);
+// The logical address the other members know this joiner by, while it reaches
+// its host over a public route. The title reports it as its own address; the
+// host keeps its advertised address, which is how its joiners know it.
+std::optional<LanAddress> GameplaySelfLogicalAddress(uint64_t local_xuid);
 // Returns an exact peer alias; an unknown/expired scoped destination has no route.
 std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress requested);
 // The address the guest last used to reach this logical peer, when it differs.
