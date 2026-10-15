@@ -15,9 +15,17 @@
 
 #include <SDL3/SDL.h>
 
+#include <rex/cvar.h>
 #include <rex/logging.h>
 
+REXCVAR_DEFINE_BOOL(touch_haptics, true, "Input",
+                    "Tap feedback when an on-screen touch button is pressed");
+
 namespace rex::input::touch {
+
+// A light tap through the platform's haptics (touch_haptics_ios.mm).
+void HapticTap();
+
 namespace {
 
 constexpr DeviceId kTouchDevice = static_cast<DeviceId>(0x544F5543);  // "TOUC"
@@ -65,12 +73,18 @@ constexpr float kStickZoneTop = 0.22f;
 // Slightly bigger than drawn, since a thumb covers part of what it presses.
 constexpr float kHitSlop = 1.25f;
 constexpr int kMaxFingers = 10;
+// The menu D-pad: fixed at the stick's home position; a press is read as one
+// of eight directions, with a small dead centre.
+constexpr float kDpadRadius = 0.15f;
+constexpr float kDpadDeadZone = 0.25f;  // of the radius
 
 struct Finger {
   SDL_FingerID id = 0;
   bool active = false;
   bool on_stick = false;
   int button = -1;  // index into the layout, -1 for none
+  bool on_dpad = false;
+  uint16_t dpad = 0;  // directions held, in D-pad mode
 };
 
 struct State {
@@ -83,6 +97,7 @@ struct State {
   float inset_top = 0.0f;
   float inset_bottom = 0.0f;
   Finger fingers[kMaxFingers];
+  bool dpad_mode = true;  // until the title reports a stage being played
   bool stick_active = false;
   float stick_x = 0.0f;  // base, height units
   float stick_y = 0.0f;
@@ -167,6 +182,32 @@ bool GamepadConnected() {
   return count > 0;
 }
 
+// D-pad directions (X_INPUT_GAMEPAD_DPAD_* bits) for a press at (x, y), with
+// the centre at the stick's home position. Callers hold the state lock.
+float DpadCentreX(const State& s) { return s.inset_left + kStickHomeX; }
+float DpadCentreY(const State& s) {
+  return s.inset_top + kStickHomeY * (1.0f - s.inset_top - s.inset_bottom);
+}
+uint16_t DpadDirections(const State& s, float x, float y) {
+  const float dx = (x - DpadCentreX(s)) / kDpadRadius;
+  const float dy = (y - DpadCentreY(s)) / kDpadRadius;
+  if (dx * dx + dy * dy < kDpadDeadZone * kDpadDeadZone) return 0;
+  // Eight sectors of 45 degrees: a diagonal press holds both directions.
+  const float angle = std::atan2(-dy, dx);  // screen y grows downwards
+  const int sector = static_cast<int>(std::lround(angle / (3.14159265f / 4.0f))) & 7;
+  static constexpr uint16_t kSectors[8] = {
+      X_INPUT_GAMEPAD_DPAD_RIGHT,
+      X_INPUT_GAMEPAD_DPAD_RIGHT | X_INPUT_GAMEPAD_DPAD_UP,
+      X_INPUT_GAMEPAD_DPAD_UP,
+      X_INPUT_GAMEPAD_DPAD_UP | X_INPUT_GAMEPAD_DPAD_LEFT,
+      X_INPUT_GAMEPAD_DPAD_LEFT,
+      X_INPUT_GAMEPAD_DPAD_LEFT | X_INPUT_GAMEPAD_DPAD_DOWN,
+      X_INPUT_GAMEPAD_DPAD_DOWN,
+      X_INPUT_GAMEPAD_DPAD_DOWN | X_INPUT_GAMEPAD_DPAD_RIGHT,
+  };
+  return kSectors[sector];
+}
+
 void UpdateKnob(State& s, float x, float y) {
   float dx = (x - s.stick_x) / kStickRadius;
   float dy = (y - s.stick_y) / kStickRadius;
@@ -211,8 +252,16 @@ bool SDLCALL OnSdlEvent(void*, SDL_Event* event) {
     *finger = Finger{id, true, false, -1};
     const auto placed = PlaceButtons(s);
     finger->button = HitButton(placed, x, y);
-    if (finger->button < 0 && !s.stick_active && x < s.aspect * 0.5f &&
-        y > s.inset_top + kStickZoneTop * (1.0f - s.inset_top - s.inset_bottom)) {
+    const bool left_zone =
+        x < s.aspect * 0.5f &&
+        y > s.inset_top + kStickZoneTop * (1.0f - s.inset_top - s.inset_bottom);
+    if (finger->button >= 0) {
+      if (REXCVAR_GET(touch_haptics)) HapticTap();
+    } else if (left_zone && s.dpad_mode) {
+      finger->on_dpad = true;
+      finger->dpad = DpadDirections(s, x, y);
+      if (finger->dpad && REXCVAR_GET(touch_haptics)) HapticTap();
+    } else if (left_zone && !s.stick_active) {
       finger->on_stick = true;
       s.stick_active = true;
       s.stick_x = x;
@@ -222,9 +271,15 @@ bool SDLCALL OnSdlEvent(void*, SDL_Event* event) {
   } else if (motion && finger) {
     if (finger->on_stick) {
       UpdateKnob(s, x, y);
+    } else if (finger->on_dpad) {
+      const uint16_t dpad = DpadDirections(s, x, y);
+      if (dpad && dpad != finger->dpad && REXCVAR_GET(touch_haptics)) HapticTap();
+      finger->dpad = dpad;
     } else {
       // Sliding a thumb across the face buttons moves the press with it.
-      finger->button = HitButton(PlaceButtons(s), x, y);
+      const int button = HitButton(PlaceButtons(s), x, y);
+      if (button >= 0 && button != finger->button && REXCVAR_GET(touch_haptics)) HapticTap();
+      finger->button = button;
     }
   } else if (up && finger) {
     if (finger->on_stick) {
@@ -241,6 +296,23 @@ int16_t AxisValue(float v) {
 }
 
 }  // namespace
+
+void SetTitlePresence(uint32_t value) {
+  const bool playing = value == 4 || value == 5;
+  State& s = state();
+  std::lock_guard lock(s.mutex);
+  if (s.dpad_mode != playing) return;
+  s.dpad_mode = !playing;
+  // Fingers already down keep what they were doing until they lift, except
+  // that a held stick or D-pad stops so nothing stays pressed across the switch.
+  for (auto& f : s.fingers) {
+    if (f.on_stick || f.on_dpad) f = Finger{};
+  }
+  s.stick_active = false;
+  s.knob_dx = s.knob_dy = 0.0f;
+  REXLOG_INFO("Touch controls: {} (title presence {})", playing ? "analog stick" : "D-pad",
+              value);
+}
 
 OverlaySnapshot GetOverlaySnapshot(float aspect) {
   OverlaySnapshot snapshot;
@@ -261,6 +333,22 @@ OverlaySnapshot GetOverlaySnapshot(float aspect) {
       if (f.active && f.button == static_cast<int>(i)) control.pressed = true;
     }
     snapshot.buttons.push_back(control);
+  }
+  if (s.dpad_mode) {
+    snapshot.dpad = true;
+    snapshot.stick_base.x = DpadCentreX(s) / aspect;
+    snapshot.stick_base.y = DpadCentreY(s);
+    snapshot.stick_base.radius = kDpadRadius;
+    uint16_t held = 0;
+    for (const auto& f : s.fingers) {
+      if (f.active && f.on_dpad) held |= f.dpad;
+    }
+    snapshot.stick_base.pressed = held != 0;
+    snapshot.dpad_up = held & X_INPUT_GAMEPAD_DPAD_UP;
+    snapshot.dpad_down = held & X_INPUT_GAMEPAD_DPAD_DOWN;
+    snapshot.dpad_left = held & X_INPUT_GAMEPAD_DPAD_LEFT;
+    snapshot.dpad_right = held & X_INPUT_GAMEPAD_DPAD_RIGHT;
+    return snapshot;
   }
   snapshot.stick_base.x = (s.stick_active ? s.stick_x : s.inset_left + kStickHomeX) / aspect;
   snapshot.stick_base.y =
@@ -313,6 +401,7 @@ X_RESULT TouchInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state)
     const auto placed = PlaceButtons(s);
     uint16_t buttons = 0;
     for (const auto& f : s.fingers) {
+      if (f.active && f.on_dpad) buttons |= f.dpad;
       if (!f.active || f.button < 0) continue;
       const auto& b = placed[f.button];
       if (b.kind == Kind::kLeftTrigger) pad.left_trigger = 0xFF;

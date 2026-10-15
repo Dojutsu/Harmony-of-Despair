@@ -31,11 +31,21 @@ struct OverlaySnapshot {
   float knob_x = 0.0f;
   float knob_y = 0.0f;
   std::vector<OverlayControl> buttons;
+  // Menus show a fixed D-pad where the stick would be; `stick_base` is then its
+  // centre and these are the directions currently held.
+  bool dpad = false;
+  bool dpad_up = false, dpad_down = false, dpad_left = false, dpad_right = false;
 };
 
 // Hidden while a gamepad is connected; the touch device then reports a
 // neutral state so it never fights the controller.
 OverlaySnapshot GetOverlaySnapshot(float aspect);
+
+// The title's rich-presence context (X_CONTEXT_PRESENCE, 0x8001). Harmony of
+// Despair reports 4 and 5 while a stage is being played and other values in its
+// menus and lobbies; the left control is an analog stick in the former and a
+// D-pad in the latter.
+void SetTitlePresence(uint32_t value);
 
 class TouchInputDriver final : public InputDriver {
  public:

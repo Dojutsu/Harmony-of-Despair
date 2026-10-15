@@ -13,6 +13,10 @@
 #include <unordered_set>
 
 #include <rex/kernel/xam/apps/xgi_app.h>
+#include <rex/platform.h>
+#if REX_PLATFORM_IOS
+#include <rex/input/touch/touch_input_driver.h>
+#endif
 #include <rex/logging.h>
 #include <rex/system/xam/gameplay_traversal.h>
 #include <rex/system/xam/session.h>
@@ -380,6 +384,11 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                    context_id, context_value);
       if (user_index == 0)
         rex::system::xam::SetDirectoryListingContext(context_id, context_value);
+#if REX_PLATFORM_IOS
+      // X_CONTEXT_PRESENCE tells the touch controls whether a stage is being played.
+      if (user_index == 0 && context_id == 0x00008001)
+        rex::input::touch::SetTitlePresence(context_value);
+#endif
       return X_E_SUCCESS;
     }
     case 0x000B0007: {

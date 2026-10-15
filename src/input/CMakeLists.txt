@@ -37,7 +37,8 @@ else()
 endif()
 
 if(IOS)
-    target_sources(rexinput PRIVATE touch/touch_input_driver.cpp)
+    target_sources(rexinput PRIVATE touch/touch_input_driver.cpp touch/touch_haptics_ios.mm)
+    target_link_libraries(rexinput PRIVATE "-framework UIKit")
 endif()
 
 target_link_libraries(rexinput PUBLIC rexcore rexui SDL3::SDL3)

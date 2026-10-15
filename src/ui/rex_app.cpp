@@ -89,11 +89,39 @@ class TouchControlsOverlay final : public rex::ui::ImGuiDialog {
     const auto& base = snapshot.stick_base;
     const ImVec2 centre(base.x * w, base.y * h);
     const float radius = base.radius * h;
-    draw->AddCircleFilled(centre, radius, IM_COL32(255, 255, 255, 25), 48);
-    draw->AddCircle(centre, radius, outline, 48, 2.0f);
-    draw->AddCircleFilled(
-        ImVec2(centre.x + snapshot.knob_x * radius, centre.y + snapshot.knob_y * radius),
-        radius * 0.45f, fill(base.pressed), 32);
+    if (snapshot.dpad) {
+      // A cross of four arms; the held directions light up.
+      const float arm = radius * 0.36f;  // half the arm's width
+      const struct {
+        float dx, dy;
+        bool held;
+      } arms[] = {{0, -1, snapshot.dpad_up},
+                  {0, 1, snapshot.dpad_down},
+                  {-1, 0, snapshot.dpad_left},
+                  {1, 0, snapshot.dpad_right}};
+      for (const auto& a : arms) {
+        const ImVec2 lo(centre.x + (a.dx ? a.dx * arm : -arm), centre.y + (a.dy ? a.dy * arm : -arm));
+        const ImVec2 hi(centre.x + (a.dx ? a.dx * radius : arm), centre.y + (a.dy ? a.dy * radius : arm));
+        const ImVec2 min(std::min(lo.x, hi.x), std::min(lo.y, hi.y));
+        const ImVec2 max(std::max(lo.x, hi.x), std::max(lo.y, hi.y));
+        draw->AddRectFilled(min, max, fill(a.held), arm * 0.4f);
+        draw->AddRect(min, max, outline, arm * 0.4f, 0, 2.0f);
+        // An arrowhead near the arm's end.
+        const ImVec2 tip(centre.x + a.dx * radius * 0.82f, centre.y + a.dy * radius * 0.82f);
+        const ImVec2 back(centre.x + a.dx * radius * 0.55f, centre.y + a.dy * radius * 0.55f);
+        const ImVec2 side(a.dy * arm * 0.6f, a.dx * arm * 0.6f);
+        draw->AddTriangleFilled(tip, ImVec2(back.x + side.x, back.y + side.y),
+                                ImVec2(back.x - side.x, back.y - side.y), label);
+      }
+      draw->AddRectFilled(ImVec2(centre.x - arm, centre.y - arm),
+                          ImVec2(centre.x + arm, centre.y + arm), IM_COL32(255, 255, 255, 40));
+    } else {
+      draw->AddCircleFilled(centre, radius, IM_COL32(255, 255, 255, 25), 48);
+      draw->AddCircle(centre, radius, outline, 48, 2.0f);
+      draw->AddCircleFilled(
+          ImVec2(centre.x + snapshot.knob_x * radius, centre.y + snapshot.knob_y * radius),
+          radius * 0.45f, fill(base.pressed), 32);
+    }
 
     for (const auto& button : snapshot.buttons) {
       const ImVec2 at(button.x * w, button.y * h);
