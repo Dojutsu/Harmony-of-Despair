@@ -1075,6 +1075,13 @@ std::array<uint8_t,56> RegisteredWithRelay(const GameplayPeerAuthorization& peer
   auto port=htons(relay_port);std::memcpy(bytes.data()+52,&port,2);
   return bytes;
 }
+// Pins the gameplay relay delay for one test, so the real-time probe pump
+// cannot switch to the relay before the test's own simulated ticks expect it.
+struct GameplayRelayDelay {
+  uint32_t previous=REXCVAR_GET(nat_gameplay_relay_after_ms);
+  explicit GameplayRelayDelay(uint32_t value) { REXCVAR_SET(nat_gameplay_relay_after_ms,value); }
+  ~GameplayRelayDelay() { REXCVAR_SET(nat_gameplay_relay_after_ms,previous); }
+};
 struct RelayFixture {
   SessionRegistry registry;
   std::shared_ptr<SessionRecord> session=registry.Create(1,"Host",{htonl(INADDR_LOOPBACK),30742},1,3,3);
@@ -1099,6 +1106,7 @@ struct RelayFixture {
 };
 }
 TEST_CASE("unacknowledged direct gameplay path falls back to the server relay", "[gameplay][network][relay]") {
+  GameplayRelayDelay delay(1000);
   RelayFixture fixture;
   REQUIRE(fixture.Offer(fixture.relay.port));
   NatProbeTickAt(fixture.socket.socket,Clock::now());
@@ -1116,6 +1124,7 @@ TEST_CASE("unacknowledged direct gameplay path falls back to the server relay", 
   CHECK(NatProbeNormalizeGameplaySource(fixture.socket.socket,fixture.relay)==fixture.auth.peers[0].logical);
 }
 TEST_CASE("relay registration and punches reach the assigned relay port", "[gameplay][network][relay]") {
+  GameplayRelayDelay delay(1000);
   Udp relay_socket;
   RelayFixture fixture;
   fixture.relay=relay_socket.address;
@@ -1148,6 +1157,81 @@ TEST_CASE("peer punch from the relay address switches this side to the relay", "
   auto stray=Registered(other.auth.peers[0],{other.relay.ipv4,30999},3);
   CHECK_FALSE(NatProbeIsControlPacket(other.socket.socket,stray.data(),56,other.relay.ipv4,30999));
   CHECK(other.Peer()==other.direct);
+}
+TEST_CASE("gameplay links fall back to the relay quickly", "[gameplay][network][relay]") {
+  // Same-house candidates answer well inside the default delay.
+  CHECK(REXCVAR_GET(nat_gameplay_relay_after_ms)==400);
+  CHECK(REXCVAR_GET(nat_relay_after_ms)==1000);
+  RelayFixture fixture;
+  REQUIRE(fixture.Offer(fixture.relay.port));
+  const auto start=Clock::now();
+  NatProbeTickAt(fixture.socket.socket,start);
+  NatProbeTickAt(fixture.socket.socket,start+std::chrono::milliseconds(450));
+  CHECK(fixture.Peer()==fixture.relay);
+}
+TEST_CASE("a late direct packet after the relay switch is answered through the relay", "[gameplay][network][relay]") {
+  Udp relay_socket;
+  RelayFixture fixture;
+  fixture.relay=relay_socket.address;
+  REQUIRE(fixture.Offer(fixture.relay.port));
+  const auto start=Clock::now();
+  NatProbeTickAt(fixture.socket.socket,start);
+  NatProbeTickAt(fixture.socket.socket,start+std::chrono::milliseconds(450));
+  REQUIRE(fixture.Peer()==fixture.relay);
+  auto drain=[&] {
+    std::array<uint8_t,64> bytes{};
+    while(recv(relay_socket.socket,reinterpret_cast<char*>(bytes.data()),int(bytes.size()),0)>0) {}
+  };
+  auto receive=[&](uint8_t type) {
+    for(int i=0;i<50;++i) {
+      std::array<uint8_t,64> bytes{};
+      const auto count=recv(relay_socket.socket,reinterpret_cast<char*>(bytes.data()),int(bytes.size()),0);
+      if(count==56&&std::memcmp(bytes.data(),"HNAT",4)==0&&bytes[5]==type) return true;
+      if(count<0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return false;
+  };
+  drain();
+  // The peer has not switched yet: its direct punch is answered with an ack
+  // through the relay, which makes it switch as well.
+  auto punch=Registered(fixture.auth.peers[0],fixture.direct,3);
+  CHECK(NatProbeIsControlPacket(fixture.socket.socket,punch.data(),56,fixture.direct.ipv4,fixture.direct.port));
+  REQUIRE(NatProbeConsume(fixture.socket.socket,punch.data(),56,fixture.direct.ipv4,fixture.direct.port));
+  CHECK(receive(4));
+  CHECK(fixture.Peer()==fixture.relay);
+  drain();
+  auto ack=Registered(fixture.auth.peers[0],fixture.direct,4);
+  CHECK(NatProbeIsControlPacket(fixture.socket.socket,ack.data(),56,fixture.direct.ipv4,fixture.direct.port));
+  REQUIRE(NatProbeConsume(fixture.socket.socket,ack.data(),56,fixture.direct.ipv4,fixture.direct.port));
+  CHECK(receive(3));
+  CHECK(fixture.Peer()==fixture.relay);
+  CHECK_FALSE(NatProbeGameplayDestination(fixture.socket.socket,fixture.auth.peers[0].logical));
+  // Any other source is still refused.
+  auto stray=Registered(fixture.auth.peers[0],{fixture.direct.ipv4,43001},3);
+  CHECK_FALSE(NatProbeIsControlPacket(fixture.socket.socket,stray.data(),56,fixture.direct.ipv4,43001));
+}
+TEST_CASE("an unacknowledged relay link refreshes its relay registration quickly", "[gameplay][network][relay]") {
+  Udp relay_socket;
+  RelayFixture fixture;
+  fixture.relay=relay_socket.address;
+  REQUIRE(fixture.Offer(fixture.relay.port));
+  auto count_registrations=[&] {
+    int found=0;
+    for(int i=0;i<20;++i) {
+      std::array<uint8_t,64> bytes{};
+      const auto count=recv(relay_socket.socket,reinterpret_cast<char*>(bytes.data()),int(bytes.size()),0);
+      if(count==56&&std::memcmp(bytes.data(),"HNAT",4)==0&&bytes[5]==1) ++found;
+      if(count<0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return found;
+  };
+  const auto start=Clock::now();
+  NatProbeTickAt(fixture.socket.socket,start);
+  NatProbeTickAt(fixture.socket.socket,start+std::chrono::milliseconds(450));
+  REQUIRE(fixture.Peer()==fixture.relay);
+  count_registrations();
+  NatProbeTickAt(fixture.socket.socket,start+std::chrono::milliseconds(750));
+  CHECK(count_registrations()>=1);  // A 1 s refresh would send none here.
 }
 TEST_CASE("no relay offer or disabled relay keeps the direct path", "[gameplay][network][relay]") {
   {

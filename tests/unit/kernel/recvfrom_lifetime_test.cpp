@@ -942,7 +942,7 @@ static void RunPendingProtectedSends(KernelState* kernel) {
   Check(NetDll_WSASendTo_entry(1,sender_handle,buffer,1,bytes,0,to,16,expired,nullptr)==uint32_t(-1)&&XThread::GetLastError()==997,"pending-send timeout admitted");
   const auto timeout_started=std::chrono::steady_clock::now();
   Check(NetDll_WSAGetOverlappedResult_entry(1,sender_handle,expired,bytes,1,flags)==0&&XThread::GetLastError()==10060,"pending-send finite timeout result");
-  Check(std::chrono::steady_clock::now()-timeout_started>=std::chrono::seconds(4)&&std::chrono::steady_clock::now()-timeout_started<std::chrono::seconds(7),"pending-send timeout is real and bounded");
+  Check(std::chrono::steady_clock::now()-timeout_started>=std::chrono::seconds(9)&&std::chrono::steady_clock::now()-timeout_started<std::chrono::seconds(12),"pending-send timeout is real and bounded");
   Check(uint32_t(*bytes)==0x7a7b7c7d&&uint32_t(expired->internal)!=0&&uint32_t(expired->internal_high)==0,"pending-send timeout preserves initiation bytes");
   // Revoked guest output is rechecked; completion cannot fault or overwrite it.
   const auto revoked_page=memory->SystemHeapAlloc(4096);Check(revoked_page!=0,"pending-send revoked allocation");

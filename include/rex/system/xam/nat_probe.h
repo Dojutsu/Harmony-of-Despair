@@ -19,6 +19,7 @@ namespace rex::system::xam {
 
 REXCVAR_DECLARE(bool, nat_relay_enabled);
 REXCVAR_DECLARE(uint32_t, nat_relay_after_ms);
+REXCVAR_DECLARE(uint32_t, nat_gameplay_relay_after_ms);
 
 enum class NatProbeRole : uint8_t { kDiscovery = 0, kGameplay = 1 };
 

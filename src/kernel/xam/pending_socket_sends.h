@@ -212,7 +212,9 @@ uint32_t QueuePendingSend(KernelState* state, uint32_t handle, object_ref<XSocke
   op->socket_handle = handle; op->overlapped = address; op->identity = identity;
   op->flags = flags; op->payload = std::move(payload); op->admitted_bytes = op->payload.size();
   op->has_destination = destination != nullptr; if (destination) op->destination = *destination;
-  op->deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  // A joiner's first send can wait on its directory claim and then on a relay
+  // fallback; on a cellular link those together routinely pass 5 s.
+  op->deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
   if (identity.event_handle) {
     op->event = state->object_table()->LookupObject<XEvent>(identity.event_handle);
     if (!op->event) return 10022;
