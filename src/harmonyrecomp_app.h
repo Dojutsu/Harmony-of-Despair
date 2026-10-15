@@ -119,6 +119,8 @@ class HarmonyrecompApp : public rex::ReXApp {
               rex::cvar::SetFlagByName("user_name", choice.name);
               rex::cvar::SetFlagByName("user_xuid", std::to_string(choice.xuid));
               rex::cvar::SetFlagByName("lan_online", "true");
+              // Registered on iPhone/iPad only; elsewhere this is a no-op.
+              rex::cvar::SetFlagByName("touch_haptics", choice.touch_haptics ? "true" : "false");
               // Linux and macOS cannot bind the title's guest port 1000 without root;
               // use the same fixed ports as the Windows launcher unless the
               // launch settings chose others (several devices behind one router).

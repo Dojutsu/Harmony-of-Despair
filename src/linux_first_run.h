@@ -41,6 +41,7 @@ struct StartChoice {
   std::string name;
   uint64_t xuid = 0;
   std::string invite_code;  // empty: Play; six characters: join that game
+  bool touch_haptics = true;  // iPhone/iPad: tap feedback from the touch controls
 };
 
 // Start screen (player name, Play, join by invite code). Name and player id

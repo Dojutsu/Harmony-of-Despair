@@ -647,6 +647,7 @@ uint64_t NewXuid() {
 struct StartSettings {
   std::string name;
   uint64_t xuid = 0;
+  bool touch_haptics = true;
 };
 
 StartSettings LoadSettings(const fs::path& file) {
@@ -659,6 +660,7 @@ StartSettings LoadSettings(const fs::path& file) {
     const auto key = line.substr(0, eq), value = line.substr(eq + 1);
     if (key == "name" && ValidName(value)) settings.name = value;
     if (key == "xuid") settings.xuid = std::strtoull(value.c_str(), nullptr, 16);
+    if (key == "haptics") settings.touch_haptics = value != "0";
   }
   return settings;
 }
@@ -669,7 +671,8 @@ void SaveSettings(const fs::path& file, const StartSettings& settings) {
   const fs::path temporary = fs::path(file) += ".tmp";
   {
     std::ofstream out(temporary, std::ios::trunc);
-    out << "name=" << settings.name << "\nxuid=" << std::hex << settings.xuid << "\n";
+    out << "name=" << settings.name << "\nxuid=" << std::hex << settings.xuid << "\n"
+        << "haptics=" << (settings.touch_haptics ? 1 : 0) << "\n";
   }
   fs::rename(temporary, file, ec);
 }
@@ -736,6 +739,10 @@ class StartScreenDialog final : public rex::ui::ImGuiDialog {
 #if !defined(__APPLE__)
     ImGui::TextDisabled("Text boxes: press A, then Steam + X for the on-screen keyboard.");
 #endif
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    ImGui::Checkbox("Vibrate when touch buttons are pressed", &settings_.touch_haptics);
+    ImGui::Spacing();
+#endif
     const bool quit = ImGui::Button("Quit", ImVec2(-FLT_MIN, 0));
     ImGui::End();
     // HARMONY_SETUP_AUTO=1 (automated tests only): press Play after a pause.
@@ -750,7 +757,9 @@ class StartScreenDialog final : public rex::ui::ImGuiDialog {
       SaveSettings(settings_file_, settings_);
       auto next = std::move(on_play_);
       Close();
-      if (next) next(StartChoice{name, settings_.xuid, join ? code : std::string()});
+      if (next)
+        next(StartChoice{name, settings_.xuid, join ? code : std::string(),
+                         settings_.touch_haptics});
     } else if (quit) {
       auto next = std::move(on_quit_);
       Close();
