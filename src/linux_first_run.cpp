@@ -41,6 +41,29 @@ namespace fs = std::filesystem;
 namespace harmony::first_run {
 namespace {
 
+// The part of the display clear of the iPhone's Dynamic Island, rounded
+// corners and home indicator, in ImGui display units. Elsewhere it is the
+// whole display.
+struct SafeRect {
+  ImVec2 min, size;
+};
+SafeRect SafeDisplayRect(const ImGuiIO& io) {
+  SafeRect rect{ImVec2(0, 0), io.DisplaySize};
+  int count = 0;
+  SDL_Window** windows = SDL_GetWindows(&count);
+  SDL_Window* window = windows && count > 0 ? windows[0] : nullptr;
+  SDL_free(windows);
+  int w = 0, h = 0;
+  SDL_Rect safe{};
+  if (!window || !SDL_GetWindowSize(window, &w, &h) || w <= 0 || h <= 0 ||
+      !SDL_GetWindowSafeArea(window, &safe) || safe.w <= 0 || safe.h <= 0)
+    return rect;
+  const float sx = io.DisplaySize.x / float(w), sy = io.DisplaySize.y / float(h);
+  rect.min = ImVec2(float(safe.x) * sx, float(safe.y) * sy);
+  rect.size = ImVec2(float(safe.w) * sx, float(safe.h) * sy);
+  return rect;
+}
+
 constexpr char kSharedXuid[] = "0000000000000000";
 constexpr char kTitleFolder[] = "58410A7A";
 
@@ -248,8 +271,9 @@ class GameFilesSetupDialog final : public rex::ui::ImGuiDialog {
 
  protected:
   void OnDraw(ImGuiIO& io) override {
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(io.DisplaySize);
+    const auto safe = SafeDisplayRect(io);
+    ImGui::SetNextWindowPos(safe.min);
+    ImGui::SetNextWindowSize(safe.size);
     ImGui::Begin("##harmony-setup", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
@@ -697,8 +721,9 @@ class StartScreenDialog final : public rex::ui::ImGuiDialog {
 
  protected:
   void OnDraw(ImGuiIO& io) override {
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(io.DisplaySize);
+    const auto safe = SafeDisplayRect(io);
+    ImGui::SetNextWindowPos(safe.min);
+    ImGui::SetNextWindowSize(safe.size);
     ImGui::Begin("##harmony-start", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
@@ -792,7 +817,9 @@ class InviteCodeOverlay final : public rex::ui::ImGuiDialog {
       code_ = ReadCode();
     }
     if (code_.empty()) return;
-    ImGui::SetNextWindowPos(ImVec2(12, io.DisplaySize.y - 12), ImGuiCond_Always, ImVec2(0, 1));
+    const auto safe = SafeDisplayRect(io);
+    ImGui::SetNextWindowPos(ImVec2(safe.min.x + 12, safe.min.y + safe.size.y - 12), ImGuiCond_Always,
+                            ImVec2(0, 1));
     ImGui::SetNextWindowBgAlpha(0.6f);
     ImGui::Begin("##harmony-invite", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
