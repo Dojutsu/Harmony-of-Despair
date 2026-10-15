@@ -7,6 +7,8 @@
 #if defined(__linux__) && !defined(__ANDROID__)
 REXCVAR_DEFINE_STRING(harmony_config_root, "", "Paths",
     "Absolute Linux configuration root; defaults to XDG_CONFIG_HOME or HOME/.config.");
+REXCVAR_DEFINE_BOOL(harmony_start_screen, false, "General",
+    "Show the start screen (player name, Play, join by invite code) and play online.");
 #endif
 
 REX_DEFINE_APP(harmonyrecomp, HarmonyrecompApp::Create)
