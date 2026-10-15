@@ -711,6 +711,26 @@ bool OpenGameplayDatagram(uint64_t socket, LanAddress logical,
   return false;
 }
 
+std::string_view GameplayOpenFailureReason(uint64_t socket, LanAddress logical) {
+  std::lock_guard lock(gameplay_mutex);
+  Reap();
+  bool scope_found = false, peer_found = false;
+  for (auto& scope : scopes) {
+    if (scope.socket != socket) continue;
+    if (!Current(scope)) continue;
+    scope_found = true;
+    for (const auto& peer : scope.authorization.peers) {
+      if (peer.logical.ipv4 != logical.ipv4) continue;
+      if (logical.port != scope.guest_port) return "guest_port_mismatch";
+      if (!PeerCurrent(scope, peer)) return "peer_not_current";
+      peer_found = true;
+      if (!scope.ciphers().contains(peer.traversal.attempt_id)) return "no_cipher";
+    }
+  }
+  if (!scope_found) return "no_current_scope";
+  return peer_found ? "authentication_or_replay" : "unknown_peer";
+}
+
 std::optional<GameplayXnAddr> GameplayXnAddrToLogical(
     const std::array<uint8_t, 8>& session_id, const XnAddrIdentity& identity) {
   std::lock_guard lock(gameplay_mutex);

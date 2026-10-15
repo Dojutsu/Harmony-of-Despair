@@ -51,6 +51,38 @@
 #endif
 
 namespace rex::system {
+namespace {
+// Inbound gameplay datagrams the runtime refuses are otherwise invisible: a
+// title only sees its peer go quiet. Log each (socket, reason, source) at most
+// twice a second, with how many were refused since the last line.
+void LogGameplayReceiveDrop(uint64_t socket, std::string_view reason, xam::LanAddress source,
+                            std::optional<xam::LanAddress> logical, size_t bytes) {
+  struct Entry { std::chrono::steady_clock::time_point last{}; uint32_t suppressed = 0; };
+  static std::mutex mutex;
+  static std::unordered_map<std::string, Entry> entries;
+  const auto key = std::to_string(socket) + ":" + std::string(reason) + ":" +
+                   std::to_string(source.ipv4) + ":" + std::to_string(source.port);
+  const auto now = std::chrono::steady_clock::now();
+  uint32_t suppressed = 0;
+  {
+    std::lock_guard lock(mutex);
+    if (entries.size() > 256) entries.clear();
+    auto& entry = entries[key];
+    if (entry.last != std::chrono::steady_clock::time_point{} &&
+        now - entry.last < std::chrono::milliseconds(500)) {
+      ++entry.suppressed;
+      return;
+    }
+    suppressed = entry.suppressed;
+    entry = {now, 0};
+  }
+  REXSYS_WARN("GAMEPLAY_RX_DROP socket={} reason={} native={:08X}:{} logical={:08X}:{} bytes={} "
+              "suppressed={}",
+              socket, reason, ntohl(source.ipv4), source.port,
+              logical ? ntohl(logical->ipv4) : 0u, logical ? logical->port : 0, bytes, suppressed);
+}
+}  // namespace
+
 
 namespace {
 int ClosedNativeSocket() {
@@ -826,6 +858,8 @@ retry_native_receive:
   }
   if (ret >= 0 && xam::NatProbeIsPendingGameplaySource(handle,
           {nfrom.sin_addr.s_addr, ntohs(nfrom.sin_port)})) {
+    LogGameplayReceiveDrop(handle, "pending_source", {nfrom.sin_addr.s_addr, ntohs(nfrom.sin_port)},
+                           std::nullopt, size_t(ret));
     if (!reject_datagram()) return -1;
     goto retry_native_receive;
   }
@@ -837,6 +871,7 @@ retry_native_receive:
   if (ret >= 0) {
     logical = xam::NatProbeNormalizeGameplaySource(handle, native_source);
     if (scoped && !logical) {
+      LogGameplayReceiveDrop(handle, "no_logical_source", native_source, std::nullopt, size_t(ret));
       if (!reject_datagram()) return -1;
       goto retry_native_receive;
     }
@@ -847,6 +882,9 @@ retry_native_receive:
         !xam::OpenGameplayDatagram(handle, *logical,
             std::span<const uint8_t>(receive_data, size_t(ret)), authenticated_plaintext,
             !(flags & MSG_PEEK))) {
+      LogGameplayReceiveDrop(handle,
+          logical ? xam::GameplayOpenFailureReason(handle, *logical) : "no_logical_source",
+          native_source, logical, size_t(ret));
       if (!reject_datagram()) return -1;
       goto retry_native_receive;
     }

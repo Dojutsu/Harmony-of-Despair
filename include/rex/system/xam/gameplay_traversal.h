@@ -79,6 +79,8 @@ std::optional<std::vector<uint8_t>> SealGameplayDatagram(
     uint64_t socket, LanAddress logical, std::span<const uint8_t> plaintext);
 bool OpenGameplayDatagram(uint64_t socket, LanAddress logical,
     std::span<const uint8_t> packet, std::vector<uint8_t>& plaintext, bool consume);
+// Why OpenGameplayDatagram refused a datagram from this logical peer (diagnostics).
+std::string_view GameplayOpenFailureReason(uint64_t socket, LanAddress logical);
 
 struct GameplayXnAddr {
   std::array<uint8_t, 8> session_id{};
