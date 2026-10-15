@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <set>
+#include <sstream>
 #include <rex/system/xam/session_directory.h>
 
 namespace rex::kernel::xam {
@@ -1061,3 +1062,173 @@ TEST_CASE("private LAN roster cipher routes and authority publish as one transac
 }
 } // namespace rex::system::xam
 #endif
+namespace rex::system::xam {
+namespace {
+std::array<uint8_t,56> RegisteredWithRelay(const GameplayPeerAuthorization& peer, LanAddress endpoint,
+                                           uint16_t relay_port) {
+  auto bytes=Registered(peer,endpoint);
+  auto port=htons(relay_port);std::memcpy(bytes.data()+52,&port,2);
+  return bytes;
+}
+struct RelayFixture {
+  SessionRegistry registry;
+  std::shared_ptr<SessionRecord> session=registry.Create(1,"Host",{htonl(INADDR_LOOPBACK),30742},1,3,3);
+  GameplayAuthorization auth=Ticket(session);
+  Udp socket;
+  LanAddress direct{htonl(0xC6336401),43000};  // Unreachable public endpoint (TEST-NET-2).
+  LanAddress relay{htonl(INADDR_LOOPBACK),30801};
+  RelayFixture() {
+    socket.Attach();
+    REQUIRE(InstallGameplayAuthorization(session,auth));
+    REQUIRE(BindGameplaySocket(session,1,uint64_t(socket.socket),1000));
+  }
+  bool Offer(uint16_t relay_port) {
+    auto registration=RegisteredWithRelay(auth.peers[0],direct,relay_port);
+    return NatProbeConsume(socket.socket,registration.data(),56,htonl(INADDR_LOOPBACK),39188);
+  }
+  std::optional<LanAddress> Peer() {
+    for(const auto& attempt:NatProbePeerAttempts(socket.socket,false))
+      if(attempt.attempt_id==auth.peers[0].traversal.attempt_id) return attempt.peer;
+    return std::nullopt;
+  }
+};
+}
+TEST_CASE("unacknowledged direct gameplay path falls back to the server relay", "[gameplay][network][relay]") {
+  RelayFixture fixture;
+  REQUIRE(fixture.Offer(fixture.relay.port));
+  NatProbeTickAt(fixture.socket.socket,Clock::now());
+  CHECK(fixture.Peer()==fixture.direct);
+  NatProbeTickAt(fixture.socket.socket,Clock::now()+std::chrono::milliseconds(1100));
+  REQUIRE(fixture.Peer()==fixture.relay);
+  CHECK(NatProbeIsPendingGameplaySource(fixture.socket.socket,fixture.relay));
+  CHECK_FALSE(NatProbeGameplayDestination(fixture.socket.socket,fixture.auth.peers[0].logical));
+  // Later server responses keep reporting the direct endpoint; the relay stays.
+  REQUIRE(fixture.Offer(fixture.relay.port));
+  CHECK(fixture.Peer()==fixture.relay);
+  auto ack=Registered(fixture.auth.peers[0],fixture.relay,4);
+  REQUIRE(NatProbeConsume(fixture.socket.socket,ack.data(),56,fixture.relay.ipv4,fixture.relay.port));
+  CHECK(NatProbeGameplayDestination(fixture.socket.socket,fixture.auth.peers[0].logical)==fixture.relay);
+  CHECK(NatProbeNormalizeGameplaySource(fixture.socket.socket,fixture.relay)==fixture.auth.peers[0].logical);
+}
+TEST_CASE("relay registration and punches reach the assigned relay port", "[gameplay][network][relay]") {
+  Udp relay_socket;
+  RelayFixture fixture;
+  fixture.relay=relay_socket.address;
+  REQUIRE(fixture.Offer(fixture.relay.port));
+  auto receive=[&](uint8_t type) {
+    for(int i=0;i<50;++i) {
+      std::array<uint8_t,64> bytes{};
+      const auto count=recv(relay_socket.socket,reinterpret_cast<char*>(bytes.data()),int(bytes.size()),0);
+      if(count==56&&std::memcmp(bytes.data(),"HNAT",4)==0&&bytes[5]==type) return true;
+      if(count<0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return false;
+  };
+  NatProbeTickAt(fixture.socket.socket,Clock::now());
+  CHECK(receive(1));  // Credential-bearing registration teaches the relay this socket's mapping.
+  CHECK_FALSE(receive(3));  // No punch to the relay while the direct path still has time.
+  NatProbeTickAt(fixture.socket.socket,Clock::now()+std::chrono::milliseconds(1100));
+  CHECK(receive(3));
+}
+TEST_CASE("peer punch from the relay address switches this side to the relay", "[gameplay][network][relay]") {
+  RelayFixture fixture;
+  REQUIRE(fixture.Offer(fixture.relay.port));
+  auto punch=Registered(fixture.auth.peers[0],fixture.relay,3);
+  CHECK(NatProbeIsControlPacket(fixture.socket.socket,punch.data(),56,fixture.relay.ipv4,fixture.relay.port));
+  REQUIRE(NatProbeConsume(fixture.socket.socket,punch.data(),56,fixture.relay.ipv4,fixture.relay.port));
+  CHECK(fixture.Peer()==fixture.relay);
+  // A different port on the server is not this side's relay.
+  RelayFixture other;
+  REQUIRE(other.Offer(other.relay.port));
+  auto stray=Registered(other.auth.peers[0],{other.relay.ipv4,30999},3);
+  CHECK_FALSE(NatProbeIsControlPacket(other.socket.socket,stray.data(),56,other.relay.ipv4,30999));
+  CHECK(other.Peer()==other.direct);
+}
+TEST_CASE("no relay offer or disabled relay keeps the direct path", "[gameplay][network][relay]") {
+  {
+    RelayFixture fixture;
+    REQUIRE(fixture.Offer(0));
+    NatProbeTickAt(fixture.socket.socket,Clock::now()+std::chrono::seconds(5));
+    CHECK(fixture.Peer()==fixture.direct);
+  }
+  {
+    REXCVAR_SET(nat_relay_enabled,false);
+    RelayFixture fixture;
+    REQUIRE(fixture.Offer(fixture.relay.port));
+    NatProbeTickAt(fixture.socket.socket,Clock::now()+std::chrono::seconds(5));
+    CHECK(fixture.Peer()==fixture.direct);
+    REXCVAR_SET(nat_relay_enabled,true);
+  }
+}
+}
+namespace rex::system::xam {
+#if !REX_PLATFORM_WIN32
+// Manual end-to-end check against a real directory/relay server. The harness
+// supplies two issued gameplay link credentials and, to model carrier NAT,
+// blocks direct UDP between the two fixed client ports.
+// RELAY_E2E="server_port link host_cap client_cap port0 port1 expect(relay|direct)"
+TEST_CASE("gameplay link reaches its peer through a real relay server", "[.relay-e2e]") {
+  const char* config=std::getenv("RELAY_E2E");
+  REQUIRE(config);
+  std::istringstream input(config);
+  uint32_t server_port=0,ports[2]{};std::string link,caps[2],expect;
+  input>>server_port>>link>>caps[0]>>caps[1]>>ports[0]>>ports[1]>>expect;
+  REQUIRE(input);
+  int sockets[2];
+  LanAddress logical[2]={{htonl(0xf0000001),1000},{htonl(0xf0000002),1000}};
+  for(int i=0;i<2;++i) {
+    sockets[i]=::socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP);
+    sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    addr.sin_port=htons(uint16_t(ports[i]));
+    REQUIRE(::bind(sockets[i],reinterpret_cast<sockaddr*>(&addr),sizeof(addr))==0);
+    REQUIRE(fcntl(sockets[i],F_SETFL,fcntl(sockets[i],F_GETFL,0)|O_NONBLOCK)==0);
+    NatProbeAttach(uint64_t(sockets[i]),NatProbeRole::kGameplay,{addr.sin_addr.s_addr,uint16_t(ports[i])});
+    REQUIRE(NatProbeInstallGameplayIdentity({link,caps[i],"127.0.0.1",uint16_t(server_port),uint8_t(i)},
+        uint64_t(sockets[i]),logical[1-i],Clock::now()+std::chrono::seconds(60)));
+  }
+  auto pump=[&] {
+    for(int i=0;i<2;++i) {
+      NatProbeTick(uint64_t(sockets[i]));
+      for(;;) {
+        std::array<uint8_t,1600> bytes{};sockaddr_in from{};SockLen length=sizeof(from);
+        const auto count=recvfrom(sockets[i],bytes.data(),bytes.size(),0,reinterpret_cast<sockaddr*>(&from),&length);
+        if(count<=0) break;
+        NatProbeConsume(uint64_t(sockets[i]),bytes.data(),size_t(count),from.sin_addr.s_addr,ntohs(from.sin_port));
+      }
+    }
+  };
+  std::optional<LanAddress> routes[2];
+  const auto started=Clock::now();
+  while(Clock::now()-started<std::chrono::seconds(10)&&!(routes[0]&&routes[1])) {
+    pump();
+    for(int i=0;i<2;++i) routes[i]=NatProbeGameplayDestination(uint64_t(sockets[i]),logical[1-i]);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  const auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-started).count();
+  INFO("connected after " << elapsed << " ms");
+  REQUIRE(routes[0]);REQUIRE(routes[1]);
+  for(int i=0;i<2;++i) {
+    if(expect=="relay") CHECK(routes[i]->port!=ports[1-i]);
+    else CHECK(routes[i]->port==ports[1-i]);
+  }
+  // A datagram from side 1 arrives at side 0 from side 0's route and maps to side 1.
+  sockaddr_in target{};target.sin_family=AF_INET;target.sin_addr.s_addr=routes[1]->ipv4;
+  target.sin_port=htons(routes[1]->port);
+  REQUIRE(sendto(sockets[1],"payload",7,0,reinterpret_cast<sockaddr*>(&target),sizeof(target))==7);
+  bool delivered=false;
+  for(int attempt=0;attempt<200&&!delivered;++attempt) {
+    std::array<uint8_t,64> bytes{};sockaddr_in from{};SockLen length=sizeof(from);
+    const auto count=recvfrom(sockets[0],bytes.data(),bytes.size(),0,reinterpret_cast<sockaddr*>(&from),&length);
+    if(count==7&&std::memcmp(bytes.data(),"payload",7)==0) {
+      const LanAddress source{from.sin_addr.s_addr,ntohs(from.sin_port)};
+      CHECK(source==*routes[0]);
+      CHECK(NatProbeNormalizeGameplaySource(uint64_t(sockets[0]),source)==logical[1]);
+      delivered=true;
+    } else std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  CHECK(delivered);
+  WARN("relay-e2e mode=" << expect << " connected_ms=" << elapsed);
+  for(int i=0;i<2;++i) { NatProbeDetach(uint64_t(sockets[i])); close(sockets[i]); }
+}
+#endif
+}

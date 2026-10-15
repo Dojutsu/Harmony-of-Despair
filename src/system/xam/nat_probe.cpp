@@ -48,6 +48,11 @@ REXCVAR_DEFINE_UINT32(nat_probe_participant, 0, "Network",
                       "NAT traversal participant: 0 host, 1 client")
     .range(0, 1)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(nat_relay_enabled, true, "Network",
+                    "Route through the rendezvous server's relay when a direct connection fails");
+REXCVAR_DEFINE_UINT32(nat_relay_after_ms, 1000, "Network",
+                      "How long a known peer may stay unreachable before using the relay")
+    .range(100, 15000);
 
 namespace {
 constexpr uint8_t kVersion = 1;
@@ -69,7 +74,10 @@ struct Packet {
   uint16_t observed_port;
   uint32_t peer_ipv4;
   uint16_t peer_port;
-  uint32_t reserved;
+  // Registration responses carry the relay port assigned to this participant
+  // (network order, 0 when the server offers no relay).
+  uint16_t relay_port;
+  uint16_t reserved;
 };
 #pragma pack(pop)
 static_assert(sizeof(Packet) == 56);
@@ -107,6 +115,12 @@ struct AttemptState {
   // of through the shared public address (see SameNetworkPeerEligible).
   bool same_network_peer = false;
   uint32_t registrations_sent = 0;
+  // Server relay fallback. Once relayed, the peer endpoint is the relay
+  // address and later server responses no longer replace it.
+  uint16_t relay_port = 0;
+  bool relayed = false;
+  std::chrono::steady_clock::time_point peer_known_at{};
+  std::chrono::steady_clock::time_point last_relay_registration{};
   bool gameplay_sent_logged = false;
   bool gameplay_received_logged = false;
 };
@@ -269,6 +283,33 @@ bool SameNetworkPeerEligible(const AttemptState& attempt, LanAddress source) {
          !attempt.same_network_peer && !attempt.endpoint.acknowledged() &&
          PrivateNetworkIpv4(source.ipv4) && source.port && attempt.observed.ipv4 &&
          peer.port && peer.ipv4 == attempt.observed.ipv4;
+}
+
+std::optional<LanAddress> RelayAddress(const AttemptState& attempt) {
+  if (!attempt.relay_port || !attempt.identity.server.ipv4 || attempt.identity.direct_lan)
+    return std::nullopt;
+  return LanAddress{attempt.identity.server.ipv4, attempt.relay_port};
+}
+
+// The opposite participant already gave up on the direct path: its punch or
+// acknowledgement arrives from this participant's own relay address.
+bool RelaySwitchEligible(const AttemptState& attempt, LanAddress source) {
+  const auto relay = RelayAddress(attempt);
+  return relay && *relay == source && !attempt.relayed && !attempt.same_network_peer &&
+         REXCVAR_GET(nat_relay_enabled);
+}
+
+void SwitchToRelay(AttemptState& attempt, NatProbeRole role, std::string_view reason) {
+  const auto relay = RelayAddress(attempt);
+  if (!relay) return;
+  const auto direct = attempt.endpoint.peer();
+  attempt.relayed = true;
+  attempt.endpoint.UpdatePeer(*relay);
+  attempt.last_punch = {};
+  REXSYS_INFO("NAT_RELAY using server relay role={} attempt={} reason={} direct={:08X}:{} "
+              "relay={:08X}:{}",
+              uint8_t(role), attempt.identity.key, reason, direct.ipv4, direct.port,
+              relay->ipv4, relay->port);
 }
 
 bool GameplayAttemptPendingLocked(const State& state,
@@ -776,6 +817,28 @@ void NatProbeTickLocked(uint64_t socket, State& state,
           socket, uint8_t(state.role), attempt.identity.key, attempt.identity.participant,
           attempt.registrations_sent);
     }
+    if (const auto relay = RelayAddress(attempt);
+        relay && REXCVAR_GET(nat_relay_enabled)) {
+      // Keep this socket's relay mapping registered (and its NAT pinhole
+      // open) so either side can fall back without another server round trip.
+      if (attempt.last_relay_registration == std::chrono::steady_clock::time_point{} ||
+          now - attempt.last_relay_registration >= std::chrono::seconds(1)) {
+        Packet packet{};
+        FillIdentity(packet, attempt.identity);
+        packet.type = kRegister;
+        packet.role = uint8_t(state.role);
+        Send(socket, packet, *relay);
+        attempt.last_relay_registration = now;
+      }
+      if (attempt.peer_known_at == std::chrono::steady_clock::time_point{} &&
+          attempt.endpoint.peer().port)
+        attempt.peer_known_at = now;
+      if (!attempt.relayed && !attempt.same_network_peer && attempt.endpoint.peer().port &&
+          !attempt.endpoint.acknowledged() &&
+          now - attempt.peer_known_at >=
+              std::chrono::milliseconds(REXCVAR_GET(nat_relay_after_ms)))
+        SwitchToRelay(attempt, state.role, "direct_unacknowledged");
+    }
     const auto peer = attempt.endpoint.peer();
     if (peer.port && !attempt.endpoint.acknowledged() &&
         now - attempt.last_punch >= std::chrono::milliseconds(100)) {
@@ -847,9 +910,11 @@ bool NatProbeIsControlPacket(uint64_t socket, const uint8_t* data, size_t size,
   const LanAddress source{source_ipv4, source_port};
   if (packet.type == kPunch)
     return !attempt_state.endpoint.peer().port || attempt_state.endpoint.peer() == source ||
-           SameNetworkPeerEligible(attempt_state, source);
+           SameNetworkPeerEligible(attempt_state, source) ||
+           RelaySwitchEligible(attempt_state, source);
   if (packet.type == kAck)
-    return attempt_state.endpoint.peer() == source || SameNetworkPeerEligible(attempt_state, source);
+    return attempt_state.endpoint.peer() == source || SameNetworkPeerEligible(attempt_state, source) ||
+           RelaySwitchEligible(attempt_state, source);
   return false;
 }
 
@@ -917,8 +982,20 @@ bool NatProbeConsume(uint64_t socket, const uint8_t* data, size_t size, uint32_t
       REXSYS_INFO("NAT traversal: role={} observed public={:08X}:{}", uint8_t(state.role),
                   observed.ipv4, observed.port);
     }
+    const uint16_t relay_port = ntohs(packet.relay_port);
+    if (relay_port && relay_port != attempt_state.relay_port) {
+      attempt_state.relay_port = relay_port;
+      attempt_state.last_relay_registration = {};
+      REXSYS_INFO("NAT_RELAY offered role={} attempt={} relay_port={}", uint8_t(state.role),
+                  attempt_state.identity.key, relay_port);
+      // A replacement allocation moves an already relayed path with it.
+      if (attempt_state.relayed)
+        attempt_state.endpoint.UpdatePeer(*RelayAddress(attempt_state));
+    }
     const auto old_peer = attempt_state.endpoint.peer();
-    if (!attempt_state.same_network_peer && attempt_state.endpoint.UpdatePeer(peer)) {
+    if (!attempt_state.same_network_peer && !attempt_state.relayed &&
+        attempt_state.endpoint.UpdatePeer(peer)) {
+      attempt_state.peer_known_at = std::chrono::steady_clock::now();
       if (old_peer.port) {
         REXSYS_INFO(
             "NAT traversal: role={} peer endpoint changed old={:08X}:{} new={:08X}:{}; "
@@ -936,6 +1013,9 @@ bool NatProbeConsume(uint64_t socket, const uint8_t* data, size_t size, uint32_t
     REXSYS_WARN("NAT_DIAG peer control rejected socket={} reason=same_participant", socket);
     return false;
   }
+  if ((packet.type == kPunch || packet.type == kAck) &&
+      RelaySwitchEligible(attempt_state, LanAddress{source_ipv4, source_port}))
+    SwitchToRelay(attempt_state, state.role, "peer_relayed");
   // Peer punch packets prove possession of the unguessable attempt ID and are
   // accepted only from the server-observed endpoint for the opposite participant.
   if (packet.type == kPunch) {
@@ -943,6 +1023,7 @@ bool NatProbeConsume(uint64_t socket, const uint8_t* data, size_t size, uint32_t
     if (!attempt_state.endpoint.peer().port) {
       if (attempt_state.identity.gameplay_authorized) return true;
       attempt_state.endpoint.UpdatePeer(source);
+      attempt_state.peer_known_at = std::chrono::steady_clock::now();
     }
     if (attempt_state.endpoint.peer() != source &&
         SameNetworkPeerEligible(attempt_state, source)) {
