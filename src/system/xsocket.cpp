@@ -19,6 +19,7 @@
 #include <unordered_map>
 
 #include <rex/kernel/xam/module.h>
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
 #include <rex/system/kernel_state.h>
@@ -49,6 +50,10 @@
 #include <unistd.h>
 #endif
 #endif
+
+REXCVAR_DEFINE_BOOL(net_packet_trace, false, "Network",
+                    "Log every guest network send/receive and the first small title messages "
+                    "per link (diagnostics; very noisy)");
 
 namespace rex::system {
 namespace {
@@ -88,7 +93,7 @@ void LogGameplayTitlePayload(uint64_t socket, std::string_view direction, xam::L
                              const uint8_t* data, size_t bytes) {
   constexpr size_t kMaximumBytes = 64;
   constexpr uint32_t kMaximumPerLink = 40;
-  if (!data || bytes > kMaximumBytes) return;
+  if (!REXCVAR_GET(net_packet_trace) || !data || bytes > kMaximumBytes) return;
   static std::mutex mutex;
   static std::unordered_map<std::string, uint32_t> counts;
   {

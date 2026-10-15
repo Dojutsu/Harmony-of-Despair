@@ -417,7 +417,7 @@ bool TryCompleteRecvFrom(PendingRecvFrom& pending, bool wait) {
       ioctlsocket(static_cast<SOCKET>(diagnostic_operation.handle()), FIONREAD, &available) == 0 &&
       available != 0 && !pending.readiness_logged) {
     pending.readiness_logged = true;
-    REXKRNL_INFO(
+    if (REXCVAR_GET(net_packet_trace)) REXKRNL_INFO(
         "NetDll_WSARecvFrom: native datagram ready socket={:08X} native={} bytes={} "
         "overlapped={:08X}",
         pending.socket_handle, socket->native_handle(), available, pending.overlapped_ptr);
@@ -429,7 +429,7 @@ bool TryCompleteRecvFrom(PendingRecvFrom& pending, bool wait) {
   uint32_t native_from_length = sizeof(XSOCKADDR_IN);
   if (!pending.native_call_logged) {
     pending.native_call_logged = true;
-    REXKRNL_INFO(
+    if (REXCVAR_GET(net_packet_trace)) REXKRNL_INFO(
         "NetDll_WSARecvFrom: native receive socket={:08X} native={} flags={:#x} "
         "buffer_count=1 buffer_length={} from_length={} overlapped={:08X}",
         pending.socket_handle, socket->native_handle(), pending.flags, pending.buffer_length,
@@ -474,7 +474,7 @@ bool TryCompleteRecvFrom(PendingRecvFrom& pending, bool wait) {
   }
   pending.complete = true;
   const auto* payload = memory->TranslateVirtual(pending.buffer_ptr);
-  REXKRNL_INFO(
+  if (REXCVAR_GET(net_packet_trace)) REXKRNL_INFO(
       "NetDll_WSARecvFrom: completed overlapped receive socket={:08X} overlapped={:08X} "
       "bytes={} source={:08X}:{} from_length={} flags=0 event={:08X} "
       "prefix={:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
@@ -699,7 +699,7 @@ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_
       pending_recvs[pending.overlapped_ptr] = pending;
     }
     EnsurePendingRecvPump();
-    REXKRNL_INFO(
+    if (REXCVAR_GET(net_packet_trace)) REXKRNL_INFO(
         "NetDll_WSARecvFrom: queued overlapped receive socket={:08X} overlapped={:08X} "
         "buffer={:08X} length={} flags_ptr={:08X} flags_initial={:#x} from={:08X} "
         "from_length={:08X} "
@@ -782,7 +782,7 @@ u32 NetDll_WSAGetOverlappedResult_entry(u32 caller, u32 socket_handle,
   *bytes_transferred = pending.transferred;
   if (flags_ptr)
     *flags_ptr = pending.completion_flags;
-  REXKRNL_INFO(
+  if (REXCVAR_GET(net_packet_trace)) REXKRNL_INFO(
       "NetDll_WSAGetOverlappedResult: completed socket={:08X} overlapped={:08X} bytes={}",
       socket_handle, overlapped_ptr.guest_address(), pending.transferred);
   XThread::SetLastError(0);
@@ -1091,7 +1091,7 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
       return failed(kWsaFault, "send_guest_range");
     }
   }
-  REXKRNL_INFO(
+  if (REXCVAR_GET(net_packet_trace)) REXKRNL_INFO(
       "NetDll_WSASendTo: socket={:08X} destination={:08X}:{} bytes={} overlapped={:08X}",
       socket_handle, uint32_t(native_to.sin_addr), uint16_t(native_to.sin_port), result,
       overlapped.guest_address());
