@@ -62,6 +62,8 @@ void RevokeGameplayAuthorization(const std::shared_ptr<SessionRecord>& session,
 bool GameplayAuthorizationCurrent(const std::shared_ptr<SessionRecord>& session,
                                    uint64_t local_xuid, std::string_view member_nonce);
 bool IsAuthorizedGameplaySocket(uint64_t socket);
+// True only while this socket belongs to a live (current, unrevoked) game.
+bool GameplaySocketScopeCurrent(uint64_t socket);
 // A public (cellular/relay) route replaces SessionInfo::host_address with the
 // host's public endpoint, but the title keeps addressing the host by the
 // endpoint it was advertised (listing / XNADDR). Recorded once, at that rewrite,
@@ -72,6 +74,15 @@ void RecordAdvertisedHostAddress(const std::array<uint8_t, 8>& xbox_session, uin
 // its host over a public route. The title reports it as its own address; the
 // host keeps its advertised address, which is how its joiners know it.
 std::optional<LanAddress> GameplaySelfLogicalAddress(uint64_t local_xuid);
+// The title confirms each newcomer with its host before it accepts the
+// newcomer's own messages, then calls XGISessionJoinRemote. Over a public route
+// that confirmation can arrive after the newcomer's first reliable message, and
+// the title answers such an early message by ending the link. Until the title
+// has joined that member (bounded), a joiner holds back its reliable messages;
+// the newcomer resends them.
+void RecordTitleJoinedRemote(const std::array<uint8_t, 8>& xbox_session, uint64_t xuid);
+bool GameplayHoldUntilTitleJoined(uint64_t socket, LanAddress logical,
+                                  std::span<const uint8_t> plaintext);
 // Returns an exact peer alias; an unknown/expired scoped destination has no route.
 std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress requested);
 // The address the guest last used to reach this logical peer, when it differs.

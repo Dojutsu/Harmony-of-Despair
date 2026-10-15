@@ -14,6 +14,7 @@
 
 #include <rex/kernel/xam/apps/xgi_app.h>
 #include <rex/logging.h>
+#include <rex/system/xam/gameplay_traversal.h>
 #include <rex/system/xam/session.h>
 #include <rex/system/xam/session_arbitration_guest.h>
 #include <rex/memory/mapping_lease.h>
@@ -613,6 +614,9 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
           return X_E_SUCCESS;
         }
       }
+      if (!is_local)
+        for (const auto& member : members)
+          rex::system::xam::RecordTitleJoinedRemote(session->info.id, member.xuid);
       if (!is_local ||
           session->host_xuid == kernel_state_->user_profile()->xuid())
         return kernel_state_->session_manager()->registry().JoinBatch(session,

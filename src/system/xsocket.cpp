@@ -923,6 +923,12 @@ retry_native_receive:
     if (!(flags & MSG_PEEK))
       LogGameplayTitlePayload(handle, "rx", *logical, authenticated_plaintext.data(),
                               authenticated_plaintext.size());
+    if (xam::GameplayHoldUntilTitleJoined(handle, *logical, authenticated_plaintext)) {
+      LogGameplayReceiveDrop(handle, "member_not_joined_by_title", native_source, logical,
+                             authenticated_plaintext.size());
+      if (!reject_datagram()) return -1;
+      goto retry_native_receive;
+    }
   }
   if (ret > 0 && uint32_t(ret) > buf_len) {
     // Preserve ordinary Winsock-style truncation, but scoped errors expose no bytes.

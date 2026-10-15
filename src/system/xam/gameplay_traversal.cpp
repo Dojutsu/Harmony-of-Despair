@@ -602,6 +602,13 @@ bool IsAuthorizedGameplaySocket(uint64_t socket) {
   });
 }
 
+bool GameplaySocketScopeCurrent(uint64_t socket) {
+  std::lock_guard lock(gameplay_mutex);
+  Reap();
+  return std::any_of(scopes.begin(), scopes.end(),
+                     [&](const auto& s) { return s.socket == socket && Current(s); });
+}
+
 namespace {
 // Advertised host endpoints recorded at the public-route rewrite, keyed by the
 // exact Xbox session and host. Guarded by gameplay_mutex; bounded.
@@ -687,6 +694,69 @@ std::optional<LanAddress> GameplaySelfLogicalAddress(uint64_t local_xuid) {
       return scope.authorization.logical;
   }
   return std::nullopt;
+}
+
+namespace {
+// Members the title has joined by XGISessionJoinRemote, and when a joiner first
+// held back a reliable message from a member it has not. Guarded by
+// gameplay_mutex; bounded.
+std::set<std::pair<std::array<uint8_t, 8>, uint64_t>> title_joined_remote;
+std::map<std::pair<std::array<uint8_t, 8>, uint64_t>, std::chrono::steady_clock::time_point>
+    title_join_waits;
+constexpr size_t kMaximumTitleJoins = 256;
+// About seven relayed round trips to a cellular host; a title that never joins
+// a member only sees its first reliable messages delayed by this much.
+constexpr auto kTitleJoinWait = std::chrono::milliseconds(1500);
+}  // namespace
+
+void RecordTitleJoinedRemote(const std::array<uint8_t, 8>& xbox_session, uint64_t xuid) {
+  std::lock_guard lock(gameplay_mutex);
+  if (title_joined_remote.size() >= kMaximumTitleJoins) title_joined_remote.clear();
+  if (title_joined_remote.insert({xbox_session, xuid}).second)
+    REXSYS_INFO("GAMEPLAY_TITLE_JOINED_REMOTE xuid={:016X} held={}", xuid,
+                title_join_waits.contains({xbox_session, xuid}));
+  title_join_waits.erase({xbox_session, xuid});
+}
+
+bool GameplayHoldUntilTitleJoined(uint64_t socket, LanAddress logical,
+                                  std::span<const uint8_t> plaintext) {
+  // Reliable title frames carry C0 and a sequence number after their two-byte
+  // length; handshakes, acknowledgements and goodbyes do not, and always pass.
+  // Sequence 0 is the link's opening exchange, which the title needs before it
+  // asks its host about the newcomer at all; only later frames are held.
+  if (plaintext.size() < 4 || plaintext[2] != 0xC0 || plaintext[3] == 0) return false;
+  std::lock_guard lock(gameplay_mutex);
+  Reap();
+  for (const auto& scope : scopes) {
+    if (scope.socket != socket || !Current(scope) || scope.xuid == scope.authorization.host_xuid)
+      continue;
+    const auto peer = std::find_if(scope.authorization.peers.begin(), scope.authorization.peers.end(),
+        [&](const auto& current) {
+          return current.logical.ipv4 == logical.ipv4 && PeerCurrent(scope, current);
+        });
+    if (peer == scope.authorization.peers.end()) continue;
+    if (peer->xuid == scope.authorization.host_xuid) return false;
+    auto session = scope.session.lock();
+    if (!session) return false;
+    std::pair<std::array<uint8_t, 8>, uint64_t> key;
+    {
+      std::lock_guard session_lock(*session->mutex);
+      // Same-house hosts confirm within milliseconds; only a public route races.
+      if (!advertised_hosts.contains({session->info.id, session->host_xuid})) return false;
+      key = {session->info.id, peer->xuid};
+    }
+    if (title_joined_remote.contains(key)) return false;
+    const auto now = std::chrono::steady_clock::now();
+    if (title_join_waits.size() >= kMaximumTitleJoins) title_join_waits.clear();
+    const auto [wait, first] = title_join_waits.try_emplace(key, now);
+    if (now - wait->second >= kTitleJoinWait) return false;
+    if (first)
+      REXSYS_INFO("GAMEPLAY_TITLE_JOIN_WAIT holding reliable messages from {:08X} xuid={:016X} "
+                  "until the title joins it",
+                  ntohl(logical.ipv4), peer->xuid);
+    return true;
+  }
+  return false;
 }
 
 std::optional<uint32_t> GameplayGuestSourceAlias(uint64_t socket, LanAddress logical) {

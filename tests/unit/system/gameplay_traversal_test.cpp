@@ -1440,4 +1440,106 @@ TEST_CASE("public-route joiner reaches its host through the advertised LAN addre
   // The public endpoint keeps working as before.
   CHECK(GameplayLogicalDestination(socket.socket,{public_host.ipv4,1000})==host.logical);
 }
+TEST_CASE("a public-route joiner holds a newcomer's reliable messages until the title joins it", "[gameplay][session][network]") {
+  // With the host on cellular, the title's confirmation of a newcomer crosses
+  // the relay twice; the newcomer's own intro can arrive first, and the title
+  // ends the link if it sees that intro before XGISessionJoinRemote.
+  const LanAddress advertised{htonl(0x0A000040),30742};
+  const LanAddress public_host{htonl(0xC6336403),30742};  // TEST-NET-2
+  SessionRegistry registry;
+  auto session=registry.Create(1,"Host",public_host,1,4,4);
+  auto binding=std::make_shared<const GameplayAdmissionBinding>(GameplayAdmissionBinding{
+      "gameplay-hold",std::string(32,'a'),std::string(32,'b')});
+  {
+    std::lock_guard lock(*session->mutex);
+    for(auto& member:session->members) member.local=false;
+    session->members.push_back({2,"Joiner",0,true,false,false,binding});
+  }
+  GameplayAuthorization auth;
+  auth.directory_session="gameplay-hold"; auth.xbox_session=session->info.id;
+  auth.host_xuid=1; auth.xuid=2;
+  auth.admission_attempt=binding->attempt_id; auth.admission_generation=binding->admission_generation;
+  auth.member_nonce=std::string(32,'1'); auth.member_capability=std::string(32,'2');
+  auth.logical={htonl(0xf0000012),1000}; auth.expires_at=Clock::now()+std::chrono::seconds(40);
+  GameplayPeerAuthorization host;
+  host.traffic_key.fill(1); // Public deterministic test material only.
+  host.xuid=1; host.member_nonce=std::string(32,'3');
+  host.admission_attempt=std::string(32,'c'); host.admission_generation=std::string(32,'d');
+  host.logical={htonl(0xf0000011),1000};
+  host.traversal={std::string(32,'4'),std::string(32,'5'),"127.0.0.1",39188,0};
+  auto newcomer=host;
+  newcomer.traffic_key.fill(2);
+  newcomer.xuid=3; newcomer.member_nonce=std::string(32,'6');
+  newcomer.admission_attempt=std::string(32,'e'); newcomer.admission_generation=std::string(32,'f');
+  newcomer.logical={htonl(0xf0000013),1000};
+  newcomer.traversal={std::string(32,'7'),std::string(32,'8'),"127.0.0.1",39188,0};
+  auth.peers.push_back(host);
+  auth.peers.push_back(newcomer);
+  Udp socket;socket.Attach();
+  REQUIRE(InstallGameplayAuthorization(session,auth));
+  REQUIRE(BindGameplaySocket(session,2,uint64_t(socket.socket),1000));
+  const auto sock=uint64_t(socket.socket);
+  const std::vector<uint8_t> intro{0x00,0x19,0xC0,0x01,0x00,0x01,0xE3};
+  const std::vector<uint8_t> handshake{0x00,0x04,0x06,0x00,0x00,0x01};
+
+  // A same-house host confirms within milliseconds: nothing is held.
+  CHECK_FALSE(GameplayHoldUntilTitleJoined(sock,newcomer.logical,intro));
+  RecordAdvertisedHostAddress(session->info.id,1,advertised);
+  // On a public route the newcomer's reliable messages wait for the title...
+  CHECK(GameplayHoldUntilTitleJoined(sock,newcomer.logical,intro));
+  // ...but its handshake, its opening sequence-0 exchange (which the title
+  // needs before it asks the host), and anything from the host, always pass.
+  CHECK_FALSE(GameplayHoldUntilTitleJoined(sock,newcomer.logical,handshake));
+  const std::vector<uint8_t> opening{0x00,0xB2,0xC0,0x00,0x00,0x00,0xE1,0x00};
+  CHECK_FALSE(GameplayHoldUntilTitleJoined(sock,newcomer.logical,opening));
+  CHECK_FALSE(GameplayHoldUntilTitleJoined(sock,host.logical,intro));
+  // Another session's join of the same member does not count.
+  auto other_session=session->info.id;other_session[0]^=1;
+  RecordTitleJoinedRemote(other_session,3);
+  CHECK(GameplayHoldUntilTitleJoined(sock,newcomer.logical,intro));
+  RecordTitleJoinedRemote(session->info.id,3);
+  CHECK_FALSE(GameplayHoldUntilTitleJoined(sock,newcomer.logical,intro));
+}
+
+TEST_CASE("a newcomer the title never joins is held for a bounded time only", "[gameplay][session][network]") {
+  const LanAddress advertised{htonl(0x0A000050),30742};
+  const LanAddress public_host{htonl(0xC6336404),30742};  // TEST-NET-2
+  SessionRegistry registry;
+  auto session=registry.Create(1,"Host",public_host,1,4,4);
+  auto binding=std::make_shared<const GameplayAdmissionBinding>(GameplayAdmissionBinding{
+      "gameplay-hold-bound",std::string(32,'a'),std::string(32,'b')});
+  {
+    std::lock_guard lock(*session->mutex);
+    for(auto& member:session->members) member.local=false;
+    session->members.push_back({2,"Joiner",0,true,false,false,binding});
+  }
+  GameplayAuthorization auth;
+  auth.directory_session="gameplay-hold-bound"; auth.xbox_session=session->info.id;
+  auth.host_xuid=1; auth.xuid=2;
+  auth.admission_attempt=binding->attempt_id; auth.admission_generation=binding->admission_generation;
+  auth.member_nonce=std::string(32,'1'); auth.member_capability=std::string(32,'2');
+  auth.logical={htonl(0xf0000022),1000}; auth.expires_at=Clock::now()+std::chrono::seconds(40);
+  GameplayPeerAuthorization host;
+  host.traffic_key.fill(1); // Public deterministic test material only.
+  host.xuid=1; host.member_nonce=std::string(32,'3');
+  host.admission_attempt=std::string(32,'c'); host.admission_generation=std::string(32,'d');
+  host.logical={htonl(0xf0000021),1000};
+  host.traversal={std::string(32,'4'),std::string(32,'5'),"127.0.0.1",39188,0};
+  auto newcomer=host;
+  newcomer.traffic_key.fill(2);
+  newcomer.xuid=3; newcomer.member_nonce=std::string(32,'6');
+  newcomer.admission_attempt=std::string(32,'e'); newcomer.admission_generation=std::string(32,'f');
+  newcomer.logical={htonl(0xf0000023),1000};
+  newcomer.traversal={std::string(32,'7'),std::string(32,'8'),"127.0.0.1",39188,0};
+  auth.peers.push_back(host);
+  auth.peers.push_back(newcomer);
+  Udp socket;socket.Attach();
+  REQUIRE(InstallGameplayAuthorization(session,auth));
+  REQUIRE(BindGameplaySocket(session,2,uint64_t(socket.socket),1000));
+  RecordAdvertisedHostAddress(session->info.id,1,advertised);
+  const std::vector<uint8_t> intro{0x00,0x19,0xC0,0x01,0x00,0x01,0xE3};
+  CHECK(GameplayHoldUntilTitleJoined(uint64_t(socket.socket),newcomer.logical,intro));
+  std::this_thread::sleep_for(std::chrono::milliseconds(1600));
+  CHECK_FALSE(GameplayHoldUntilTitleJoined(uint64_t(socket.socket),newcomer.logical,intro));
+}
 }

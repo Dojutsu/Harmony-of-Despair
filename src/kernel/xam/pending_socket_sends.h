@@ -222,10 +222,19 @@ uint32_t QueuePendingSend(KernelState* state, uint32_t handle, object_ref<XSocke
   // fallback; on a cellular link those together routinely pass 5 s.
   op->deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
   if (destination) {
-    const auto peer = GameplayLogicalToXnAddr(htonl(uint32_t(destination->sin_addr)));
-    if (peer && peer->xuid != peer->host_xuid) {
+    const uint32_t logical = htonl(uint32_t(destination->sin_addr));
+    const auto peer = GameplayLogicalToXnAddr(logical);
+    // In a live game, a member that has already left has no route at all; a
+    // goodbye to it must not hold every later send for 10 s either. Without a
+    // live game (revoked or expired) sends keep the real 10 s failure.
+    const bool departed_member = !peer && IsGameplayLogicalAddress(logical) &&
+                                 GameplaySocketScopeCurrent(native.handle());
+    if ((peer && peer->xuid != peer->host_xuid) || departed_member) {
       op->drop_at_deadline = true;
-      op->deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+      // No route will appear for a departed member; drop its sends at once so
+      // a title still keeping it alive does not throttle every other send.
+      op->deadline = std::chrono::steady_clock::now() +
+                     (departed_member ? std::chrono::milliseconds(0) : std::chrono::milliseconds(1500));
     }
   }
   if (identity.event_handle) {

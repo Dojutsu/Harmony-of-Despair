@@ -934,6 +934,13 @@ static void RunPendingProtectedSends(KernelState* kernel) {
   const auto drop_started=std::chrono::steady_clock::now();
   Check(NetDll_WSAGetOverlappedResult_entry(1,sender_handle,dropped,bytes,1,flags)==1&&uint32_t(*bytes)==39,"pending-send member dropped as sent");
   Check(std::chrono::steady_clock::now()-drop_started<std::chrono::seconds(3)&&std::chrono::steady_clock::now()-drop_started>=std::chrono::milliseconds(1000),"pending-send member drop is quick");
+  // A goodbye to a member that already left has no route at all: dropped at once.
+  auto gone_to=ptr.operator()<XSOCKADDR_IN>(4880);gone_to->sin_family=AF_INET;gone_to->sin_addr=0xf0000009;gone_to->sin_port=1000;
+  auto gone=ptr.operator()<XWSAOVERLAPPED>(4896);std::memset(gone.host_address(),0,sizeof(*gone));gone->event_handle=event->handle();
+  Check(NetDll_WSASendTo_entry(1,sender_handle,buffer,1,bytes,0,gone_to,16,gone,nullptr)==uint32_t(-1)&&XThread::GetLastError()==997,"pending-send departed member admitted");
+  const auto gone_started=std::chrono::steady_clock::now();
+  Check(NetDll_WSAGetOverlappedResult_entry(1,sender_handle,gone,bytes,1,flags)==1&&uint32_t(*bytes)==39,"pending-send departed member dropped as sent");
+  Check(std::chrono::steady_clock::now()-gone_started<std::chrono::milliseconds(500),"pending-send departed member dropped at once");
   RevokeGameplayAuthorization(session,xuid);
   // Exact output identity changed while pending: preserve that guest update.
   auto changed=ptr.operator()<XWSAOVERLAPPED>(384);std::memset(changed.host_address(),0,sizeof(*changed));changed->event_handle=event->handle();
