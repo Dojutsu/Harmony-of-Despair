@@ -58,6 +58,10 @@ constexpr ButtonDef kButtons[] = {
     {false, 0.27f, 0.11f, 0.07f, "LB", Kind::kButton, X_INPUT_GAMEPAD_LEFT_SHOULDER},
     {true, 0.10f, 0.11f, 0.07f, "RT", Kind::kRightTrigger, 0},
     {true, 0.27f, 0.11f, 0.07f, "RB", Kind::kButton, X_INPUT_GAMEPAD_RIGHT_SHOULDER},
+    // Right-stick click (the camera zoom in Harmony of Despair), at the top-left
+    // of the face buttons so it stays out of the left thumb's movement zone.
+    {true, kFaceX + kFaceGap + 0.03f, kFaceY - kFaceGap - 0.05f, 0.06f, "R3", Kind::kButton,
+     X_INPUT_GAMEPAD_RIGHT_THUMB},
 };
 // Back and Start sit side by side at the top centre.
 constexpr float kMenuRadius = 0.05f;

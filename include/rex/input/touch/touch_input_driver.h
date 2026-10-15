@@ -26,7 +26,8 @@ struct OverlayControl {
 
 struct OverlaySnapshot {
   bool visible = false;
-  // The stick floats: its base sits wherever the thumb landed.
+  // The stick floats: its base sits wherever the thumb landed, and it is only
+  // drawn while a thumb is on it (`stick_base.pressed`).
   OverlayControl stick_base;
   float knob_x = 0.0f;
   float knob_y = 0.0f;

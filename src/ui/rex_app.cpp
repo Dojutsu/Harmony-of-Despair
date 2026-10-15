@@ -115,7 +115,8 @@ class TouchControlsOverlay final : public rex::ui::ImGuiDialog {
       }
       draw->AddRectFilled(ImVec2(centre.x - arm, centre.y - arm),
                           ImVec2(centre.x + arm, centre.y + arm), IM_COL32(255, 255, 255, 40));
-    } else {
+    } else if (base.pressed) {
+      // The stick only shows while a thumb is on it, centred where it landed.
       draw->AddCircleFilled(centre, radius, IM_COL32(255, 255, 255, 25), 48);
       draw->AddCircle(centre, radius, outline, 48, 2.0f);
       draw->AddCircleFilled(
