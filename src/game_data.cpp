@@ -20,6 +20,13 @@ namespace fs = std::filesystem;
 namespace harmony::game_data {
 namespace {
 
+// STFS entry paths use guest '\' separators; on POSIX that is an ordinary
+// file-name character, so convert before building a host path.
+fs::path GuestRelativePath(std::string guest) {
+  std::replace(guest.begin(), guest.end(), '\\', '/');
+  return fs::u8path(guest);
+}
+
 constexpr uint32_t kXex2Magic = 0x58455832;
 constexpr uint32_t kExecutionInfoKey = 0x00040006;
 constexpr std::string_view kInstallMarker = ".harmonyrecomp-install.json";
@@ -326,7 +333,7 @@ bool ExtractStfs(const fs::path& source, const fs::path& destination, XexIdentit
     pending.pop();
     for (const auto& child : entry->children()) pending.push(child.get());
 
-    fs::path relative = fs::path(entry->path());
+    fs::path relative = GuestRelativePath(entry->path());
     if (relative.is_absolute()) relative = relative.relative_path();
     if (!SafeRelativePath(relative)) {
       error = "the STFS package contains an unsafe path";
