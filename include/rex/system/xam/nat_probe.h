@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <rex/cvar.h>
@@ -87,6 +88,8 @@ bool NatProbeCommitAuthenticatedLanPeers(uint64_t socket,
     bool (*commit)(void*) noexcept,void* context) noexcept;
 void NatProbeRemoveGameplayIdentity(uint64_t socket, std::string_view attempt_id);
 std::optional<LanAddress> NatProbeGameplayDestination(uint64_t socket, LanAddress logical);
+// Diagnostics: why NatProbeGameplayDestination() has no route ("routable" when it has one).
+std::string_view NatProbeGameplayDestinationReason(uint64_t socket, LanAddress logical);
 bool NatProbeIsPendingGameplaySource(uint64_t socket, LanAddress native);
 void NatProbeRecordGameplayTraffic(uint64_t socket, LanAddress native, size_t bytes, bool sent);
 void NatProbeSetLogicalGameplayPeer(std::string_view attempt_id, LanAddress logical);

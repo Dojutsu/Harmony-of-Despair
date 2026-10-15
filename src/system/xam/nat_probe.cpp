@@ -653,6 +653,24 @@ std::optional<LanAddress> NatProbeGameplayDestination(uint64_t socket, LanAddres
   return result;
 }
 
+std::string_view NatProbeGameplayDestinationReason(uint64_t socket, LanAddress logical) {
+  std::lock_guard lock(state_mutex);
+  auto found = states.find(socket);
+  if (found == states.end()) return "socket_not_attached";
+  if (found->second.role != NatProbeRole::kGameplay) return "not_gameplay_socket";
+  std::string_view reason = "no_attempt_for_logical";
+  std::optional<LanAddress> routable;
+  for (const auto& [key, attempt] : found->second.attempts) {
+    if (attempt.logical_gameplay_peer != logical) continue;
+    if (!attempt.identity.gameplay_authorized) { reason = "not_gameplay_authorized"; continue; }
+    if (attempt.identity.expires_at <= std::chrono::steady_clock::now()) { reason = "expired"; continue; }
+    if (!attempt.endpoint.acknowledged()) { reason = "not_acknowledged"; continue; }
+    if (routable && *routable != attempt.endpoint.peer()) return "ambiguous_peers";
+    routable = attempt.endpoint.peer();
+  }
+  return routable ? std::string_view("routable") : reason;
+}
+
 void NatProbeSetLogicalGameplayPeer(std::string_view attempt_id, LanAddress logical) {
   if (!logical.ipv4 || !logical.port) return;
   std::lock_guard lock(state_mutex);

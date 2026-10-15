@@ -38,6 +38,7 @@ struct PendingSocketSend {
   XWSAOVERLAPPED identity{};
   N_XSOCKADDR_IN destination{};
   bool has_destination = false, ready = false, complete = false;
+  bool blocked_logged = false;  // GAMEPLAY_ROUTE_DIAG: first EWOULDBLOCK reported
   uint32_t error = 0, transferred = 0;
   uint64_t sequence = 0;
   size_t admitted_bytes = 0;
@@ -127,6 +128,12 @@ void RunPendingSends(const std::shared_ptr<PendingSocketSendService>& service) {
       } else if (op->native.retired() || !op->owner || !op->owner->is_running()) {
         CompletePendingSend(*op, 995, 0);
       } else if (std::chrono::steady_clock::now() >= op->deadline) {
+        REXKRNL_INFO("GAMEPLAY_ROUTE_DIAG pending_send_deadline socket={:08X} overlapped={:08X} "
+                     "destination={:08X}:{} bytes={}",
+                     op->socket_handle, op->overlapped,
+                     op->has_destination ? uint32_t(op->destination.sin_addr) : 0u,
+                     op->has_destination ? uint16_t(op->destination.sin_port) : 0,
+                     op->payload.size());
         CompletePendingSend(*op, 10060, 0);
       } else if (std::find(blocked.begin(), blocked.begin() + blocked_count, op->socket.get()) == blocked.begin() + blocked_count) {
         // A per-call nonblocking flag preserves the guest socket's mode. The
@@ -145,7 +152,18 @@ void RunPendingSends(const std::shared_ptr<PendingSocketSendService>& service) {
         if (op->native.retired()) CompletePendingSend(*op, 995, 0);
         else if (sent >= 0) CompletePendingSend(*op, 0, uint32_t(sent));
         else if (error != 10035 && error != 10004) CompletePendingSend(*op, error, 0);
-        else blocked[blocked_count++] = op->socket.get();
+        else {
+          if (!op->blocked_logged) {
+            op->blocked_logged = true;
+            REXKRNL_INFO("GAMEPLAY_ROUTE_DIAG pending_send_blocked socket={:08X} overlapped={:08X} "
+                         "destination={:08X}:{} error={} bytes={}",
+                         op->socket_handle, op->overlapped,
+                         op->has_destination ? uint32_t(op->destination.sin_addr) : 0u,
+                         op->has_destination ? uint16_t(op->destination.sin_port) : 0, error,
+                         op->payload.size());
+          }
+          blocked[blocked_count++] = op->socket.get();
+        }
       }
       if (op->complete) service->changed.notify_all();
     }

@@ -113,6 +113,62 @@ bool Current(const Scope& scope) {
          Clock::now() < scope.authorization.expires_at;
 }
 
+// GAMEPLAY_ROUTE_DIAG only: names the first condition that keeps a scope from
+// being Current(), mirroring MemberCurrent()/Current(). Ids are shortened to
+// prefixes; credentials and nonces are never logged.
+std::string ShortId(std::string_view id) { return std::string(id.substr(0, 8)); }
+uint64_t SessionIdValue(const std::array<uint8_t, 8>& id) {
+  uint64_t value = 0;
+  for (const auto byte : id) value = (value << 8) | byte;
+  return value;
+}
+std::string NotCurrentReason(const Scope& scope) {
+  const auto session = scope.session.lock();
+  if (!session) return "no_session";
+  if (scope.closed) return "closed";
+  std::lock_guard lock(*session->mutex);
+  if (session->state == SessionState::kDeleted) return "deleted";
+  if (session->private_lan_invitation && !session->private_lan_invitation->Current())
+    return "private_invitation_not_current";
+  const auto member = std::find_if(session->members.begin(), session->members.end(),
+      [&](const auto& value) { return value.xuid == scope.xuid && value.local; });
+  if (member == session->members.end())
+    return fmt::format("no_local_member members={}", session->members.size());
+  if (scope.authorization.member_nonce.empty()) return "empty_member_nonce";
+  if (scope.authorization.xbox_session != session->info.id)
+    return fmt::format("xbox_session_mismatch auth={:016X} session={:016X}",
+                       SessionIdValue(scope.authorization.xbox_session),
+                       SessionIdValue(session->info.id));
+  if (scope.authorization.host_xuid != session->host_xuid)
+    return fmt::format("host_xuid_mismatch auth={:016X} session={:016X}",
+                       scope.authorization.host_xuid, session->host_xuid);
+  if (scope.xuid != session->host_xuid) {
+    const auto& binding = member->gameplay_admission;
+    if (!binding) return "missing_gameplay_admission";
+    if (binding->directory_session_id != scope.authorization.directory_session)
+      return fmt::format("directory_session_mismatch auth={} member={}",
+                         ShortId(scope.authorization.directory_session),
+                         ShortId(binding->directory_session_id));
+    if (binding->attempt_id != scope.authorization.admission_attempt)
+      return fmt::format("attempt_mismatch auth={} member={}",
+                         ShortId(scope.authorization.admission_attempt),
+                         ShortId(binding->attempt_id));
+    if (binding->admission_generation != scope.authorization.admission_generation)
+      return fmt::format("generation_mismatch auth={} member={}",
+                         ShortId(scope.authorization.admission_generation),
+                         ShortId(binding->admission_generation));
+  }
+  if (Clock::now() >= scope.authorization.expires_at) return "expired";
+  return "current";
+}
+bool RouteDiagDue(std::unordered_map<uint64_t, Clock::time_point>& last, uint64_t key) {
+  const auto now = Clock::now();
+  auto& at = last[key];
+  if (at != Clock::time_point{} && now - at < std::chrono::seconds(1)) return false;
+  at = now;
+  return true;
+}
+
 bool PeerCurrent(const Scope& scope, const GameplayPeerAuthorization& peer) {
   const auto session = scope.session.lock();
   if (!session) return false;
@@ -555,6 +611,12 @@ std::optional<LanAddress> GameplayLogicalDestination(uint64_t socket, LanAddress
     LanAddress original_host;
     { std::lock_guard session_lock(*session->mutex); original_host = session->info.host_address; }
     if (!Current(scope)) {
+      static std::unordered_map<uint64_t, Clock::time_point> last_logged;  // gameplay_mutex
+      if (RouteDiagDue(last_logged, socket))
+        REXSYS_INFO("GAMEPLAY_ROUTE_DIAG scope_not_current socket={} xuid={:016X} reason={} "
+                    "requested={:08X}:{} host_original={:08X}:{}",
+                    socket, scope.xuid, NotCurrentReason(scope), ntohl(requested.ipv4),
+                    requested.port, ntohl(original_host.ipv4), original_host.port);
       // A pending or expired admitted client must not send its initial host
       // handshake through an unauthenticated endpoint fallback.
       if (scope.xuid != session->host_xuid && requested.ipv4 == original_host.ipv4)

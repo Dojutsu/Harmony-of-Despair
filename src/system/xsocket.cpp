@@ -14,6 +14,9 @@
 #include <chrono>
 #include <cstring>
 #include <vector>
+#include <mutex>
+#include <string_view>
+#include <unordered_map>
 
 #include <rex/kernel/xam/module.h>
 #include <rex/logging.h>
@@ -1037,6 +1040,31 @@ int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
               );
 }
 
+namespace {
+// GAMEPLAY_ROUTE_DIAG: at most one unroutable-send line per socket per second.
+void LogUnroutableGameplaySend(uint64_t handle, const sockaddr_in& requested,
+                               std::optional<xam::LanAddress> logical, std::string_view reason) {
+  static std::mutex mutex;
+  static std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> last;
+  {
+    std::lock_guard lock(mutex);
+    const auto now = std::chrono::steady_clock::now();
+    auto& at = last[handle];
+    if (at != std::chrono::steady_clock::time_point{} && now - at < std::chrono::seconds(1)) return;
+    at = now;
+  }
+  if (logical)
+    REXSYS_INFO("GAMEPLAY_ROUTE_DIAG send_unroutable socket={} requested={:08X}:{} "
+                "logical={:08X}:{} reason={}",
+                handle, ntohl(requested.sin_addr.s_addr), ntohs(requested.sin_port),
+                ntohl(logical->ipv4), logical->port, reason);
+  else
+    REXSYS_INFO("GAMEPLAY_ROUTE_DIAG send_unroutable socket={} requested={:08X}:{} "
+                "logical=none reason={}",
+                handle, ntohl(requested.sin_addr.s_addr), ntohs(requested.sin_port), reason);
+}
+}  // namespace
+
 int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* to,
                     uint32_t to_len) {
   const auto operation = AcquireNativeLease();
@@ -1092,6 +1120,9 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
           {nto.sin_addr.s_addr, uint16_t(to->sin_port)});
       auto peer = logical ? xam::NatProbeGameplayDestination(handle, *logical) : std::nullopt;
       if (!peer && (logical || xam::IsGameplayLogicalAddress(nto.sin_addr.s_addr))) {
+        LogUnroutableGameplaySend(handle, nto, logical,
+            logical ? xam::NatProbeGameplayDestinationReason(handle, *logical)
+                    : std::string_view("no_logical_destination"));
 #if REX_PLATFORM_WIN32
         WSASetLastError(WSAEWOULDBLOCK);
 #else
@@ -1134,7 +1165,11 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
       protected_logical = xam::NatProbeNormalizeGameplaySource(handle,
           {nto.sin_addr.s_addr, ntohs(nto.sin_port)});
     }
-    if (!protected_logical) { FailSocket(EWOULDBLOCK); return -1; }
+    if (!protected_logical) {
+      if (to) LogUnroutableGameplaySend(handle, nto, std::nullopt, "no_logical_destination");
+      FailSocket(EWOULDBLOCK);
+      return -1;
+    }
     auto wire = ProtectedGameplayWire(handle, *protected_logical, buf, buf_len);
     if (!wire) return -1;
     if (operation.retired()) return ClosedNativeSocket();
