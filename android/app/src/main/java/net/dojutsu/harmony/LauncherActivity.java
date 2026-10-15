@@ -19,6 +19,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -39,11 +40,13 @@ import java.util.Locale;
 public class LauncherActivity extends Activity {
     public static final String EXTRA_ARGS = "net.dojutsu.harmony.ARGS";
     public static final String EXTRA_ONLINE = "net.dojutsu.harmony.ONLINE";
+    public static final String EXTRA_HAPTICS = "net.dojutsu.harmony.HAPTICS";
     public static final String ONLINE_STATUS_DIR = "online-status";
 
     private static final String PREFS = "harmony";
     private static final String PREF_NAME = "player_name";
     private static final String PREF_XUID = "player_xuid";
+    private static final String PREF_HAPTICS = "touch_haptics";
     private static final String DEFAULT_XUID_HEX = "B13EBABEBABEBABE";  // the engine's built-in player id
     private static final String DIRECTORY_URL = "https://hod.dojutsu.net";
     private static final String CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
@@ -55,6 +58,7 @@ public class LauncherActivity extends Activity {
 
     private EditText nameField;
     private EditText codeField;
+    private CheckBox hapticsBox;
     private LinearLayout setupPanel;
     private TextView setupNote;
     private Button pickButton;
@@ -178,6 +182,15 @@ public class LauncherActivity extends Activity {
         column.addView(join);
         playControls.add(join);
 
+        // Only matters on phones that use the on-screen buttons.
+        hapticsBox = new CheckBox(this);
+        hapticsBox.setText("Vibrate when touch buttons are pressed");
+        hapticsBox.setTextColor(Color.LTGRAY);
+        hapticsBox.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        hapticsBox.setChecked(prefs.getBoolean(PREF_HAPTICS, true));
+        hapticsBox.setPadding(dp(8), dp(12), 0, dp(12));
+        column.addView(hapticsBox);
+
         // For players whose game closes in a way Android doesn't flag as a crash.
         TextView report = label("Game closing by itself? Tap here to save a problem report to Downloads.");
         report.setTextColor(Color.GRAY);
@@ -286,7 +299,8 @@ public class LauncherActivity extends Activity {
             return;
         }
         String xuid = ensureXuid(prefs);
-        prefs.edit().putString(PREF_NAME, name).apply();
+        boolean haptics = hapticsBox.isChecked();
+        prefs.edit().putString(PREF_NAME, name).putBoolean(PREF_HAPTICS, haptics).apply();
 
         ArrayList<String> args = new ArrayList<>();
         args.add("--user_name=" + name);
@@ -306,6 +320,7 @@ public class LauncherActivity extends Activity {
         Intent intent = new Intent(this, HarmonyActivity.class);
         intent.putExtra(EXTRA_ARGS, args.toArray(new String[0]));
         intent.putExtra(EXTRA_ONLINE, online);
+        intent.putExtra(EXTRA_HAPTICS, haptics);
         startActivity(intent);
         finish();
     }

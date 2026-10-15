@@ -91,7 +91,9 @@ public class HarmonyActivity extends SDLActivity {
 
         // Phones without a controller get on-screen buttons; they hide while one is connected.
         if (mLayout instanceof RelativeLayout) {
-            touchControls = new TouchControls(this);
+            Intent launch = getIntent();
+            boolean haptics = launch == null || launch.getBooleanExtra(LauncherActivity.EXTRA_HAPTICS, true);
+            touchControls = new TouchControls(this, haptics);
             mLayout.addView(touchControls, new RelativeLayout.LayoutParams(
                     RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT));
         }

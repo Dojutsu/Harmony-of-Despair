@@ -21,6 +21,7 @@
 #include <vector>
 
 #include <rex/main_android.h>
+#include <rex/system/xam/title_presence.h>
 #include <rex/ui/windowed_app.h>
 
 namespace {
@@ -160,6 +161,13 @@ extern "C" JNIEXPORT void JNICALL
 Java_net_dojutsu_harmony_TouchControls_nativeSetAxis(JNIEnv*, jclass, jint axis, jint value) {
   std::lock_guard lock(touch_mutex);
   if (touch_pad) SDL_SetJoystickVirtualAxis(touch_pad, axis, static_cast<Sint16>(value));
+}
+
+// The title's rich-presence context: 4 and 5 mean the player is in a stage,
+// which switches the touch D-pad to an analog stick.
+extern "C" JNIEXPORT jint JNICALL
+Java_net_dojutsu_harmony_TouchControls_nativePresence(JNIEnv*, jclass) {
+  return static_cast<jint>(rex::system::xam::TitlePresenceContext());
 }
 
 int main(int argc, char** argv) {
