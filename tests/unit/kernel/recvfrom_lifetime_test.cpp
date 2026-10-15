@@ -922,6 +922,18 @@ static void RunPendingProtectedSends(KernelState* kernel) {
     else Check(n!=39,"pending-send never plaintext");
   }
   Check(decoded,"pending-send actual encrypted UDP");
+  // A send to another member whose route never comes up is dropped like a real
+  // datagram after a short wait, so it cannot hold the title's only OVERLAPPED.
+  GameplayPeerAuthorization member;member.xuid=xuid+2;member.member_nonce=std::string(32,'6');
+  member.logical={htonl(0xf0000003),1000};member.traversal={std::string(32,'7'),std::string(32,'8'),"127.0.0.1",ntohs(receiver->bound_port()),0};member.traffic_key.fill(9);
+  auth.peers.push_back(member);
+  Check(InstallGameplayAuthorization(session,auth),"pending-send member authorization");
+  auto member_to=ptr.operator()<XSOCKADDR_IN>(4864);member_to->sin_family=AF_INET;member_to->sin_addr=0xf0000003;member_to->sin_port=1000;
+  auto dropped=ptr.operator()<XWSAOVERLAPPED>(4800);std::memset(dropped.host_address(),0,sizeof(*dropped));dropped->event_handle=event->handle();
+  Check(NetDll_WSASendTo_entry(1,sender_handle,buffer,1,bytes,0,member_to,16,dropped,nullptr)==uint32_t(-1)&&XThread::GetLastError()==997,"pending-send member admitted");
+  const auto drop_started=std::chrono::steady_clock::now();
+  Check(NetDll_WSAGetOverlappedResult_entry(1,sender_handle,dropped,bytes,1,flags)==1&&uint32_t(*bytes)==39,"pending-send member dropped as sent");
+  Check(std::chrono::steady_clock::now()-drop_started<std::chrono::seconds(3)&&std::chrono::steady_clock::now()-drop_started>=std::chrono::milliseconds(1000),"pending-send member drop is quick");
   RevokeGameplayAuthorization(session,xuid);
   // Exact output identity changed while pending: preserve that guest update.
   auto changed=ptr.operator()<XWSAOVERLAPPED>(384);std::memset(changed.host_address(),0,sizeof(*changed));changed->event_handle=event->handle();
