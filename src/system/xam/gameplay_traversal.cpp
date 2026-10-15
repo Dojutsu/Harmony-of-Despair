@@ -739,7 +739,7 @@ std::optional<GameplayXnAddr> GameplayXnAddrToLogical(
     if (!Current(scope) || scope.authorization.xbox_session != session_id) continue;
     for (const auto& peer : scope.authorization.peers)
       if (PeerCurrent(scope, peer) && ReconstructXnAddrIdentity(peer.xuid) == identity)
-        return GameplayXnAddr{session_id, peer.xuid, peer.logical};
+        return GameplayXnAddr{session_id, peer.xuid, peer.logical, scope.authorization.host_xuid};
   }
   return std::nullopt;
 }
@@ -754,7 +754,8 @@ std::optional<GameplayXnAddr> GameplayLogicalToXnAddr(uint32_t ipv4) {
       if (peer.logical.ipv4 == ipv4 && PeerCurrent(scope, peer)) {
         if (result && (result->session_id != scope.authorization.xbox_session || result->xuid != peer.xuid))
           return std::nullopt;
-        result = GameplayXnAddr{scope.authorization.xbox_session, peer.xuid, peer.logical};
+        result = GameplayXnAddr{scope.authorization.xbox_session, peer.xuid, peer.logical,
+                                scope.authorization.host_xuid};
       }
   }
   return result;

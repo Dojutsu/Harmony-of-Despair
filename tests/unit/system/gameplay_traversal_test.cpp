@@ -33,6 +33,7 @@ namespace rex::kernel::xam {
 struct XNADDR;
 u32 NetDll_XNetXnAddrToInAddr_entry(u32, ppc_ptr_t<XNADDR>, mapped_void, mapped_void);
 u32 NetDll_XNetInAddrToXnAddr_entry(u32, u32, ppc_ptr_t<XNADDR>, mapped_void);
+u32 NetDll_XNetRegisterKey_entry(u32, mapped_void, mapped_void);
 }
 namespace rex::system::xam {
 TEST_CASE("gameplay directory worker survives manual admission and joins at shutdown",
@@ -502,7 +503,47 @@ TEST_CASE("XNet entries round trip admission aliases with exact session and XUID
     CHECK(NetDll_XNetXnAddrToInAddr_entry(1,ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(relayed.data())),
         mapped_void{},mapped_void::from_host(&address))==0);
     CHECK(address==peer.logical.ipv4);
+    // The reverse lookup echoes the XID the title used for this member, so the
+    // title doesn't take its own peer for a member of another session.
+    std::array<uint8_t,36> echoed{};std::array<uint8_t,8> echoed_id{};
+    REQUIRE(NetDll_XNetInAddrToXnAddr_entry(1,ntohl(address),
+        ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(echoed.data())),mapped_void::from_host(echoed_id.data()))==0);
+    CHECK(echoed_id==wrong);
+    CHECK(std::equal(input.begin()+10,input.end(),echoed.begin()+10));
   }
+}
+TEST_CASE("XNet reverse lookups report the title's own XID for session members", "[gameplay][network][xnet]") {
+  using namespace rex::kernel::xam;
+  // A later session reusing earlier logical addresses with other members does
+  // not inherit a remembered XID.
+  SessionRegistry next_registry;auto next=next_registry.Create(1,"Host",{htonl(INADDR_LOOPBACK),30742},1,3,3);
+  auto next_auth=Ticket(next);
+  REQUIRE(InstallGameplayAuthorization(next,next_auth));
+  auto reverse=[&](const GameplayPeerAuthorization& peer) {
+    std::array<uint8_t,36> out{};std::array<uint8_t,8> id{};
+    REQUIRE(NetDll_XNetInAddrToXnAddr_entry(1,ntohl(peer.logical.ipv4),
+        ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(out.data())),mapped_void::from_host(id.data()))==0);
+    return id;
+  };
+  // Before the title names any member, a member that reaches it first is
+  // reported with the title's registered session key, as the host relays it.
+  std::array<uint8_t,8> key_id{0x82,0x7B,0x3F,0xF4,0,0,0,0x14};std::array<uint8_t,16> key{};
+  REQUIRE(NetDll_XNetRegisterKey_entry(1,mapped_void::from_host(key_id.data()),mapped_void::from_host(key.data()))==0);
+  CHECK(reverse(next_auth.peers[0])==key_id);
+  CHECK(reverse(next_auth.peers[1])==key_id);
+  // Once the title has named one member of this session with its own XID, a
+  // member it has not looked up yet (a newcomer) is reported with that XID too.
+  auto title_xid=next->info.id;title_xid[7]^=0x55;
+  auto identity=ReconstructXnAddrIdentity(next_auth.peers[0].xuid);
+  std::array<uint8_t,36> member{};
+  std::memcpy(member.data(),&next_auth.peers[0].logical.ipv4,4);std::memcpy(member.data()+4,&next_auth.peers[0].logical.ipv4,4);
+  std::memcpy(member.data()+10,identity.ethernet_address.data(),6);std::memcpy(member.data()+16,identity.online_address.data(),20);
+  uint32_t resolved=0;
+  REQUIRE(NetDll_XNetXnAddrToInAddr_entry(1,ppc_ptr_t<XNADDR>::from_host(reinterpret_cast<XNADDR*>(member.data())),
+      mapped_void::from_host(title_xid.data()),mapped_void::from_host(&resolved))==0);
+  CHECK(resolved==next_auth.peers[0].logical.ipv4);
+  CHECK(reverse(next_auth.peers[0])==title_xid);
+  CHECK(reverse(next_auth.peers[1])==title_xid);
 }
 TEST_CASE("XSocket protects admitted peer payloads and refuses scoped raw fallback", "[gameplay][network][socket]") {
   Udp a,b,lan;

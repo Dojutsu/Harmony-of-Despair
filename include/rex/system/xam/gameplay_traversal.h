@@ -86,6 +86,7 @@ struct GameplayXnAddr {
   std::array<uint8_t, 8> session_id{};
   uint64_t xuid = 0;
   LanAddress logical;
+  uint64_t host_xuid = 0;  // The session host's xuid (equal to xuid for the host).
 };
 std::optional<GameplayXnAddr> GameplayXnAddrToLogical(
     const std::array<uint8_t, 8>& session_id, const XnAddrIdentity& identity);

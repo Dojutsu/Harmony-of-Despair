@@ -270,7 +270,37 @@ struct XNetStartupParams {
 static XNetStartupParams xnet_startup_params = {};
 static std::mutex xnet_registry_mutex;
 static std::unordered_map<uint32_t, XNADDR> xnet_address_registry;
+// The XID a title associated with a directory-assigned gameplay peer. Titles
+// key other members by their own session XID, which need not equal the
+// runtime's peer session id; echo theirs back so a later XNetInAddrToXnAddr
+// doesn't look like a different session. Keyed by logical address and checked
+// against the peer's xuid and session so a reused logical address can't inherit it.
+struct GameplayTitleXid { uint64_t xuid = 0; std::array<uint8_t, 8> session{}, xid{}; };
+static std::unordered_map<uint32_t, GameplayTitleXid> gameplay_title_xids;
+// The XID a title uses for the other members of a runtime session, for members
+// it has not looked up itself yet (a newcomer that reaches it first). Keyed by
+// the runtime session id.
+static std::unordered_map<uint64_t, std::array<uint8_t, 8>> gameplay_session_title_xids;
+uint64_t GameplaySessionKey(const std::array<uint8_t, 8>& id) {
+  uint64_t key = 0;
+  for (auto byte : id) key = (key << 8) | byte;
+  return key;
+}
+void RecordGameplayTitleXid(const GameplayXnAddr& peer, const void* xid) {
+  GameplayTitleXid recorded{peer.xuid, peer.session_id};
+  std::memcpy(recorded.xid.data(), xid, recorded.xid.size());
+  std::lock_guard lock(xnet_registry_mutex);
+  if (gameplay_title_xids.size() > 64) gameplay_title_xids.clear();
+  gameplay_title_xids[peer.logical.ipv4] = recorded;
+  if (recorded.xid != peer.session_id) {
+    if (gameplay_session_title_xids.size() > 16) gameplay_session_title_xids.clear();
+    gameplay_session_title_xids[GameplaySessionKey(peer.session_id)] = recorded.xid;
+  }
+}
 static std::unordered_map<uint64_t, std::array<uint8_t, 16>> xnet_key_registry;
+// The key id the title registered last, as its raw guest bytes: titles name
+// their session members by it.
+static std::optional<std::array<uint8_t, 8>> xnet_last_registered_key_id;
 
 std::array<uint8_t, 6> SyntheticEthernetAddress(uint32_t address) {
   // The XNet address is the stable peer key available to this API. Preserve
@@ -1278,6 +1308,7 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
     std::memcpy(identity.ethernet_address.data(), xn_addr->abEnet, identity.ethernet_address.size());
     std::memcpy(identity.online_address.data(), xn_addr->abOnline, identity.online_address.size());
     if (auto peer = GameplayXnAddrToLogical(session_id, identity)) {
+      RecordGameplayTitleXid(*peer, xid.host_address());
       std::memcpy(in_addr.host_address(), &peer->logical.ipv4, sizeof(uint32_t));
       return 0;
     }
@@ -1306,6 +1337,7 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
                    own_identity ? "accepted, runtime-built address" : "accepted, host-built address");
     }
     if (peer) {
+      if (xid) RecordGameplayTitleXid(*peer, xid.host_address());
       std::memcpy(in_addr.host_address(), &peer->logical.ipv4, sizeof(uint32_t));
       return 0;
     }
@@ -1336,7 +1368,37 @@ u32 NetDll_XNetInAddrToXnAddr_entry(u32 caller, u32 address, ppc_ptr_t<XNADDR> x
     const auto identity = ReconstructXnAddrIdentity(peer->xuid);
     std::memcpy(xn_addr->abEnet, identity.ethernet_address.data(), identity.ethernet_address.size());
     std::memcpy(xn_addr->abOnline, identity.online_address.data(), identity.online_address.size());
-    if (xid) std::memcpy(xid.host_address(), peer->session_id.data(), peer->session_id.size());
+    if (xid) {
+      auto session = peer->session_id;
+      {
+        std::lock_guard lock(xnet_registry_mutex);
+        auto found = gameplay_title_xids.find(peer->logical.ipv4);
+        if (found != gameplay_title_xids.end() && found->second.xuid == peer->xuid &&
+            found->second.session == peer->session_id) {
+          session = found->second.xid;
+        } else if (auto title = gameplay_session_title_xids.find(GameplaySessionKey(peer->session_id));
+                   title != gameplay_session_title_xids.end()) {
+          session = title->second;
+        } else if (peer->xuid != peer->host_xuid && xnet_last_registered_key_id) {
+          // A member the title has not named yet (a newcomer that reached it
+          // first): titles key other members by their registered session key.
+          session = *xnet_last_registered_key_id;
+        }
+      }
+      if (session != peer->session_id) {
+        static std::unordered_map<uint32_t, uint64_t> logged;
+        std::lock_guard lock(xnet_registry_mutex);
+        if (logged.size() > 64) logged.clear();
+        if (logged[peer->logical.ipv4] != GameplaySessionKey(session)) {
+          logged[peer->logical.ipv4] = GameplaySessionKey(session);
+          REXKRNL_INFO("XNetInAddrToXnAddr: logical {:08X} reported with title xid {:016X} "
+                       "instead of peer session {:016X}",
+                       ntohl(peer->logical.ipv4), GameplaySessionKey(session),
+                       GameplaySessionKey(peer->session_id));
+        }
+      }
+      std::memcpy(xid.host_address(), session.data(), session.size());
+    }
     return 0;
   }
   if (IsGameplayLogicalAddress(htonl(address))) return 0x2741;
@@ -1361,6 +1423,9 @@ u32 NetDll_XNetRegisterKey_entry(u32 caller, mapped_void key_id, mapped_void key
   std::memcpy(value.data(), key.host_address(), value.size());
   std::lock_guard lock(xnet_registry_mutex);
   xnet_key_registry[LoadKeyId(key_id)] = value;
+  std::array<uint8_t, 8> raw_key_id{};
+  std::memcpy(raw_key_id.data(), key_id.host_address(), raw_key_id.size());
+  xnet_last_registered_key_id = raw_key_id;
   return 0;
 }
 u32 NetDll_XNetReplaceKey_entry(u32 caller, mapped_void key_id, mapped_void key) {
