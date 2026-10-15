@@ -120,9 +120,12 @@ class HarmonyrecompApp : public rex::ReXApp {
               rex::cvar::SetFlagByName("user_xuid", std::to_string(choice.xuid));
               rex::cvar::SetFlagByName("lan_online", "true");
               // Linux and macOS cannot bind the title's guest port 1000 without root;
-              // use the same fixed ports as the Windows launcher.
-              rex::cvar::SetFlagByName("lan_discovery_port", "30741");
-              rex::cvar::SetFlagByName("lan_gameplay_port", "30742");
+              // use the same fixed ports as the Windows launcher unless the
+              // launch settings chose others (several devices behind one router).
+              if (rex::cvar::GetFlagSource("lan_discovery_port") == rex::cvar::Source::kDefault)
+                rex::cvar::SetFlagByName("lan_discovery_port", "30741");
+              if (rex::cvar::GetFlagSource("lan_gameplay_port") == rex::cvar::Source::kDefault)
+                rex::cvar::SetFlagByName("lan_gameplay_port", "30742");
               if (auto address = harmony::first_run::OutboundIpv4(); !address.empty())
                 rex::cvar::SetFlagByName("lan_bind_address", address);
               rex::cvar::SetFlagByName("session_directory_url", "https://hod.dojutsu.net");
