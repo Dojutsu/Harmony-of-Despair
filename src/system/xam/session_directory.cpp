@@ -249,6 +249,18 @@ ClientAdmissionApplyResult ClientAdmissionLeaseState::ApplyResponse(
     Terminalize();
     return ClientAdmissionApplyResult::kInvalidated;
   }
+  // The host completes the directory attempt as soon as it has admitted this
+  // player, which can land between the title's join and its join completion.
+  // That is the success path, not a revocation: keep the ready admission so
+  // join completion can publish it, and stop polling. The lease deadline still
+  // bounds how long it is kept.
+  if (operation.action == ClientAdmissionAction::kStatus && admission.phase == "terminal" &&
+      admission.terminal_reason == "completed" && admission.attempt_id == attempt_id_ &&
+      admission.purpose == purpose_ && leased() && host_ready_ &&
+      admission.admission_generation == admission_generation_) {
+    host_completed_ = true;
+    return ClientAdmissionApplyResult::kApplied;
+  }
   if (admission.attempt_id != attempt_id_ || admission.purpose != purpose_ ||
       admission.phase == "terminal") {
     Terminalize();
@@ -348,6 +360,7 @@ void ClientAdmissionLeaseState::Invalidate() {
   renewal_deadline_ = {};
   host_ready_ = false;
   has_ever_been_ready_ = false;
+  host_completed_ = false;
   renewal_uncertainty_.reset();
   session_confirmed_ = false;
   pending_session_.reset();
@@ -372,6 +385,7 @@ void ClientAdmissionLeaseState::Terminalize() {
   lease_deadline_ = {};
   renewal_deadline_ = {};
   host_ready_ = false;
+  host_completed_ = false;
   renewal_uncertainty_.reset();
   session_confirmed_ = false;
   pending_session_.reset();
@@ -379,7 +393,7 @@ void ClientAdmissionLeaseState::Terminalize() {
 }
 
 ClientAdmissionAction ClientAdmissionLeaseState::NextAction(Clock::time_point now) const {
-  if (!bound() || (leased() && now >= lease_deadline_))
+  if (!bound() || host_completed_ || (leased() && now >= lease_deadline_))
     return ClientAdmissionAction::kNone;
   if (!leased())
     return ClientAdmissionAction::kArm;
@@ -1527,6 +1541,9 @@ std::optional<DirectoryAdmissionState> ParseDirectoryAdmissionResponse(std::stri
         result.admission_generation = generation->get<std::string>();
         result.lease_revision = revision->get<uint64_t>();
       }
+      auto reason = document.find("terminal_reason");
+      if (result.phase == "terminal" && reason != document.end() && reason->is_string())
+        result.terminal_reason = reason->get<std::string>();
     } else {
       return std::nullopt;
     }

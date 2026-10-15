@@ -130,6 +130,9 @@ struct DirectoryAdmissionState {
   uint32_t admission_lease_duration_ms = 0;
   uint32_t admission_expires_in_ms = 0;
   bool host_ready = false;
+  // Only set on a terminal phase; "completed" means the host finished the
+  // attempt after admitting this player.
+  std::string terminal_reason;
 };
 
 struct ReadyAcceptedSessionCandidate {
@@ -242,6 +245,7 @@ class ClientAdmissionLeaseState {
   bool host_ready() const { return host_ready_; }
   bool renewal_uncertain() const { return renewal_uncertainty_.has_value(); }
   bool has_ever_been_ready() const { return has_ever_been_ready_; }
+  bool host_completed() const { return host_completed_; }
   uint32_t local_user_index() const { return local_user_index_; }
   uint64_t lifecycle_token() const { return lifecycle_token_; }
   uint32_t title_id() const { return title_id_; }
@@ -276,6 +280,7 @@ class ClientAdmissionLeaseState {
   Clock::time_point renewal_deadline_{};
   bool host_ready_ = false;
   bool has_ever_been_ready_ = false;
+  bool host_completed_ = false;
   struct RenewalUncertainty {
     std::string admission_generation;
     uint64_t previous_revision = 0;
