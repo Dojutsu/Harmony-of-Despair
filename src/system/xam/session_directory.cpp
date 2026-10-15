@@ -1037,7 +1037,8 @@ std::optional<HttpResult> Request(std::string_view base_url, std::wstring_view m
     return std::nullopt;
   // Directory failure must not stall the guest's existing LAN search or
   // session teardown. These are per-stage bounds; gameplay never uses HTTP.
-  WinHttpSetTimeouts(session, 500, 500, 500, 1000);
+  // Cellular DNS+TCP+TLS routinely exceeds 1 s, so allow a few seconds.
+  WinHttpSetTimeouts(session, 2000, 2000, 1000, 4000);
   DWORD connect_retries = 0;
   WinHttpSetOption(session, WINHTTP_OPTION_CONNECT_RETRIES, &connect_retries,
                    sizeof(connect_retries));
@@ -1172,8 +1173,8 @@ std::optional<HttpResult> Request(std::string_view base_url, std::wstring_view m
       !set_option(CURLOPT_USERAGENT, "HarmonyRecomp/1") ||
       !set_option(CURLOPT_HTTPHEADER, headers) ||
       !set_option(CURLOPT_CUSTOMREQUEST, method_ascii.c_str()) ||
-      !set_option(CURLOPT_CONNECTTIMEOUT_MS, 500L) ||
-      !set_option(CURLOPT_TIMEOUT_MS, 1000L) ||
+      !set_option(CURLOPT_CONNECTTIMEOUT_MS, 3000L) ||
+      !set_option(CURLOPT_TIMEOUT_MS, 4000L) ||
       !set_option(CURLOPT_NOSIGNAL, 1L) ||
       !set_option(CURLOPT_FOLLOWLOCATION, 0L) ||
       !set_option(CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS) ||
