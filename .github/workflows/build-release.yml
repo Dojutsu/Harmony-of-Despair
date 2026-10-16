@@ -15,7 +15,7 @@ jobs:
     # scripts/build.sh + package.sh in the pinned Steam Runtime 4 carrier); the
     # runner only publishes the package BuildServer last verified. /releases is the
     # read-only mount of Full-Send-Comp/build/release-linux on BuildServer.
-    runs-on: [self-hosted, linux, x64, buildserver]
+    runs-on: [self-hosted, linux, x64]
     steps:
       - name: Collect the verified BuildServer Linux package
         shell: bash
@@ -63,7 +63,7 @@ jobs:
       - name: Check out the Harmony ReXGlue runtime line
         uses: actions/checkout@v4
         with:
-          ref: c2e263511c4b51d034c7deb0ce6dba8f98256d7c
+          ref: 2faf14cb1094862cea3b71e89b6ec4389ddb744f
           path: _deps/rexglue-sdk
           submodules: recursive
 
