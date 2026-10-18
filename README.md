@@ -1,151 +1,104 @@
 # HarmonyRecomp
 
-HarmonyRecomp is a native recompilation project for *Castlevania: Harmony of
-Despair*. This repository and its releases do not include the original game.
+HarmonyRecomp is a native recompilation of *Castlevania: Harmony of Despair*
+(Xbox 360 Live Arcade) for PC, Linux/SteamOS, Mac, Android and iPhone/iPad,
+with online co-op between all of them.
 
-## Public online multiplayer
+This repository and its releases do **not** include the original game. You
+must supply files from your own legally obtained Xbox 360 copy (see
+[Bring your own game](#bring-your-own-game)).
 
-The canonical Windows launcher configures HarmonyRecomp's production session
-directory and UDP rendezvous service automatically. It can establish a direct
-peer-to-peer connection between ordinary home networks. The
-in-game flow remains unchanged: the host creates a team, and the client uses
-Multiplayer Search, selects the host, and joins. Rendezvous coordinates the
-public discovery and gameplay endpoints; Harmony's existing UDP transport
-carries gameplay directly between the players.
+## Where the code lives
 
-The rendezvous service listens on UDP 30740. A correctly configured public
-deployment normally requires neither Tailscale nor manual forwarding of
-Harmony's UDP 30741/30742 ports. There is currently no relay fallback, so highly
-restrictive NAT or firewall configurations can still fail. A public Search may
-occasionally miss while mappings are established; retrying Search is safe.
+| Platform | Game branch | Runtime branch |
+| --- | --- | --- |
+| Windows PC and Linux / SteamOS | `master` | `rexglue-sdk/windows-private-lan` |
+| Mac (Apple Silicon) | `full-send-comp/macos` | `rexglue-sdk/macos` |
+| Android | `full-send-comp/android-port` | `rexglue-sdk/android-port` |
+| iPhone / iPad | `full-send-comp/ios` | `rexglue-sdk/ios` |
 
-The production directory is `https://hod.dojutsu.net`. It issues short-lived,
-role-specific rendezvous capabilities automatically. Host and Search obtain
-their own capabilities without attempt IDs, manual credentials, or networking
-edits. Test credentials, server secrets, and machine-specific addresses are
-never included in release artifacts. The directory/rendezvous server does not
-relay gameplay. Some carrier, hotspot, NAT, and firewall combinations can block
-direct peer traffic even when rendezvous succeeds; relay support is not
-currently implemented.
+The game code lives on the `full-send-comp/*` branches (and `master`) and the
+ReXGlue runtime on the `rexglue-sdk/*` branches. GitHub Actions builds the PC
+and Linux packages from `master` and the Mac app from `full-send-comp/macos`.
+iPhone/iPad builds are made locally with Xcode.
 
-## Optional Windows online companion
+## Downloads
 
-Double-click `Launch-Harmony.bat` to open the HarmonyRecomp Launcher after setup.
-It shows the current player name, Hosting/Joined/Offline status, public host
-invite code with Copy Code, and the current party roster. Play and Join by Code
-use the existing launcher; close a running game before using either action.
-Settings opens the existing launcher settings for player name and game
-language. Changes apply on the next launch and preserve the player XUID.
+Ready-to-play download packages for each platform will be available on the
+Releases page. You still need your own game files (see below).
 
-Closing this window does not close the game or change a session. Harmony works
-without the companion. If several game instances are running, select a PID in
-the window; their parties are never merged. `Player ...XXXX` means the runtime
-does not know that member's name. Earlier guests may lack later guests' names;
-no additional name-distribution networking is implemented.
+## Launcher
 
-The window reads bounded, process-specific JSON files under
-`%LOCALAPPDATA%\HarmonyRecomp\online-status-<pid>.json`. It checks process
-creation time as well as PID, so crash leftovers are not displayed as live.
-The existing `--show-invite` action retains its legacy `active-invite-code.txt`
-for compatibility; the new companion reads only unified status snapshots.
+Every platform opens to the same simple start screen: a player name box, one
+**Play** button, and an invite-code box for joining a friend. Game-file setup
+appears only until your game files are installed.
+
+On PC, start the game with `Harmony of Despair.exe`. It runs setup the first
+time, then opens the start screen, with no console window. Windows may say
+"Windows protected your PC" the first time because the launcher isn't signed;
+click **More info**, then **Run anyway**. `Launch-Harmony.bat` still works as a
+backup.
+
+Touch-screen devices get on-screen controls: a D-pad in menus, a joystick that
+appears where your thumb lands during stages, optional vibration, and a camera
+zoom button.
 
 ## Bring your own game
 
-You must provide files from your own legally obtained Xbox 360 copy. The
-companion importer accepts a folder containing the original base-game and TU2
-STFS/LIVE packages, with any optional owned DLC packages, or a complete
-already-extracted TU2 directory as an advanced fallback.
+You need these files from your own copy:
+
+- the base Arcade package (Title ID `58410A7A`, Media ID `6480C08F`, version
+  `0.0.1.4`)
+- the matching Title Update 2 package (to version `0.0.2.4`)
+- any DLC packages you own (optional)
+
+File names do not matter; the importer identifies packages by their Xbox
+metadata. Other base versions and title updates are not supported yet.
 
 ### Windows first run
 
 1. Download and extract `HarmonyRecomp-windows-amd64.zip` to a normal writable
-   folder. Do not place original game data inside that folder.
-2. Run `Launch-Harmony.bat`.
-3. On first launch, select the folder containing your legally owned Xbox 360
-   Harmony of Despair content files.
-4. HarmonyRecomp identifies the compatible base game and TU2 update by package
-   metadata, extracts them transactionally into
-   `%LOCALAPPDATA%\HarmonyRecomp\game-data`, and installs detected DLC.
-5. Enter a player name when prompted. Choose **Play**, **Join by Code**, or
-   **Settings** in the launcher window. To join a friend's lobby, type their
-   six-character invite code into the window and click **Join by Code**. Let
-   Harmony reach the main menu; the existing invite flow then attempts to join.
-   Future double-click launches reuse the managed game data, player name, and
-   identity, and open the same launcher window without a folder selection.
+   folder. Do not put the original game files inside it.
+2. Double-click `Harmony of Despair.exe` (`Launch-Harmony.bat` still works).
+   On first open Windows may say "Windows protected your PC"; click
+   **More info**, then **Run anyway**.
+3. The first time, choose the folder with your Harmony of Despair content
+   files. The game is checked and installed into
+   `%LOCALAPPDATA%\HarmonyRecomp\game-data`, along with any DLC found.
+4. Enter a player name and press **Play**, or type a friend's invite code to
+   join them.
 
-First launch also asks for a player name. Harmony stores the 1-15 character
-name beside the persistent player XUID in
-`%LOCALAPPDATA%\HarmonyRecomp\launcher-profile.cfg`. Change the name or game
-language later without changing the XUID by running:
+Later launches skip setup and go straight to the start screen.
+`"Harmony of Despair.exe" --setup` re-imports from a different folder;
+`"Harmony of Despair.exe" --configure` changes the player name or language
+(English, Japanese, German, French, Spanish or Italian).
 
-```text
-Launch-Harmony.bat --configure
-```
+Your player name and a random player ID are stored in
+`%LOCALAPPDATA%\HarmonyRecomp\launcher-profile.cfg`. The ID is not based on
+your username, machine, network address or hardware, and stays the same across
+updates.
 
-The settings window offers English, Japanese, German, French, Spanish, and
-Italian. Its “Use default (English)” choice leaves the language unset and lets
-ReXGlue keep its current default. A selected language is saved as
-`HARMONY_USER_LANGUAGE=1` through `6` in the launcher profile and takes effect
-on the next game launch. Existing profiles without this line remain unchanged;
-the launcher passes no language override for them.
+### Other platforms
 
-Advanced launcher actions can also be invoked from a terminal. To open the
-interactive invite prompt directly, run:
+Mac, Android and iPhone/iPad builds show the same first-run setup inside the
+app: pick the folder with your game files (on mobile, copy them to the device
+first) and the app installs them. Linux/SteamOS notes are in
+[docs/LINUX_STEAMOS_STARTUP.md](docs/LINUX_STEAMOS_STARTUP.md) and
+[docs/LINUX_STEAM_LAUNCH.md](docs/LINUX_STEAM_LAUNCH.md).
 
-```text
-Launch-Harmony.bat --join-code
-```
+## Game-data location
 
-This batch command opens the interactive code prompt. To supply a code without
-the prompt, open PowerShell in the extracted HarmonyRecomp folder and run:
+- Windows: `%LOCALAPPDATA%\HarmonyRecomp\game-data`
+- Linux: `$XDG_DATA_HOME/HarmonyRecomp/game-data` or
+  `~/.local/share/HarmonyRecomp/game-data`
+- Mac: `~/Library/Application Support/HarmonyRecomp`
 
-```powershell
-.\Join-Harmony.ps1 E6CK9X
-```
+Delete that folder to uninstall the game data; setup runs again on next
+launch.
 
-If PowerShell's script policy blocks that command, open a process-scoped shell
-with `powershell.exe -NoProfile -ExecutionPolicy Bypass` and run the same
-`Join-Harmony.ps1` command there. This does not change the machine's policy.
+## Advanced import
 
-The noninteractive entry point accepts exactly one six-character code from
-`ABCDEFGHJKMNPQRSTUVWXYZ23456789` (lowercase is normalized). Do not append a
-code to `Launch-Harmony.bat --join-code`: batch-file argument expansion cannot
-safely validate arbitrary hostile text before `cmd.exe` interprets it. The
-PowerShell entry point validates the code before forwarding it to the existing
-join-by-code launcher flow. A host can display the active code in
-a separate launcher message with `Launch-Harmony.bat --show-invite`. This
-reports `No active hosted session` until public directory registration has
-completed.
-
-The source folder must contain the owned base Arcade package and its matching
-TU2 installer package. DLC is optional and never prevents base/TU2 setup.
-Package filenames do not matter: identification uses Xbox content type, Title
-ID, Media ID, version metadata, and required package contents. The importer
-stages and validates a replacement before promotion, so a failed import does
-not replace a working installation.
-
-Run `Launch-Harmony.bat --setup` to choose and safely re-import a different
-source. Deleting `%LOCALAPPDATA%\HarmonyRecomp\game-data` also triggers setup on
-the next launch. The launcher always passes this managed directory explicitly
-as both `--game_data_root` and `--update_data_root`; it never silently launches
-against an incomplete base-only installation.
-
-The optional `harmonyrecomp-user.example.cfg` contains advanced runtime
-settings only. Ordinary setup does not require copying or editing a config.
-`harmonyrecomp-user.cfg` remains ignored by Git because it may contain local
-identity settings.
-
-On first launch, a random non-secret player XUID is stored in
-`%LOCALAPPDATA%\HarmonyRecomp\launcher-profile.cfg`. It remains stable across
-normal launches, reimports, and package updates so independent installations do
-not share one default multiplayer identity. It is not derived from a username,
-machine identifier, network address, or hardware identifier. An explicit
-`HARMONY_USER_XUID` environment value or advanced user config overrides it.
-
-### Advanced import
-
-The launcher is the normal setup path. The companion importer also exposes its
-container discovery and aggregate operation directly:
+The launcher is the normal path. The importer can also be run directly:
 
 ```powershell
 .\harmonyrecomp-import.exe --inspect-containers "D:\Owned Harmony Content"
@@ -153,102 +106,36 @@ container discovery and aggregate operation directly:
 .\harmonyrecomp-import.exe --verify
 ```
 
-An already extracted complete TU2 hierarchy remains supported as an advanced
-fallback. Ordinary users do not need to extract XEX, XEXP, DLLP, or DLC files
-manually.
+Imports are staged and verified before they replace a working installation,
+so a failed import never breaks an existing one. An already extracted
+complete TU2 folder is accepted as a fallback.
 
-The importer stores verified private data under
-`%LOCALAPPDATA%\HarmonyRecomp\game-data`. `Launch-Harmony.bat` invokes the same
-importer with TU2 validation and atomic replacement enabled.
-
-For development, bypass the managed installation with an explicit complete
-game-data directory:
+For development, point the game at a complete extracted game-data folder:
 
 ```powershell
 .\harmonyrecomp.exe --game_data_root="D:\path\to\complete-game-data" --license_mask=1
 ```
 
-The explicit `--game_data_root` always wins. It is intentionally a development
-escape hatch and does not mark or modify the selected directory.
+An explicit `--game_data_root` always wins over the per-user default.
+`harmonyrecomp-user.example.cfg` lists advanced runtime settings; ordinary
+setup never needs it.
 
-Run:
+## What is private and what is redistributable
 
-```text
-harmonyrecomp-import <package-or-directory>
-```
-
-The importer identifies the title from Xbox 360 metadata, validates the game
-executable and six player modules, copies or extracts the data locally, verifies
-the completed installation, and never uploads anything. It preserves the
-complete source hierarchy; the seven executable files are validation anchors,
-not a seven-file runtime package. A source containing only those seven private
-build inputs is rejected as incomplete gameplay data.
-
-The currently supported executable chain is:
-
-- Title ID `58410A7A`, Media ID `6480C08F`
-- base game `0.0.1.4`
-- matching TU2 patch to `0.0.2.4`
-
-Other legitimate base versions and title updates remain unsupported until they
-are individually tested and added to the compatibility table.
-
-## Private game-data location
-
-Normal launches automatically use:
-
-- Windows: `%LOCALAPPDATA%\HarmonyRecomp\game-data`
-- Linux: `$XDG_DATA_HOME/HarmonyRecomp/game-data`, or
-  `~/.local/share/HarmonyRecomp/game-data`
-
-Verify an installation without launching:
-
-```text
-harmonyrecomp-import --verify
-```
-
-To import again, rerun with `--force`. The replacement is staged and verified
-before the previous installation is removed. To uninstall the copyrighted game
-data, remove the `game-data` directory above.
-
-Developers can preserve existing workflows by passing:
-
-```text
-harmonyrecomp --game_data_root=/path/to/extracted/game
-```
-
-An explicit override always wins over the per-user default.
-
-## What is private and what is redistributable?
-
-The original `default.xex`, Xbox 360 player DLLs, and gameplay assets remain
-private user-owned data. They are required at runtime because ReXGlue loads the
-original executable/module images for Xbox metadata, data sections, imports,
-and the virtual game filesystem.
-
-The native HarmonyRecomp executable, recompiled `.so`/`.dll` module libraries,
-and ReXGlue runtime libraries are redistributable project output. GitHub
-Actions packages only an explicit platform allowlist and fails if any `.xex`,
-original player DLL, or other unapproved executable/DLL appears.
-
-The exact minimum gameplay-asset subset has not been derived yet. Until the
-authoritative complete extraction is audited, the importer deliberately keeps
-the complete package hierarchy instead of guessing or discarding files. A
-verified-install marker is written only in a staging directory after identity,
-version, extraction, and executable-layer validation succeed; that marked tree
-is re-verified before it replaces the active installation.
+The original `default.xex`, the Xbox 360 player DLLs and the game assets stay
+private, user-owned data; the runtime loads them from your installation. The
+native HarmonyRecomp executable, the recompiled module libraries and the
+ReXGlue runtime are project output and can be shared. Release packaging uses
+an explicit allowlist and fails if any original game executable or DLL slips
+in. HarmonyRecomp never downloads or uploads game data.
 
 ## Troubleshooting
 
-- **Wrong game selected:** confirm the package is *Castlevania: Harmony of
+- **Wrong game selected:** make sure the package is *Castlevania: Harmony of
   Despair*, not another Castlevania title.
-- **Unsupported version:** keep your files; support can be added without
-  requiring an exact hash match.
-- **Missing file:** re-extract or re-import from the complete original package.
-- **Destination not writable or disk full:** free space and check permissions,
-  then rerun the importer.
-- **Custom setup:** use `--destination <directory>` when importing and launch
-  with the matching `--game_data_root=<directory>`.
+- **Unsupported version:** keep your files; support can be added later.
+- **Missing file:** re-import from the complete original package.
+- **Disk full or folder not writable:** free space or check permissions, then
+  run setup again.
 
-Do not seek replacement files from unofficial download sites. HarmonyRecomp
-does not download or transmit game data.
+Do not get replacement files from unofficial download sites.
