@@ -63,7 +63,7 @@ jobs:
       - name: Check out the Harmony ReXGlue runtime line
         uses: actions/checkout@v4
         with:
-          ref: 2faf14cb1094862cea3b71e89b6ec4389ddb744f
+          ref: badc1515385f2921aec63c41da28d9747b5916a8
           path: _deps/rexglue-sdk
           submodules: recursive
 

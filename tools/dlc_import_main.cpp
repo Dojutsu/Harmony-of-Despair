@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
     std::string command = argv[1];
     
     DlcManager manager(
-        "/srv/ai/workspaces/hermes/HarmonyRecomp/dlc_content",  // Default content root
+        "dlc_content",  // Default content root (relative to the working directory)
         0x58410A7A  // Harmony of Despair title ID
     );
     
