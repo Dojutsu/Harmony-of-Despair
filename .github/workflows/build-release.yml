@@ -97,6 +97,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build --preset win-amd64-relwithdebinfo --target sha256_tests --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build --preset win-amd64-relwithdebinfo --target harmony_launcher --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Stage Windows application-local runtime
         shell: pwsh
@@ -203,7 +205,8 @@ jobs:
           $required = @(
             'harmonyrecomp.exe',
             'harmonyrecomp-import.exe',
-            'harmonyrecomp-dlc-import.exe'
+            'harmonyrecomp-dlc-import.exe',
+            'Harmony of Despair.exe'
           ) + $moduleNames + @(
             'rexgpu-xenosrd.dll',
             'rexruntimerd.dll',

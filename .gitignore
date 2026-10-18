@@ -10,3 +10,6 @@ harmonyrecomp-user.cfg
 /dist/
 __pycache__/
 *.pyc
+
+# Launcher icon art stays local
+tools/launcher/Harmony.ico

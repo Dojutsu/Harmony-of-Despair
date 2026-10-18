@@ -85,6 +85,21 @@ add_dependencies(harmonyrecomp harmonyrecomp-dlc-import)
 add_executable(stfs_inspect tools/stfs_inspect.cpp)
 target_link_libraries(stfs_inspect PRIVATE rex::runtime)
 
+# Release launcher: starts the PowerShell launcher window without a console.
+if(WIN32)
+    enable_language(RC)
+    add_executable(harmony_launcher WIN32
+        tools/launcher/harmony_launcher.cpp
+        tools/launcher/harmony_launcher.rc
+    )
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/launcher/Harmony.ico")
+        set_property(SOURCE tools/launcher/harmony_launcher.rc
+            APPEND PROPERTY COMPILE_DEFINITIONS HARMONY_LAUNCHER_ICON)
+    endif()
+    set_target_properties(harmony_launcher PROPERTIES OUTPUT_NAME "Harmony of Despair")
+    target_link_libraries(harmony_launcher PRIVATE shell32 user32)
+endif()
+
 include(CTest)
 enable_testing()
 # Generated call sites must retain the authoritative host-owned dispatch path.
