@@ -139,3 +139,26 @@ in. HarmonyRecomp never downloads or uploads game data.
   run setup again.
 
 Do not get replacement files from unofficial download sites.
+
+## Thanks
+
+HarmonyRecomp stands on the work of these projects:
+
+- [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) by Tom Clay and the
+  ReXGlue contributors. The runtime branches (`rexglue-sdk/*`) are a fork of
+  ReXGlue, which turns Xbox 360 code into native C++. BSD 3-Clause license
+  (see the `LICENSE` file on those branches).
+- [Xenia](https://github.com/xenia-project/xenia) by Ben Vanik and the Xenia
+  project contributors. Much of ReXGlue is derived from the Xenia Xbox 360
+  emulator. BSD license.
+- [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) and
+  [rexdex's recompiler](https://github.com/rexdex/recompiler), which pioneered
+  static recompilation of Xbox 360 games and inspired ReXGlue's approach.
+- The open-source libraries the runtime includes, such as SDL, Vulkan, MoltenVK,
+  FFmpeg, Dear ImGui, fmt, spdlog and toml++. Each keeps its own license; see
+  `thirdparty/` on the runtime branches.
+- Stephan Brumme's SHA-256 code in `thirdparty/crypto`
+  (see http://create.stephan-brumme.com/disclaimer.html).
+
+Castlevania: Harmony of Despair belongs to Konami. This project is not
+affiliated with or endorsed by Konami or Microsoft.
