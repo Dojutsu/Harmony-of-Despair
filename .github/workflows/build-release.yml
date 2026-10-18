@@ -150,7 +150,7 @@ jobs:
         shell: pwsh
         run: |
           $build = 'out/build/win-amd64-relwithdebinfo'
-          cmake --build --preset win-amd64-relwithdebinfo --target game_data_tests sha256_tests dlc_header_tests --parallel
+          cmake --build --preset win-amd64-relwithdebinfo --target game_data_tests sha256_tests dlc_header_tests chapter_unlock_tests --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest --test-dir $build --verbose --output-on-failure
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
