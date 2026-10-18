@@ -24,8 +24,29 @@ iPhone/iPad builds are made locally with Xcode.
 
 ## Downloads
 
-Ready-to-play download packages for each platform will be available on the
-Releases page. You still need your own game files (see below).
+Ready-to-play packages for every platform are on the
+[Releases page](https://github.com/Dojutsu/Harmony-of-Despair/releases). You
+still need your own game files (see below).
+
+### Checking your download
+
+Each file's SHA-256 hash is listed below. If the hash of the file you
+downloaded matches, the file is complete and unchanged.
+
+- Windows: open PowerShell in the download folder and run
+  `Get-FileHash .\HarmonyRecomp-windows-amd64.zip` (use the file's name).
+- Mac and Linux: run `shasum -a 256 <file>` or `sha256sum <file>` in a
+  terminal.
+
+Release [v2026.10.18](https://github.com/Dojutsu/Harmony-of-Despair/releases/tag/v2026.10.18):
+
+| Device | File | SHA-256 |
+| --- | --- | --- |
+| Windows PC | `HarmonyRecomp-windows-amd64.zip` | `bbad766c8fc3abff7e91bc5589791fa01a1eec775925ff4683c490a18b9669a4` |
+| Linux / SteamOS | `HarmonyRecomp-linux-amd64.tar.gz` | `30d0dc8f9bcfb611b4d510f3ab6515a1d0346ff2e63448b726ac8f99ec4c4b9f` |
+| Mac (Apple Silicon) | `HarmonyRecomp-macos-arm64.zip` | `c7f720ad1503446f9b7e53c705c19aa7779f93546ad7276d9c5222eea110b0d1` |
+| Android | `HarmonyRecomp-android-0.43.apk` | `28bd039983863ac344c4a978efe5425e62239d52b840bfdf203d9b603eb12861` |
+| iPhone / iPad | `HarmonyRecomp-ios-unsigned.ipa` | `e81a444132c153548cbec508315d29ee04748a4b8129f6879c0e2c044f94ad3f` |
 
 ## Launcher
 
