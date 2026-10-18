@@ -1,13 +1,22 @@
 name: Attach builds to a release
 
-# Run by hand after the builds are green: copies the packages from finished
-# workflow runs onto an existing (draft or published) release.
+# Run by hand after the builds are green: creates the release (notes from
+# .github/release-notes/<tag>.md) if it doesn't exist yet, then copies the
+# packages from finished workflow runs and an optional iOS release onto it.
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag the packages go on (the release must exist)
+        description: Release tag the packages go on
         required: true
+      title:
+        description: Release title (used only when the release is created)
+        required: false
+        default: ''
+      ios_tag:
+        description: Release tag whose iPhone/iPad .ipa is copied over (optional)
+        required: false
+        default: ''
       build_run:
         description: Run id of "Build and release" (Windows and Linux packages)
         required: true
@@ -24,6 +33,11 @@ jobs:
   attach:
     runs-on: ubuntu-latest
     steps:
+      - name: Check out the release notes
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/release-notes
+
       - name: Download the Windows and Linux packages
         uses: actions/download-artifact@v4
         with:
@@ -40,6 +54,14 @@ jobs:
           github-token: ${{ github.token }}
           path: dist
           merge-multiple: true
+
+      - name: Copy the iPhone/iPad package
+        if: inputs.ios_tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IOS_TAG: ${{ inputs.ios_tag }}
+        run: gh release download "$IOS_TAG" -p '*.ipa' -D dist -R "$GITHUB_REPOSITORY"
 
       - name: Refuse private game inputs
         shell: bash
@@ -65,6 +87,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
+          TITLE: ${{ inputs.title }}
         run: |
           set -euo pipefail
+          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            notes=".github/release-notes/$TAG.md"
+            test -f "$notes"
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "${TITLE:-$TAG}" \
+              --notes-file "$notes" -R "$GITHUB_REPOSITORY"
+          fi
           gh release upload "$TAG" dist/* --clobber -R "$GITHUB_REPOSITORY"
