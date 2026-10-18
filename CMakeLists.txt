@@ -48,6 +48,7 @@ set(HARMONYRECOMP_SOURCES
     src/game_data.cpp
     src/scene_cache_hook.cpp
     src/team_search_diag_hooks.cpp
+    src/chapter_unlock_hooks.cpp
 )
 
 if(WIN32)
@@ -180,6 +181,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME scene-cache-hook COMMAND scene_cache_hook_tests)
     set_tests_properties(scene-cache-hook PROPERTIES LABELS "title;scene" TIMEOUT 30)
 endif()
+# DLC chapters chained after Chapter 6: pure rule tests over a fake guest image.
+add_executable(chapter_unlock_tests tests/chapter_unlock_test.cpp)
+target_include_directories(chapter_unlock_tests PRIVATE src)
+add_test(NAME chapter-unlock COMMAND chapter_unlock_tests)
+set_tests_properties(chapter-unlock PROPERTIES LABELS "title;chapters" TIMEOUT 30)
+
 add_executable(game_data_tests
     tests/game_data_tests.cpp
     src/game_data.cpp

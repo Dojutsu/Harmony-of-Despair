@@ -63,7 +63,7 @@ std::vector<std::string> BuildArguments(const std::vector<std::string>& java_arg
   const std::string data_root = (game_root / "game-data").string();
   if (!has_flag("game_data_root")) args.push_back("--game_data_root=" + data_root);
   if (!has_flag("update_data_root")) args.push_back("--update_data_root=" + data_root);
-  if (!has_flag("user_name")) args.emplace_back("--user_name=Thor");
+  if (!has_flag("user_name")) args.emplace_back("--user_name=Player");
   if (!has_flag("log_flush_interval")) args.emplace_back("--log_flush_interval=1");
   // Arm Mali GPUs (Pixel, many Samsung phones) have no geometry shaders or
   // wireframe fill; the runtime has fallback paths for both (as on macOS), so

@@ -115,7 +115,7 @@ public class LauncherActivity extends Activity {
         nameField.setSingleLine(true);
         nameField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         nameField.setFilters(new InputFilter[] {new InputFilter.LengthFilter(15)});
-        nameField.setText(prefs.getString(PREF_NAME, "Thor"));
+        nameField.setText(prefs.getString(PREF_NAME, "Player"));
         nameField.setTextColor(Color.WHITE);
         nameField.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
         styleBox(nameField);
