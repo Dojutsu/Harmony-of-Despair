@@ -1,0 +1,70 @@
+name: Attach builds to a release
+
+# Run by hand after the builds are green: copies the packages from finished
+# workflow runs onto an existing (draft or published) release.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag the packages go on (the release must exist)
+        required: true
+      build_run:
+        description: Run id of "Build and release" (Windows and Linux packages)
+        required: true
+      mac_run:
+        description: Run id of "Build Mac version" (optional)
+        required: false
+        default: ''
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the Windows and Linux packages
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.build_run }}
+          github-token: ${{ github.token }}
+          path: dist
+          merge-multiple: true
+
+      - name: Download the Mac package
+        if: inputs.mac_run != ''
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.mac_run }}
+          github-token: ${{ github.token }}
+          path: dist
+          merge-multiple: true
+
+      - name: Refuse private game inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la dist
+          cat dist/*.receipt.json 2>/dev/null || true
+          for zip in dist/*.zip; do
+            if unzip -Z1 "$zip" | grep -i -E '\.(xex|xexp|dllp)$|savedata\.dat$|\.hpli$|default\.xex$' | grep -q .; then
+              echo "Refusing to publish private game inputs in $zip" >&2
+              exit 1
+            fi
+          done
+          for tarball in dist/*.tar.gz; do
+            if tar -tzf "$tarball" | grep -i -E '\.(xex|xexp|dllp|dll)$|savedata\.dat$|\.hpli$' | grep -q .; then
+              echo "Refusing to publish private game inputs in $tarball" >&2
+              exit 1
+            fi
+          done
+
+      - name: Attach to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" dist/* --clobber -R "$GITHUB_REPOSITORY"
